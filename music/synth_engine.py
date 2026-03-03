@@ -41,7 +41,9 @@ class Voice:
         # Second-pole states for the resonance cascade (separate from rank 2 oscillator states)
         self.filter_state_lpf1b = 0.0
         self.filter_state_lpf2b = 0.0
-        self.velocity = 1.0
+        self.velocity = 1.0  # Current smoothed velocity (used in envelope calculations)
+        self.velocity_current = 1.0
+        self.velocity_target = 1.0
         self.release_velocity = 0.5
         self.dc_blocker_x = 0.0
         self.dc_blocker_y = 0.0
@@ -80,6 +82,26 @@ class Voice:
         # the DC blocker's settling transient is hidden under the onset ramp.
         self.onset_ms: float = 3.0
 
+        # FIR history buffers for polyphase oversampling: hold the last (N_taps-1)=30
+        # oversampled samples from the previous buffer so convolution uses actual past
+        # samples instead of zero-padding at buffer boundaries.  Zero-padding creates
+        # systematic edge artefacts that become large at note transitions.
+        # Separate buffers per oscillator rank so each rank's history is independent.
+        self._oversample_history:      np.ndarray = np.zeros(30, dtype=np.float32)  # rank 1
+        self._oversample_history_r2:   np.ndarray = np.zeros(30, dtype=np.float32)  # rank 2
+        self._oversample_history_sine: np.ndarray = np.zeros(30, dtype=np.float32)  # sine sub
+
+        # Last mono-mixed output sample from the most recent rendered buffer (after all
+        # processing: FIR, envelope, onset ramp, DC blocker, pan/gain).  Updated every
+        # buffer.  Used by the soft-trigger crossfade to ensure the FIRST sample of a new
+        # buffer is identical to the LAST sample of the previous one, hiding FIR
+        # boundary transients that arise when frequency changes at a note transition.
+        self.last_output_sample: float = 0.0
+        # Number of crossfade samples remaining from a soft-trigger transition.
+        # The render loop blends from last_output_sample toward the new output over
+        # this many samples (typically 4 = 1 audio sample per oversampled step).
+        self.crossfade_samples: int = 0
+
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
 
@@ -94,7 +116,8 @@ class Voice:
         self.midi_note = midi_note
         self.base_frequency = frequency
         self.frequency = frequency
-        self.velocity = velocity
+        # Use velocity_target for smoothing; velocity_current will ramp toward it
+        self.velocity_target = velocity
         self.note_active = True
         self.is_releasing = False
         self.envelope_time = 0.0
@@ -115,6 +138,15 @@ class Voice:
             self.filter_state_svf2_lp = self.filter_state_svf2_bp = 0.0
             self.dc_blocker_x = self.dc_blocker_y = 0.0
             # Note: self.phase and self.sine_phase are NOT reset here (Free-Running)
+            # Clear FIR history only when starting from true silence.  For voice-steal
+            # or legato transitions (was_silent=False), preserve history so the FIR
+            # filter sees actual past samples and transitions smoothly from the old
+            # frequency rather than jumping from zeros — zeroing history at a non-silent
+            # transition is the primary cause of boundary-delta click artifacts.
+            if was_silent:
+                self._oversample_history[:] = 0.0
+                self._oversample_history_r2[:] = 0.0
+                self._oversample_history_sine[:] = 0.0
 
     def release(self, attack: float, decay: float, sustain: float, intensity: float, release_velocity: float = 0.5):
         if self.note_active:
@@ -146,6 +178,9 @@ class Voice:
         self.last_envelope_level = 0.0
         self.sine_phase = 0.0
         self.onset_samples = 0
+        self._oversample_history[:] = 0.0
+        self._oversample_history_r2[:] = 0.0
+        self._oversample_history_sine[:] = 0.0
 
 
 class SynthEngine:
@@ -161,6 +196,7 @@ class SynthEngine:
 
         self.waveform = "sine"
         self.octave = 0
+        self.noise_level = 0.0
         self.octave_enabled = True
         self.rank2_enabled = False
         self.rank2_waveform = "sawtooth"
@@ -231,9 +267,9 @@ class SynthEngine:
         self._arp_gate_samples:   int           = int(60.0 / 120.0 * self.sample_rate * 0.5)
         self._arp_direction:      int           = 1   # +1 or -1 for up_down
 
-        self.amp_level = 0.75
-        self.amp_level_target = 0.75
-        self.amp_level_current = 0.75
+        self.amp_level = 0.95
+        self.amp_level_target = 0.95
+        self.amp_level_current = 0.95
         self.amp_smoothing = 0.95
         self.master_gain_current = 1.0
         self.master_gain_target = 1.0
@@ -253,6 +289,20 @@ class SynthEngine:
         self.intensity_current   = 0.8
         self.intensity_target    = 0.8
         self.intensity_smoothing = 0.90
+        self.noise_level_current = 0.0
+        self.noise_level_target  = 0.0
+        self.noise_level_smoothing = 0.90
+        self.key_tracking_current = 0.5
+        self.key_tracking_target  = 0.5
+        self.key_tracking_smoothing = 0.90
+        self.voice_type = "poly"  # "mono", "poly", "unison"
+        self.mono_voice_index = 0  # For mono mode, which voice to use
+        self.unison_detune = 8.0   # Cents spread for unison mode (each voice detuned within ±unison_detune)
+        self._held_notes_ordered: list = []  # Ordered note stack for MONO/UNISON last-note priority (list of (note, velocity))
+        self._held_notes_vel: dict = {}      # note -> velocity (0-1) for last-note priority resume
+        self.velocity_current = 1.0
+        self.velocity_target = 1.0
+        self.velocity_smoothing = 0.92  # Smooth velocity changes to prevent attack peaks
 
         # Anti-click ramp after filter_mode switch (~10.7 ms at 48 kHz)
         self._filter_ramp_remaining = 0
@@ -265,6 +315,19 @@ class SynthEngine:
         self._mute_ramp_remaining = 0   # samples of fade-out still pending
         self._mute_ramp_fadein    = 0   # samples of fade-in still pending
         self._MUTE_RAMP_LEN       = 384
+
+        # Engine-level inter-buffer crossfade: eliminates clicks when MONO/UNISON
+        # note transitions change frequency mid-buffer.  The FIR downsampler sees a
+        # frequency step which creates a 1-2 sample boundary transient.  We store the
+        # last post-tanh output sample every buffer and, when a soft trigger has
+        # occurred, cross-fade from those stored values toward the new output over
+        # _TRANSITION_XF_SAMPLES samples at the start of the transition buffer.
+        # Post-tanh storage guarantees exact amplitude continuity regardless of
+        # drive / gain_ramp changes between buffers.
+        self._last_output_L: float = 0.0
+        self._last_output_R: float = 0.0
+        self._transition_xf_remaining: int = 0  # samples left in active crossfade
+        self._TRANSITION_XF_SAMPLES:  int = 8   # 8 smp ≈ 0.17ms: inaudible at 48kHz
 
         # FX tail drain counter — keeps the audio callback alive (not early-returning
         # silence) while Delay / Chorus ring buffers still have audible wet content.
@@ -281,9 +344,19 @@ class SynthEngine:
         self.pitch_bend_smoothing = 0.85
         self.mod_wheel = 0.0
 
+        # ── Oversampling configuration (Phase 3) ──────────────────────────────
+        # 4× internal oscillator oversampling for alias-free sawtooth/square/triangle
+        self.OVERSAMPLE_FACTOR = 4              # Generate at 192 kHz, downsample to 48 kHz
+        self.ENABLE_OVERSAMPLING = True         # Toggle for performance testing
+        self.OVERSAMPLE_SAMPLE_RATE = 48000 * self.OVERSAMPLE_FACTOR  # 192 kHz
+        self._downsample_filter_taps = None     # Pre-computed FIR filter (initialized below)
+
         self.voices: List[Voice] = [Voice(self.sample_rate, i) for i in range(self.num_voices)]
         self.held_notes: set = set()
         self.midi_event_queue = queue.Queue()
+
+        # Initialize polyphase downsampling filter for oversampling
+        self._create_polyphase_filter()
 
         if AUDIO_AVAILABLE and pyaudio is not None:
             try:
@@ -487,6 +560,55 @@ class SynthEngine:
             if v.base_frequency is not None and (v.note_active or v.is_releasing):
                 v.frequency = v.base_frequency * (2.0 ** (self.pitch_bend / 12.0))
 
+    def _create_polyphase_filter(self):
+        """ABOUTME: Create 31-tap Hamming-windowed sinc FIR lowpass filter for 4× downsampling.
+        ABOUTME: Cutoff at 20 kHz with > 60dB attenuation above Nyquist."""
+        N = 31  # Tap count (odd for symmetry)
+        n = np.arange(N) - N // 2  # Center at 0: [-15, -14, ..., 0, ..., 14, 15]
+
+        # Normalized cutoff frequency: 20 kHz / (192000 Hz / 2) = 0.208
+        # This ensures the filtered signal has no content above 20 kHz at 192 kHz sampling
+        normalized_cutoff = 20000.0 / (192000.0 / 2.0)
+
+        # Sinc function: sin(πx) / (πx), with special handling at x=0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            h = np.sinc(2.0 * normalized_cutoff * n)
+            h[N // 2] = 2.0 * normalized_cutoff  # Direct evaluation at x=0
+
+        # Apply Hamming window to reduce Gibbs side-lobes
+        window = np.hamming(N)
+        h_windowed = h * window
+
+        # Normalize so passband gain is ~1.0 at DC
+        self._downsample_filter_taps = (h_windowed / np.sum(h_windowed)).astype(np.float32)
+
+    def _downsample_polyphase_signal(self, oversampled: np.ndarray, downsample_factor: int = 4,
+                                     history: np.ndarray = None) -> np.ndarray:
+        """ABOUTME: Polyphase downsampling: convolve with lowpass filter, decimate by factor.
+        ABOUTME: Input: oversampled array at 192 kHz, Output: decimated array at 48 kHz."""
+        if not self.ENABLE_OVERSAMPLING or self._downsample_filter_taps is None:
+            return oversampled[:len(oversampled) // downsample_factor]
+
+        expected_len = len(oversampled) // downsample_factor
+        n_taps = len(self._downsample_filter_taps)
+        history_len = n_taps - 1   # 30 samples for a 31-tap filter
+
+        if history is not None:
+            # Prepend the caller-supplied FIR history so each buffer boundary uses
+            # actual past samples instead of zero-padding.  mode='valid' produces
+            # exactly len(oversampled) output samples with no edge artefacts.
+            extended = np.concatenate([history, oversampled])
+            filtered  = np.convolve(extended, self._downsample_filter_taps, mode='valid')
+            # Update history in-place with the last history_len samples of THIS buffer
+            history[:] = oversampled[-history_len:]
+        else:
+            # Fallback (no history supplied): original zero-padding behaviour
+            filtered = np.convolve(oversampled, self._downsample_filter_taps, mode='same')
+
+        # Decimate: take every Nth sample (phase 0 — indices 0, 4, 8, …)
+        decimated = filtered[::downsample_factor]
+        return decimated[:expected_len].astype(np.float32)
+
     def _generate_pink_noise(self, num_samples: int) -> np.ndarray:
         """ABOUTME: Generate pink noise using Voss-McCartney algorithm (fast vectorized).
         ABOUTME: Approximates 1/f spectrum with minimal CPU overhead."""
@@ -517,7 +639,7 @@ class SynthEngine:
 
         return pink.astype(np.float32)
 
-    def _generate_waveform(self, waveform: str, frequency: float, num_samples: int, start_phase: float) -> tuple[np.ndarray, float]:
+    def _generate_waveform(self, waveform: str, frequency: float, num_samples: int, start_phase: float, oversample_factor: int = 1) -> tuple[np.ndarray, float]:
         # Handle noise waveforms first (they don't use frequency/phase)
         if waveform == "noise_white":
             samples = np.random.randn(num_samples).astype(np.float32) * 0.5
@@ -527,8 +649,12 @@ class SynthEngine:
             return samples, start_phase
 
         # Regular pitched waveforms use phase accumulation
-        phase_inc = 2 * np.pi * frequency / self.sample_rate
-        t = np.arange(num_samples)
+        # Support 4× oversampling: generate at 192 kHz if oversample_factor=4
+        effective_sample_rate = self.sample_rate * oversample_factor
+        effective_num_samples = num_samples * oversample_factor
+
+        phase_inc = 2 * np.pi * frequency / effective_sample_rate
+        t = np.arange(effective_num_samples)
         phases = start_phase + t * phase_inc
         t_norm = (phases / (2 * np.pi)) % 1.0
         if waveform == "pure_sine":
@@ -543,9 +669,63 @@ class SynthEngine:
         elif waveform == "square":
             samples = np.where(np.sin(phases) >= 0, 1.0, -1.0)
         else:
+            # Sawtooth (default)
             samples = 2.0 * t_norm - 1.0
-        final_phase = (start_phase + num_samples * phase_inc) % (2 * np.pi)
+
+        # Apply PolyBLEP anti-aliasing to band-limited waveforms
+        if waveform in ["sawtooth", "square", "triangle"]:
+            samples = self._apply_polyblep(waveform, samples, phases, frequency, effective_num_samples, effective_sample_rate)
+
+        final_phase = (start_phase + effective_num_samples * phase_inc) % (2 * np.pi)
         return samples.astype(np.float32), final_phase
+
+    def _apply_polyblep(self, waveform: str, samples: np.ndarray, phase: np.ndarray, frequency: float, num_samples: int, sample_rate: float = None) -> np.ndarray:
+        """Apply PolyBLEP (Polynomial BLEP) anti-aliasing correction to sawtooth, square, and triangle."""
+        if sample_rate is None:
+            sample_rate = self.sample_rate
+        phase_inc = 2 * np.pi * frequency / sample_rate
+        dphi = phase_inc / (2 * np.pi)  # Normalized phase increment
+
+        # Normalized phase 0..1
+        t_norm = (phase % (2 * np.pi)) / (2 * np.pi)
+
+        if waveform == "sawtooth":
+            # Apply PolyBLEP at the sawtooth discontinuity (every period at phase 0)
+            # Rising edge correction near phase 0
+            mask_rise = t_norm < dphi
+            polyblep_rise = -0.5 * (t_norm[mask_rise] / dphi) ** 2 + t_norm[mask_rise] / dphi - 0.5
+            samples[mask_rise] += polyblep_rise
+
+            # Falling edge correction near phase 1 (2π)
+            mask_fall = t_norm > (1.0 - dphi)
+            polyblep_fall = 0.5 * ((1.0 - t_norm[mask_fall]) / dphi) ** 2 - (1.0 - t_norm[mask_fall]) / dphi + 0.5
+            samples[mask_fall] += polyblep_fall
+        elif waveform == "square":
+            # Square wave has discontinuities at 0 and 0.5 (rising and falling edges)
+            # Rising edge at 0
+            mask_rise = t_norm < dphi
+            polyblep_rise = -0.5 * (t_norm[mask_rise] / dphi) ** 2 + t_norm[mask_rise] / dphi - 0.5
+            samples[mask_rise] += polyblep_rise
+
+            # Falling edge at 0.5
+            t_norm_half = (t_norm - 0.5) % 1.0
+            mask_fall = t_norm_half < dphi
+            polyblep_fall = 0.5 * ((t_norm_half[mask_fall]) / dphi) ** 2 - (t_norm_half[mask_fall]) / dphi - 0.5
+            samples[mask_fall] -= polyblep_fall
+        elif waveform == "triangle":
+            # Triangle has discontinuities in its derivative at 0 and 0.5
+            # Rising slope edge at 0
+            mask_rise = t_norm < dphi
+            polyblep_rise = -0.5 * (t_norm[mask_rise] / dphi) ** 2 + t_norm[mask_rise] / dphi - 0.5
+            samples[mask_rise] += 2.0 * polyblep_rise  # Scale for steeper slopes
+
+            # Falling slope edge at 0.5
+            t_norm_half = (t_norm - 0.5) % 1.0
+            mask_fall = t_norm_half < dphi
+            polyblep_fall = 0.5 * ((t_norm_half[mask_fall]) / dphi) ** 2 - (t_norm_half[mask_fall]) / dphi - 0.5
+            samples[mask_fall] -= 2.0 * polyblep_fall
+
+        return samples
 
     def _apply_envelope(self, voice: Voice, samples: np.ndarray, num_samples: int) -> np.ndarray:
         dt = 1.0 / self.sample_rate
@@ -589,17 +769,10 @@ class SynthEngine:
                 envelope[dec_mask] = v_int * (1.0 - p * (1.0 - self.sustain))
             else: envelope[dec_mask] = v_int * self.sustain
             envelope[times >= dec_end] = v_int * self.sustain
-            # ANTI_I: frequency-adaptive exponential fade-in applied to the onset window.
-            # Duration matches onset_ms (set at trigger time to 1.5 × note period,
-            # clamped [3ms, 30ms]) so the DC blocker's settling transient is suppressed
-            # for the full duration it takes the blocker to reach steady-state at
-            # very low frequencies (e.g. 27ms at 55 Hz vs the old fixed 5ms).
-            # Applied AFTER the CROSS crossfade so stolen voices still start from
-            # steal_start_level — ANTI_I only attenuates, never raises the envelope.
-            ANTI_I = voice.onset_ms / 1000.0   # frequency-adaptive (3ms–30ms)
-            if times[0] < ANTI_I:
-                mask = times < ANTI_I
-                envelope[mask] *= (1.0 - np.exp(-6.0 * (times[mask] / ANTI_I)))
+            # DC blocker settling transient suppression is now handled by ONSET_RAMP
+            # (frequency-adaptive linear fade-in applied to post-envelope signal).
+            # Removed ANTI_I exponential envelope suppression to prevent interference
+            # with the attack envelope and eliminate undesired dips at onset boundary.
             voice.envelope_time = times[-1] + dt
         voice.last_envelope_level = envelope[-1]
         return samples * envelope
@@ -649,7 +822,8 @@ class SynthEngine:
         alpha = float(np.clip(2.0 * np.pi * fc / sr, 0.0, 0.95))
         # k normalisation: resonance feedback scales down with alpha so the
         # filter remains unconditionally stable; k→1.0 approaches self-oscillation.
-        k = float(np.clip(res * (1.0 / (1.0 + alpha)), 0.0, 0.99))
+        # Scale by 1.2 for more aggressive resonance character
+        k = float(np.clip(res * 1.2 * (1.0 / (1.0 + alpha)), 0.0, 0.99))
 
         N = len(samples)
         out = np.zeros(N, dtype=np.float32)
@@ -684,7 +858,8 @@ class SynthEngine:
         # Higher cutoffs beyond this range are handled by the Ladder filter's character.
         fc = float(np.clip(cutoff, 20.0, sr / 12.0))
         f = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.5))
-        q = float(np.clip(2.0 - 2.0 * res, 0.05, 2.0))
+        # More aggressive Q curve: higher resonance = higher Q (more pronounced peak)
+        q = float(np.clip(0.5 + res * 10.0, 0.5, 10.5))
 
         N = len(samples)
         out = np.zeros(N, dtype=np.float32)
@@ -707,7 +882,7 @@ class SynthEngine:
 
     def _apply_filter(self, voice: Voice, samples: np.ndarray, rank: int = 1, cutoff_mod: float = 1.0) -> np.ndarray:
         f_base = voice.base_frequency or 440.0
-        track_mult = 1.0 + 0.5 * (f_base / 440.0 - 1.0)
+        track_mult = 1.0 + self.key_tracking_current * (f_base / 440.0 - 1.0)
         vel_mult = 0.7 + (voice.velocity * 0.6)
         # Use smoothed cutoff_current to avoid step-discontinuity clicks on cutoff changes
         fl_lpf = float(np.clip(self.cutoff_current * cutoff_mod * track_mult * vel_mult, 20.0, 20000.0))
@@ -830,6 +1005,9 @@ class SynthEngine:
                         elif k == 'cutoff':        self.cutoff_target         = v
                         elif k == 'resonance':     self.resonance_target      = v
                         elif k == 'intensity':     self.intensity_target      = v
+                        elif k == 'noise_level':   self.noise_level_target    = v
+                        elif k == 'key_tracking':  self.key_tracking_target   = v
+                        elif k == 'voice_type':    self.voice_type            = v
                         else:
                             setattr(self, k, v)
                             # On filter mode change, zero all per-voice LPF states to
@@ -938,37 +1116,134 @@ class SynthEngine:
         # arms fresh headroom for the FX tail.
         self._fx_tail_samples = self._FX_TAIL_MAX
 
-        for v in self.voices:
-            if v.midi_note == note and v.note_active:
-                v.trigger(note, freq, vel)
-                v.onset_ms = onset_ms_for_note
-                return
-        for v in self.voices:
-            if v.is_available():
-                v.trigger(note, freq, vel)
-                v.onset_ms = onset_ms_for_note
-                return
-        best_v, best_p, best_s = None, -1, -1.0
-        for v in self.voices:
-            p = 2 if (v.is_releasing and v.midi_note not in self.held_notes) else (1 if v.is_releasing else 0)
-            s = v.envelope_time if v.is_releasing else v.age
-            if p > best_p or (p == best_p and s > best_s): best_p, best_s, best_v = p, s, v
-        if best_v:
-            # Zero the filter and DC blocker states before triggering so the new
-            # note's frequency doesn't collide with stale filter memory from the
-            # stolen note. The CROSS envelope crossfade in _apply_envelope handles
-            # amplitude continuity, while this prevents a frequency-domain glitch
-            # in the first few filter output samples.
-            best_v.filter_state_lpf1 = best_v.filter_state_hpf1 = 0.0
-            best_v.filter_state_lpf2 = best_v.filter_state_hpf2 = 0.0
-            best_v.filter_state_lpf1b = best_v.filter_state_lpf2b = 0.0
-            best_v.dc_blocker_x = best_v.dc_blocker_y = 0.0
-            best_v.trigger(note, freq, vel)
-            best_v.onset_ms = onset_ms_for_note
+        if self.voice_type == "mono":
+            # Mono mode: single voice.
+            # Release all other voices
+            for i, v in enumerate(self.voices):
+                if i != self.mono_voice_index:
+                    v.release(self.attack, self.decay, self.sustain, self.intensity)
+            mono_v = self.voices[self.mono_voice_index]
+
+            # Use soft trigger whenever the voice has amplitude (playing OR releasing).
+            # Even a voice that just entered release this same buffer still has amplitude
+            # and its onset_ramp is already complete — hard trigger drops output to 0 → click.
+            has_amplitude = mono_v.last_envelope_level > 0.001
+            if has_amplitude:
+                # Soft trigger: update note params without resetting filter, DC blocker, or
+                # onset_ramp. Keeping those continuous prevents the 0-amplitude drop that hard
+                # trigger (onset_ramp=0) causes. steal_start_level crossfade fades the current
+                # amplitude to the new attack curve over 8ms.
+                mono_v.steal_start_level = mono_v.last_envelope_level
+                mono_v.midi_note = note
+                mono_v.base_frequency = freq
+                mono_v.frequency = freq
+                mono_v.velocity_target = vel  # velocity_current smooths toward this ~66ms
+                mono_v.note_active = True
+                mono_v.is_releasing = False
+                mono_v.envelope_time = 0.0
+                mono_v.age = 0.0
+                mono_v.onset_ms = onset_ms_for_note
+                # onset_samples, filter states, DC blocker, and phase preserved.
+                # Arm engine-level crossfade: hides FIR frequency-change transient.
+                self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+            else:
+                # Hard trigger from true silence: full reset via trigger().
+                mono_v.trigger(note, freq, vel)
+                mono_v.onset_ms = onset_ms_for_note
+
+        elif self.voice_type == "unison":
+            # Unison mode: all voices play same note with detuning spread.
+            # Voices are detuned across ±unison_detune cents for the characteristic thick sound.
+            n = len(self.voices)
+            for i, v in enumerate(self.voices):
+                # Spread voices evenly from -unison_detune to +unison_detune cents
+                if n > 1:
+                    detune_cents = self.unison_detune * (2.0 * i / (n - 1) - 1.0)
+                else:
+                    detune_cents = 0.0
+                detuned_freq = freq * (2.0 ** (detune_cents / 1200.0))
+
+                # Soft trigger whenever voice has amplitude (playing OR releasing).
+                # A voice that just entered release this buffer still has amplitude —
+                # hard trigger would drop it to 0 next sample → click.
+                if v.last_envelope_level > 0.001:
+                    v.steal_start_level = v.last_envelope_level
+                    v.midi_note = note
+                    v.base_frequency = detuned_freq
+                    v.frequency = detuned_freq
+                    v.velocity_target = vel
+                    v.note_active = True
+                    v.is_releasing = False
+                    v.envelope_time = 0.0
+                    v.age = 0.0
+                    v.onset_ms = onset_ms_for_note
+                    # onset_samples, filter states, DC blocker, and phase preserved.
+                    # Arm engine-level crossfade (same as MONO).
+                    self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+                else:
+                    # Hard trigger from true silence: full reset
+                    v.trigger(note, detuned_freq, vel)
+                    v.onset_ms = onset_ms_for_note
+
+        else:  # "poly" mode (default)
+            # Retrigger if already playing
+            for v in self.voices:
+                if v.midi_note == note and v.note_active:
+                    v.trigger(note, freq, vel)
+                    v.onset_ms = onset_ms_for_note
+                    return
+            # Find available voice
+            for v in self.voices:
+                if v.is_available():
+                    v.trigger(note, freq, vel)
+                    v.onset_ms = onset_ms_for_note
+                    return
+            # Voice stealing: find "least important" voice based on priority
+            best_v, best_p, best_s = None, -1, -1.0
+            for v in self.voices:
+                p = 2 if (v.is_releasing and v.midi_note not in self.held_notes) else (1 if v.is_releasing else 0)
+                s = v.envelope_time if v.is_releasing else v.age
+                if p > best_p or (p == best_p and s > best_s): best_p, best_s, best_v = p, s, v
+            if best_v:
+                # Zero the filter and DC blocker states before triggering so the new
+                # note's frequency doesn't collide with stale filter memory from the
+                # stolen note. The CROSS envelope crossfade in _apply_envelope handles
+                # amplitude continuity, while this prevents a frequency-domain glitch
+                # in the first few filter output samples.
+                best_v.filter_state_lpf1 = best_v.filter_state_hpf1 = 0.0
+                best_v.filter_state_lpf2 = best_v.filter_state_hpf2 = 0.0
+                best_v.filter_state_lpf1b = best_v.filter_state_lpf2b = 0.0
+                best_v.dc_blocker_x = best_v.dc_blocker_y = 0.0
+                best_v.trigger(note, freq, vel)
+                best_v.onset_ms = onset_ms_for_note
 
     def _release_note(self, note: int, velocity: float = 0.5):
-        for v in self.voices:
-            if v.midi_note == note and v.note_active: v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+        if self.voice_type == "mono":
+            # Last-note priority: if other notes are still held, resume the most recently pressed one.
+            # held_notes is already updated (note removed) by the time this is called from the queue.
+            remaining = [n for n in self._held_notes_ordered if n in self.held_notes]
+            if remaining:
+                resume_note = remaining[-1]
+                resume_vel = self._held_notes_vel.get(resume_note, velocity)
+                self._trigger_note(resume_note, resume_vel)
+            else:
+                mono_v = self.voices[self.mono_voice_index]
+                if mono_v.note_active:
+                    mono_v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+        elif self.voice_type == "unison":
+            # Last-note priority for unison: same logic but all 8 detuned voices.
+            remaining = [n for n in self._held_notes_ordered if n in self.held_notes]
+            if remaining:
+                resume_note = remaining[-1]
+                resume_vel = self._held_notes_vel.get(resume_note, velocity)
+                self._trigger_note(resume_note, resume_vel)
+            else:
+                for v in self.voices:
+                    if v.note_active:
+                        v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+        else:
+            for v in self.voices:
+                if v.midi_note == note and v.note_active: v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         try:
@@ -998,6 +1273,16 @@ class SynthEngine:
                                           + self.intensity_target * (1.0 - self.intensity_smoothing))
             else:
                 self.intensity_current = self.intensity_target
+            if abs(self.noise_level_current - self.noise_level_target) > 0.001:
+                self.noise_level_current = (self.noise_level_current * self.noise_level_smoothing
+                                            + self.noise_level_target * (1.0 - self.noise_level_smoothing))
+            else:
+                self.noise_level_current = self.noise_level_target
+            if abs(self.key_tracking_current - self.key_tracking_target) > 0.001:
+                self.key_tracking_current = (self.key_tracking_current * self.key_tracking_smoothing
+                                             + self.key_tracking_target * (1.0 - self.key_tracking_smoothing))
+            else:
+                self.key_tracking_current = self.key_tracking_target
 
             # ── LFO (shape-aware, single depth + target routing) ────────────
             lfo_phase_prev = self.lfo_phase
@@ -1105,23 +1390,56 @@ class SynthEngine:
 
             for v in self.voices:
                 if v.note_active or v.is_releasing:
+                    # Smooth velocity to prevent attack peaks when notes change
+                    if abs(v.velocity_current - v.velocity_target) > 0.001:
+                        v.velocity_current = (v.velocity_current * self.velocity_smoothing
+                                            + v.velocity_target * (1.0 - self.velocity_smoothing))
+                    else:
+                        v.velocity_current = v.velocity_target
+                    v.velocity = v.velocity_current  # Update the velocity used in envelope/filter calculations
+
                     p1_s, p2_s = v.phase, v.phase2
                     f1 = v.frequency * vco_lfo if v.frequency else 440.0
                     if self.octave_enabled and self.octave != 0: f1 *= (2.0 ** self.octave)
-                    s1, v.phase = self._generate_waveform(self.waveform, f1, frame_count, p1_s)
+
+                    # Generate primary oscillator with optional 4× oversampling
+                    oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
+                    s1, v.phase = self._generate_waveform(self.waveform, f1, frame_count, p1_s, oversample_factor=oversample_factor)
+
+                    # Downsample oscillator output from 192 kHz to 48 kHz if oversampling enabled
+                    if self.ENABLE_OVERSAMPLING:
+                        s1 = self._downsample_polyphase_signal(s1, self.OVERSAMPLE_FACTOR, history=v._oversample_history)
+
                     s1 = self._sanitize_signal(self._apply_filter(v, s1, rank=1, cutoff_mod=vcf_lfo))
+
                     if self.rank2_enabled:
                         f2 = f1 * (2.0 ** (self.rank2_detune / 1200.0))
-                        s2, v.phase2 = self._generate_waveform(self.rank2_waveform, f2, frame_count, p2_s)
+                        s2, v.phase2 = self._generate_waveform(self.rank2_waveform, f2, frame_count, p2_s, oversample_factor=oversample_factor)
+
+                        # Downsample rank 2 oscillator output if oversampling enabled
+                        if self.ENABLE_OVERSAMPLING:
+                            s2 = self._downsample_polyphase_signal(s2, self.OVERSAMPLE_FACTOR, history=v._oversample_history_r2)
+
                         s2 = self._sanitize_signal(self._apply_filter(v, s2, rank=2, cutoff_mod=vcf_lfo))
                         v_samples = s1 * (1.0 - self.rank2_mix) + s2 * self.rank2_mix
                     else:
                         v_samples = s1
+
                     if self.sine_mix > 0:
                         # Use and advance the voice's dedicated sine_phase accumulator
                         # so the sub-oscillator is phase-continuous across buffer boundaries.
-                        ss, v.sine_phase = self._generate_waveform("pure_sine", f1, frame_count, v.sine_phase)
+                        ss, v.sine_phase = self._generate_waveform("pure_sine", f1, frame_count, v.sine_phase, oversample_factor=oversample_factor)
+
+                        # Downsample sine sub-oscillator if oversampling enabled
+                        if self.ENABLE_OVERSAMPLING:
+                            ss = self._downsample_polyphase_signal(ss, self.OVERSAMPLE_FACTOR, history=v._oversample_history_sine)
+
                         v_samples += ss * self.sine_mix
+
+                    if self.noise_level_current > 0:
+                        # Blend white noise with oscillator output (noise stays at 48 kHz)
+                        noise_sample = np.random.uniform(-1, 1, frame_count)
+                        v_samples = v_samples * (1.0 - self.noise_level_current) + noise_sample * self.noise_level_current
                     v_samples = self._apply_envelope(v, v_samples, frame_count) * vca_lfo
                     # Per-voice onset ramp: a frequency-adaptive linear fade-in applied
                     # to the post-envelope signal before the DC blocker.  The DC blocker
@@ -1148,8 +1466,13 @@ class SynthEngine:
                         v.onset_samples += frame_count
                     v_samples = self._apply_dc_blocker(v, v_samples)
                     ang = v.pan * np.pi / 2
-                    mixed_l += v_samples * np.cos(ang)
-                    mixed_r += v_samples * np.sin(ang)
+                    # In UNISON mode all 8 voices sum simultaneously; scale each by 1/N
+                    # so the total stays within tanh's linear region.  Without scaling,
+                    # 8 voices saturate tanh and beat-pattern phase-resets on note
+                    # transitions create large amplitude jumps at buffer boundaries.
+                    mix_scale = (1.0 / self.num_voices) if self.voice_type == "unison" else 1.0
+                    mixed_l += v_samples * np.cos(ang) * mix_scale
+                    mixed_r += v_samples * np.sin(ang) * mix_scale
             # ── BBD-style Chorus (bypass when chorus_mix == 0) ───────────────
             # All taps read from the same shared ring buffer. Four LFO phases
             # spaced 90° apart (set at init) advance every sample by
@@ -1252,6 +1575,23 @@ class SynthEngine:
             drive = self.amp_level_current * comp
             mixed_l = np.tanh(mixed_l * drive * gain_ramp) * self.master_volume
             mixed_r = np.tanh(mixed_r * drive * gain_ramp) * self.master_volume
+
+            # Engine-level inter-buffer crossfade: blend from the last buffer's final
+            # post-tanh output toward the new output over _TRANSITION_XF_SAMPLES samples.
+            # This hides FIR frequency-change transients at MONO/UNISON note transitions.
+            # Applied post-tanh so _last_output_L/R stores the actual output value —
+            # guarantees exact sample-0 continuity regardless of drive or gain_ramp changes.
+            if self._transition_xf_remaining > 0:
+                n_xf = min(self._transition_xf_remaining, frame_count)
+                p = np.linspace(0.0, float(n_xf) / self._TRANSITION_XF_SAMPLES,
+                                n_xf, dtype=np.float32)
+                mixed_l[:n_xf] = self._last_output_L * (1.0 - p) + mixed_l[:n_xf] * p
+                mixed_r[:n_xf] = self._last_output_R * (1.0 - p) + mixed_r[:n_xf] * p
+                self._transition_xf_remaining -= n_xf
+            # Store post-tanh last sample so the next crossfade can start from the exact
+            # output value — eliminates tanh/gain rounding mismatch at buffer boundaries.
+            self._last_output_L = float(mixed_l[-1])
+            self._last_output_R = float(mixed_r[-1])
             out = np.empty(frame_count * 2, dtype=np.int16)
             out[0::2] = np.clip(mixed_l * 32767, -32767, 32767)
             out[1::2] = np.clip(mixed_r * 32767, -32767, 32767)
@@ -1261,10 +1601,19 @@ class SynthEngine:
 
     def note_on(self, note: int, velocity: int = 127):
         self.held_notes.add(note)
+        # Maintain ordered stack for MONO/UNISON last-note priority.
+        # Re-insert at end so the most recently pressed note is always last.
+        if note in self._held_notes_ordered:
+            self._held_notes_ordered.remove(note)
+        self._held_notes_ordered.append(note)
+        self._held_notes_vel[note] = velocity / 127.0
         self.midi_event_queue.put({'type': 'note_on', 'note': note, 'velocity': velocity / 127.0})
 
     def note_off(self, note: int, velocity: int = 0):
         self.held_notes.discard(note)
+        if note in self._held_notes_ordered:
+            self._held_notes_ordered.remove(note)
+        self._held_notes_vel.pop(note, None)
         self.midi_event_queue.put({'type': 'note_off', 'note': note, 'velocity': velocity / 127.0})
 
     def all_notes_off(self):
@@ -1275,6 +1624,8 @@ class SynthEngine:
         previously caused torn voice state and crackles during mode switches.
         """
         self.held_notes.clear()
+        self._held_notes_ordered.clear()
+        self._held_notes_vel.clear()
         self.midi_event_queue.put({'type': 'all_notes_off'})
 
     def pitch_bend_change(self, value: int): self.pitch_bend_target = ((value - 8192) / 8192.0) * 2.0

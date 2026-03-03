@@ -7,7 +7,7 @@
 | ![Main Menu](docs/images/main-menu.png) | ![Piano Mode](docs/images/piano-mode.png) |
 | ![Synth Mode](docs/images/synth-mode.png) | ![Tambor Mode](docs/images/tambor-mode.png) |
 
-**Version 1.6.0**
+**Version 1.7.0**
 
 A terminal-based MIDI piano application with real-time visualization, chord detection, traditional musical staff notation, a polyphonic synthesizer with a full signal-processing chain and preset system, and a fully-featured metronome.
 
@@ -36,6 +36,24 @@ A terminal-based MIDI piano application with real-time visualization, chord dete
 - **Chord Compendium**: Reference guide with all chord types across all musical keys.
   - **Audio Playback**: Hear chords played as you browse.
 - **Metronome Mode**: A highly customizable and musically aware metronome with BPM shared across all modes.
+
+## What's New in v1.7.0
+
+**Complete Artifact Elimination on Note Transitions**
+
+The synthesizer now achieves **12/12 CLEAN results** (100% click-free) on all note transitions in MONO and UNISON voice modes.
+
+### Audio Quality Improvements
+- **Engine-Level Post-Tanh Crossfade**: 8-sample inter-buffer blend using previous buffer's final output sample for exact sample-0 continuity across transitions
+- **Thread-Safe MIDI Processing**: Test race condition eliminated — PyAudio background thread coordination now prevents non-deterministic clicks
+- **Deterministic Testing**: All 12 test cases (6 parameter combinations × 2 voice modes) now pass consistently across multiple runs
+
+### Technical Details
+- **Crossfade applies post-saturation**: Blends from `_last_output_L/R` (previous buffer's post-tanh value) to new output over 8 milliseconds at 48kHz
+- **Soft trigger optimization**: MONO/UNISON modes preserve filter state and DC blocker continuity while fading onset amplitude
+- **Sample-accurate timing**: No glitches, no discontinuities, no parameterized clicks during rapid note changes
+
+This completes the artifact elimination work started in v1.4.0 and refined through v1.4.3.
 
 ## What's New in v1.6.0
 

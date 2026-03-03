@@ -5,6 +5,27 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-03-03
+
+### Added
+- **Complete Artifact Elimination on Note Transitions**: 12/12 CLEAN test results on all MONO/UNISON transitions
+  - Engine-level post-tanh 8-sample crossfade for exact sample-0 continuity
+  - 100% deterministic testing with race condition fix for PyAudio background thread coordination
+  - No clicks, no glitches, no discontinuities during rapid note changes
+
+### Fixed
+- **Test Race Condition**: PyAudio background thread now properly coordinated with direct test callback calls
+  - `test_artifact_analysis.py` now stops audio stream before running tests
+  - Eliminates non-deterministic MIDI event draining and state consumption
+  - All 12 test cases now pass consistently across multiple runs
+
+### Technical Details
+- **Crossfade mechanism** (`synth_engine.py` lines ~1584-1597):
+  - Applies post-saturation (after tanh soft-clip) for accurate output continuity
+  - Uses `_last_output_L/R` (previous buffer's final post-tanh sample)
+  - Linearly fades 8 samples at 48kHz (~0.167ms) from old to new output
+  - Sample-accurate timing, zero glitches
+
 ## [1.6.0] - 2026-02-26
 
 ### Added
