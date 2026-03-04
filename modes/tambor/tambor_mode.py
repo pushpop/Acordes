@@ -698,6 +698,15 @@ class TamborMode(Vertical):
 
     def on_mount(self):
         """Initialize the sequencer on mount."""
+        # Reset critical synth engine parameters that conflict with drum synthesis.
+        # voice_type must be "poly" (mono/unison would cause voice stealing between drums).
+        # arpeggiator must be off (it would intercept note_on events and misroute drum triggers).
+        if self.synth_engine:
+            self.synth_engine.update_parameters(
+                voice_type="poly",
+                arpeggiator_enabled=False,
+            )
+
         # Refresh BPM from config_manager (for mode switching sync)
         # This ensures Tambor displays the current BPM set in Metronome or other modes
         if self.control_panel:

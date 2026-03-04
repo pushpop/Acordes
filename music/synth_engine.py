@@ -211,12 +211,13 @@ class SynthEngine:
         self.decay = 0.2
         self.sustain = 0.7
         self.release = 0.1
-        self.intensity = 0.8
+        self.intensity = 1.0  # Always 100% — removed from UI
 
         self.cutoff = 2000.0
         self.hpf_cutoff = 20.0
         self.resonance = 0.3
-        self.filter_mode = "ladder"   # "ladder" | "svf"
+        self.hpf_resonance = 0.0      # 0.0–0.99 resonance (peak) for the HPF stage
+        self.filter_mode = "ladder"   # kept for preset backward-compat; LPF always uses ladder now
 
         self.lfo_freq = 1.0
         self.lfo_vco_mod = 0.0
@@ -283,12 +284,15 @@ class SynthEngine:
         self.cutoff_current    = 2000.0   # tracks cutoff_target with 0.85 smoothing
         self.cutoff_target     = 2000.0
         self.cutoff_smoothing  = 0.85
+        self.hpf_cutoff_current   = 20.0
+        self.hpf_cutoff_target    = 20.0
+        self.hpf_cutoff_smoothing = 0.85
         self.resonance_current   = 0.3
         self.resonance_target    = 0.3
         self.resonance_smoothing = 0.90
-        self.intensity_current   = 0.8
-        self.intensity_target    = 0.8
-        self.intensity_smoothing = 0.90
+        self.hpf_resonance_current   = 0.0
+        self.hpf_resonance_target    = 0.0
+        self.hpf_resonance_smoothing = 0.90
         self.noise_level_current = 0.0
         self.noise_level_target  = 0.0
         self.noise_level_smoothing = 0.90
@@ -731,7 +735,7 @@ class SynthEngine:
         dt = 1.0 / self.sample_rate
         VEL_C, VEL_F = 1.3, 0.15
         v_scaled = VEL_F + (1.0 - VEL_F) * (voice.velocity ** VEL_C)
-        v_int = self.intensity_current * v_scaled
+        v_int = 1.0 * v_scaled
         times = voice.envelope_time + np.arange(num_samples) * dt
         envelope = np.zeros(num_samples, dtype=np.float32)
         if voice.is_releasing:
@@ -747,7 +751,11 @@ class SynthEngine:
                 p = times[mask] / ANTI_R
                 envelope[mask] = voice.release_start_level * (1.0 - p) + envelope[mask] * p
             voice.envelope_time = times[-1] + dt
-            if envelope[-1] < 0.001 or times[-1] > self.release * 5: voice.reset()
+            # Use time_const (not self.release) for the safety timeout so that
+            # soft note-off velocities (rel_mod > 1) don't cause an audible hard
+            # cut before the exponential reaches inaudible levels.
+            # 10 time constants → exp(-10) ≈ 0.00005, well below the 0.001 threshold.
+            if envelope[-1] < 0.001 or times[-1] > time_const * 10: voice.reset()
         elif voice.note_active:
             atk_mask = times < self.attack
             if self.attack > 0: envelope[atk_mask] = (times[atk_mask] / self.attack) * v_int
@@ -880,46 +888,82 @@ class SynthEngine:
 
         return out, lp, bp
 
+    def _filter_svf_hp_process(self, samples: np.ndarray, cutoff: float,
+                               lp_state: float, bp_state: float,
+                               res: float = 0.0) -> tuple:
+        """Chamberlin SVF — HP output.  Shares the same integrator states as
+        _filter_svf_process so the two variants can reuse per-voice state slots.
+
+        HPF cutoff capped at sr/12 (~4kHz) for Chamberlin stability, which covers
+        the full useful HPF range (20Hz–4kHz).  Resonance q range is kept narrower
+        than the LPF (0.5–4.0) to keep the HP peak well-behaved without runaway.
+        """
+        sr = self.sample_rate
+        fc = float(np.clip(cutoff, 20.0, sr / 12.0))
+        f = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.5))
+        # Narrower Q range for HPF: 0.5 (flat) → 4.0 (strong resonant peak)
+        q = float(np.clip(0.5 + res * 3.5, 0.5, 4.0))
+
+        N = len(samples)
+        out = np.zeros(N, dtype=np.float32)
+        lp = lp_state
+        bp = bp_state
+
+        for i in range(N):
+            lp = lp + f * bp
+            hp = float(samples[i]) - lp - q * bp
+            bp = bp + f * hp
+            if lp > 4.0:  lp = 4.0
+            elif lp < -4.0: lp = -4.0
+            if bp > 4.0:  bp = 4.0
+            elif bp < -4.0: bp = -4.0
+            # Clamp hp output to prevent large transient on first sample
+            if hp > 8.0:  hp = 8.0
+            elif hp < -8.0: hp = -8.0
+            out[i] = hp
+
+        return out, lp, bp
+
     def _apply_filter(self, voice: Voice, samples: np.ndarray, rank: int = 1, cutoff_mod: float = 1.0) -> np.ndarray:
-        f_base = voice.base_frequency or 440.0
-        track_mult = 1.0 + self.key_tracking_current * (f_base / 440.0 - 1.0)
-        vel_mult = 0.7 + (voice.velocity * 0.6)
-        # Use smoothed cutoff_current to avoid step-discontinuity clicks on cutoff changes
-        fl_lpf = float(np.clip(self.cutoff_current * cutoff_mod * track_mult * vel_mult, 20.0, 20000.0))
-        fl_hpf = float(np.clip(self.hpf_cutoff * track_mult * vel_mult, 20.0, fl_lpf / 2.0))
+        """MS-20 style dual filter: resonant SVF HPF → Ladder LPF in series.
 
-        # alpha_norm: shared per-frame coefficient used for gain normalisation below.
-        # Both filter methods compute the same alpha internally; computing it here
-        # once keeps the normalisation consistent across modes.
+        HPF stage uses the Chamberlin SVF HP output — hpf_cutoff_current + hpf_resonance_current.
+        LPF stage always uses the 4-pole Moog ladder — cutoff_current + resonance_current.
+        Both stages are modulated by key tracking and velocity.
+        Per-voice SVF integrator states (svf*_lp/bp) are repurposed for the HPF stage;
+        the SVF slots are no longer used for the LPF since the ladder always handles that.
+        """
+        # Key tracking: shift cutoff proportionally with pitch relative to C4 (middle C).
+        # C4 (261.63 Hz) is the reference — track_mult = 1.0 at C4 regardless of KT.
+        # Formula: linear interpolation between 1.0 (no tracking) and f/261.63 (full tracking).
+        f_base = voice.base_frequency or 261.63
+        track_mult = 1.0 + self.key_tracking_current * (f_base / 261.63 - 1.0)
+
+        fl_lpf = float(np.clip(self.cutoff_current * cutoff_mod * track_mult, 20.0, 20000.0))
+        fl_hpf = float(np.clip(self.hpf_cutoff_current * track_mult, 20.0, fl_lpf * 0.9))
+
+        # ── HPF stage: resonant Chamberlin SVF (HP output) ───────────────────
+        # Reuses the per-voice svf state slots (previously for LPF-SVF mode).
+        hpf_lp_s = voice.filter_state_svf1_lp if rank == 1 else voice.filter_state_svf2_lp
+        hpf_bp_s = voice.filter_state_svf1_bp if rank == 1 else voice.filter_state_svf2_bp
+        samples, hpf_lp_s, hpf_bp_s = self._filter_svf_hp_process(
+            samples, fl_hpf, hpf_lp_s, hpf_bp_s, self.hpf_resonance_current)
+        if rank == 1:
+            voice.filter_state_svf1_lp, voice.filter_state_svf1_bp = hpf_lp_s, hpf_bp_s
+        else:
+            voice.filter_state_svf2_lp, voice.filter_state_svf2_bp = hpf_lp_s, hpf_bp_s
+
+        # ── LPF stage: 4-pole Moog ladder (always) ───────────────────────────
+        # Gain normalisation using the ladder alpha so volume stays consistent
+        # as cutoff sweeps from 20Hz to 20kHz.
         alpha_norm = float(np.clip(2.0 * np.pi * fl_lpf / self.sample_rate, 0.0001, 0.95))
-
-        # HPF: legacy 1-pole IIR (unchanged)
-        hpf_s = voice.filter_state_hpf1 if rank == 1 else voice.filter_state_hpf2
-        samples, hpf_s, _ = self._filter_process(samples, fl_hpf, "hpf", hpf_s, 0.0)
-        if rank == 1: voice.filter_state_hpf1 = hpf_s
-        else:         voice.filter_state_hpf2 = hpf_s
-
-        # Gain normalisation: both modes use the same 1/alpha formula so they stay
-        # volume-matched to each other and to the old 1-pole reference behaviour.
-        # Ceiling of 8.0 prevents float32 overflow at very low cutoff and limits
-        # extreme boost; floor of 1.0 means the filter never reduces gain below
-        # the un-compensated level (a fully-open filter should not lose loudness).
         filter_comp = float(np.clip(1.0 / alpha_norm, 1.0, 8.0))
 
-        # LPF: dispatch on filter_mode, using smoothed resonance_current
-        if self.filter_mode == "svf":
-            lp_s = voice.filter_state_svf1_lp if rank == 1 else voice.filter_state_svf2_lp
-            bp_s = voice.filter_state_svf1_bp if rank == 1 else voice.filter_state_svf2_bp
-            filtered, lp_s, bp_s = self._filter_svf_process(
-                samples, fl_lpf, lp_s, bp_s, self.resonance_current)
-            if rank == 1: voice.filter_state_svf1_lp, voice.filter_state_svf1_bp = lp_s, bp_s
-            else:         voice.filter_state_svf2_lp, voice.filter_state_svf2_bp = lp_s, bp_s
-        else:  # "ladder" (default)
-            ladder_s = voice.filter_state_ladder1 if rank == 1 else voice.filter_state_ladder2
-            filtered, ladder_s = self._filter_ladder_process(
-                samples, fl_lpf, ladder_s, self.resonance_current)
-            if rank == 1: voice.filter_state_ladder1 = ladder_s
-            else:         voice.filter_state_ladder2 = ladder_s
+        ladder_s = voice.filter_state_ladder1 if rank == 1 else voice.filter_state_ladder2
+        filtered, ladder_s = self._filter_ladder_process(
+            samples, fl_lpf, ladder_s, self.resonance_current)
+        if rank == 1: voice.filter_state_ladder1 = ladder_s
+        else:         voice.filter_state_ladder2 = ladder_s
 
         return filtered * filter_comp
 
@@ -1000,29 +1044,19 @@ class SynthEngine:
                 # UI-thread vs audio-thread race on all 25+ shared attributes.
                 for k, v in e['params'].items():
                     if hasattr(self, k):
-                        if k == 'amp_level':       self.amp_level_target     = v
-                        elif k == 'master_volume': self.master_volume_target  = v
-                        elif k == 'cutoff':        self.cutoff_target         = v
-                        elif k == 'resonance':     self.resonance_target      = v
-                        elif k == 'intensity':     self.intensity_target      = v
-                        elif k == 'noise_level':   self.noise_level_target    = v
-                        elif k == 'key_tracking':  self.key_tracking_target   = v
-                        elif k == 'voice_type':    self.voice_type            = v
+                        if k == 'amp_level':         self.amp_level_target       = v
+                        elif k == 'master_volume':   self.master_volume_target   = v
+                        elif k == 'cutoff':          self.cutoff_target          = v
+                        elif k == 'hpf_cutoff':      self.hpf_cutoff_target      = v
+                        elif k == 'resonance':       self.resonance_target       = v
+                        elif k == 'hpf_resonance':   self.hpf_resonance_target   = v
+                        elif k == 'noise_level':     self.noise_level_target     = v
+                        elif k == 'key_tracking':    self.key_tracking_target    = v
+                        elif k == 'voice_type':      self.voice_type             = v
+                        elif k == 'filter_mode':     pass  # kept for preset backward-compat; ignored
                         else:
                             setattr(self, k, v)
-                            # On filter mode change, zero all per-voice LPF states to
-                            # prevent stale state from the previous filter bleeding through,
-                            # and arm the fade-in ramp to suppress the state-zeroing transient.
-                            if k == 'filter_mode':
-                                for voice in self.voices:
-                                    voice.filter_state_ladder1 = [0.0, 0.0, 0.0, 0.0]
-                                    voice.filter_state_ladder2 = [0.0, 0.0, 0.0, 0.0]
-                                    voice.filter_state_svf1_lp = voice.filter_state_svf1_bp = 0.0
-                                    voice.filter_state_svf2_lp = voice.filter_state_svf2_bp = 0.0
-                                    voice.filter_state_lpf1    = voice.filter_state_lpf1b   = 0.0
-                                    voice.filter_state_lpf2    = voice.filter_state_lpf2b   = 0.0
-                                self._filter_ramp_remaining = self._FILTER_RAMP_LEN
-                            elif k == 'delay_time':
+                            if k == 'delay_time':
                                 # Recalculate integer sample count when delay time changes.
                                 self.delay_time    = float(v)
                                 self._delay_samples = max(1, min(
@@ -1068,7 +1102,16 @@ class SynthEngine:
         # Second pass: process note events with the 3-per-buffer cap.
         # When arp is enabled, note_on/note_off update the held-note list and
         # rebuild the arp sequence rather than triggering voices directly.
+        # drum_trigger events bypass the cap and are always processed immediately
+        # so that all drums on a sequencer step fire in the same buffer.
         for e in pending_notes:
+            if e['type'] == 'drum_trigger':
+                # Atomic drum trigger: apply this drum's params then immediately
+                # trigger its note. No cap — up to 8 drums can fire per buffer.
+                self._apply_drum_params_inline(e['params'])
+                self._trigger_note(e['note'], e['velocity'] / 127.0)
+                note_events_processed += 1
+                continue
             if note_events_processed >= 3:
                 # Re-enqueue remaining note events for the next buffer.
                 self.midi_event_queue.put(e)
@@ -1098,6 +1141,33 @@ class SynthEngine:
                         self._release_note(e['note'], e.get('velocity', 0.5))
                     note_events_processed += 1
 
+    def _apply_drum_params_inline(self, params: dict):
+        """Apply drum synthesis parameters directly on the audio thread (no smoothing queue).
+
+        Called from the drum_trigger event handler in _process_midi_events() so that
+        params and their note_on are always atomically paired. Smoothed params
+        (cutoff, resonance, noise_level) are snapped to their target immediately
+        rather than interpolated — percussive hits are short enough that smoothing
+        provides no benefit and only causes bleed between simultaneous drums.
+        """
+        for k, v in params.items():
+            if k == 'cutoff':
+                self.cutoff_target = v
+                self.cutoff_current = v
+            elif k == 'resonance':
+                self.resonance_target = v
+                self.resonance_current = v
+            elif k == 'noise_level':
+                self.noise_level_target = v
+                self.noise_level_current = v
+            elif k == 'amp_level':
+                self.amp_level_target = v
+                self.amp_level_current = v
+            elif k == 'filter_mode':
+                pass  # LPF always uses ladder; filter_mode kept for preset compat only
+            elif hasattr(self, k):
+                setattr(self, k, v)
+
     def _trigger_note(self, note: int, vel: float):
         freq = self._midi_to_frequency(note)
         # Frequency-adaptive onset window: scale with the note period so the DC
@@ -1121,7 +1191,7 @@ class SynthEngine:
             # Release all other voices
             for i, v in enumerate(self.voices):
                 if i != self.mono_voice_index:
-                    v.release(self.attack, self.decay, self.sustain, self.intensity)
+                    v.release(self.attack, self.decay, self.sustain, 1.0)
             mono_v = self.voices[self.mono_voice_index]
 
             # Use soft trigger whenever the voice has amplitude (playing OR releasing).
@@ -1229,7 +1299,7 @@ class SynthEngine:
             else:
                 mono_v = self.voices[self.mono_voice_index]
                 if mono_v.note_active:
-                    mono_v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+                    mono_v.release(self.attack, self.decay, self.sustain, 1.0, velocity)
         elif self.voice_type == "unison":
             # Last-note priority for unison: same logic but all 8 detuned voices.
             remaining = [n for n in self._held_notes_ordered if n in self.held_notes]
@@ -1240,10 +1310,10 @@ class SynthEngine:
             else:
                 for v in self.voices:
                     if v.note_active:
-                        v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+                        v.release(self.attack, self.decay, self.sustain, 1.0, velocity)
         else:
             for v in self.voices:
-                if v.midi_note == note and v.note_active: v.release(self.attack, self.decay, self.sustain, self.intensity, velocity)
+                if v.midi_note == note and v.note_active: v.release(self.attack, self.decay, self.sustain, 1.0, velocity)
 
     def _audio_callback(self, in_data, frame_count, time_info, status):
         try:
@@ -1268,11 +1338,6 @@ class SynthEngine:
                                           + self.resonance_target * (1.0 - self.resonance_smoothing))
             else:
                 self.resonance_current = self.resonance_target
-            if abs(self.intensity_current - self.intensity_target) > 0.001:
-                self.intensity_current = (self.intensity_current * self.intensity_smoothing
-                                          + self.intensity_target * (1.0 - self.intensity_smoothing))
-            else:
-                self.intensity_current = self.intensity_target
             if abs(self.noise_level_current - self.noise_level_target) > 0.001:
                 self.noise_level_current = (self.noise_level_current * self.noise_level_smoothing
                                             + self.noise_level_target * (1.0 - self.noise_level_smoothing))
@@ -1283,6 +1348,16 @@ class SynthEngine:
                                              + self.key_tracking_target * (1.0 - self.key_tracking_smoothing))
             else:
                 self.key_tracking_current = self.key_tracking_target
+            if abs(self.hpf_cutoff_current - self.hpf_cutoff_target) > 0.5:
+                self.hpf_cutoff_current = (self.hpf_cutoff_current * self.hpf_cutoff_smoothing
+                                           + self.hpf_cutoff_target * (1.0 - self.hpf_cutoff_smoothing))
+            else:
+                self.hpf_cutoff_current = self.hpf_cutoff_target
+            if abs(self.hpf_resonance_current - self.hpf_resonance_target) > 0.001:
+                self.hpf_resonance_current = (self.hpf_resonance_current * self.hpf_resonance_smoothing
+                                              + self.hpf_resonance_target * (1.0 - self.hpf_resonance_smoothing))
+            else:
+                self.hpf_resonance_current = self.hpf_resonance_target
 
             # ── LFO (shape-aware, single depth + target routing) ────────────
             lfo_phase_prev = self.lfo_phase
@@ -1642,6 +1717,22 @@ class SynthEngine:
         moved while notes were playing.
         """
         self.midi_event_queue.put({'type': 'param_update', 'params': kwargs})
+
+    def drum_trigger(self, note: int, velocity: int, params: dict):
+        """Enqueue an atomic drum trigger: params + note_on bundled as one event.
+
+        Unlike calling update_parameters() + note_on() separately, this ensures
+        the drum's synthesis parameters are applied immediately before its note_on
+        in the same audio-thread operation. This prevents parameter cross-
+        contamination when multiple drums trigger on the same sequencer step
+        (e.g. Kick + HiHat: without this, the last drum's params apply to ALL voices).
+        """
+        self.midi_event_queue.put({
+            'type': 'drum_trigger',
+            'note': note,
+            'velocity': velocity,
+            'params': params,
+        })
 
     def close(self):
         self.running = False

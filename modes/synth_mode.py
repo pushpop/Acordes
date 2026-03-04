@@ -11,7 +11,9 @@ from textual.widgets import Label, Static
 
 from music.synth_engine import SynthEngine
 from music.preset_manager import PresetManager, Preset, DEFAULT_PARAMS, PARAM_KEYS
+from music.factory_presets import get_factory_presets
 from components.header_widget import HeaderWidget
+from modes.preset_browser_modal import PresetBrowserScreen
 
 if TYPE_CHECKING:
     from midi.input_handler import MIDIInputHandler
@@ -45,6 +47,7 @@ class SynthMode(Widget):
         Binding("full_stop", "preset_next",         "Preset ►",        show=False),
         Binding("ctrl+n", "save_preset_new",      "Save New Preset", show=False),
         Binding("ctrl+s", "save_preset_overwrite","Update Preset",  show=False),
+        Binding("n", "open_preset_browser",  "Factory Presets",  show=False),
         # ── Focus-mode navigation (WASD) ──────────────────────────────────
         # W/S/A/D navigate the section grid only when in focus mode.
         # They are silently ignored when unfocused (no legacy fallback)
@@ -72,8 +75,6 @@ class SynthMode(Widget):
         Binding("j", "adjust_sustain('down')",     "Sus-",   show=False),
         Binding("i", "adjust_release('up')",       "Rel+",   show=False),
         Binding("k", "adjust_release('down')",     "Rel-",   show=False),
-        Binding("o", "adjust_intensity('up')",     "Int+",   show=False),
-        Binding("l", "adjust_intensity('down')",   "Int-",   show=False),
         Binding("left_square_bracket",  "adjust_master_volume('down')", "MVol-", show=False),
         Binding("right_square_bracket", "adjust_master_volume('up')",   "MVol+", show=False),
         # ── Global ────────────────────────────────────────────────────────
@@ -94,7 +95,7 @@ class SynthMode(Widget):
     #synth-grid {
         layout: vertical;
         width: 100%;
-        height: auto;
+        height: 1fr;
         padding: 0;
         margin: 0;
     }
@@ -102,7 +103,7 @@ class SynthMode(Widget):
     #synth-container {
         layout: horizontal;
         width: 100%;
-        height: auto;
+        height: 20;
         padding: 0;
         margin: 0;
     }
@@ -112,7 +113,7 @@ class SynthMode(Widget):
         width: 100%;
         height: auto;
         padding: 0;
-        margin: 0;
+        margin-top: 3;
     }
 
     #preset-bar {
@@ -215,6 +216,16 @@ class SynthMode(Widget):
         text-align: left;
     }
 
+    .section-bottom {
+        color: #00ff00;
+        text-style: bold;
+        padding: 0;
+        margin: 0;
+        width: 100%;
+        height: auto;
+        text-align: left;
+    }
+
     .control-label {
         color: #556655;
         width: 100%;
@@ -239,14 +250,14 @@ class SynthMode(Widget):
     # Each entry: display label for the param row.
     # nav_up/down steps through these; dispatch in _adjust_focused_param uses the name.
     _SECTION_PARAMS = {
-        "oscillator": ["Wave", "Octave"],
-        "filter":     ["Cutoff", "Resonance", "Type"],
-        "envelope":   ["Attack", "Decay", "Sustain", "Release", "Intensity"],
+        "oscillator": ["Wave", "Noise", "Octave"],
+        "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "KTrack"],
+        "envelope":   ["Attack", "Decay", "Sustain", "Release"],
         "lfo":        ["Rate", "Depth", "Shape", "Target"],
         "chorus":     ["Rate", "Depth", "Mix", "Voices"],
         "fx":         ["Delay Time", "Delay Fdbk", "Delay Mix", "Rev Size"],
         "arpeggio":   ["Mode", "BPM", "Gate", "Range", "ON/OFF"],
-        "mixer":      ["Amp", "Master Vol"],
+        "mixer":      ["Voice Type", "Amp", "Master Vol"],
     }
 
     def __init__(
@@ -264,19 +275,23 @@ class SynthMode(Widget):
         self._current_preset: Optional[Preset] = None
         self._preset_index: int = -1
         self._dirty: bool = False
+        self._suggested_preset_name: Optional[str] = None  # Suggested name after randomization
+        self._randomized_just_now: bool = False  # Show "🎲 Randomized!" in preset bar temporarily
 
         params = self._load_initial_params()
         self.waveform   = params["waveform"]
+        self.noise_level = params.get("noise_level", 0.0)
         self.octave     = params["octave"]
         self.amp_level  = params["amp_level"]
-        self.cutoff     = params["cutoff"]
-        self.resonance   = params["resonance"]
-        self.filter_mode = params.get("filter_mode", "ladder")
+        self.cutoff       = params["cutoff"]
+        self.hpf_cutoff   = params.get("hpf_cutoff", 20.0)
+        self.resonance    = params["resonance"]
+        self.hpf_resonance = params.get("hpf_resonance", 0.0)
+        self.key_tracking = params.get("key_tracking", 0.5)
         self.attack     = params["attack"]
         self.decay      = params["decay"]
         self.sustain    = params["sustain"]
         self.release    = params["release"]
-        self.intensity  = params["intensity"]
 
         # ── LFO extended ─────────────────────────────────────────────────────
         self.lfo_freq   = params.get("lfo_freq",   1.0)
@@ -306,6 +321,8 @@ class SynthMode(Widget):
         # GLOBAL MASTER VOLUME (Persisted but not in presets)
         saved_state = self.config_manager.get_synth_state()
         self.master_volume = saved_state.get("master_volume", 1.0) if saved_state else 1.0
+        self.voice_type = saved_state.get("voice_type", "poly") if saved_state else "poly"
+        self.voice_type_display = None
 
         # ── Focus state ──────────────────────────────────────────────────────
         # _focus_section: which section is currently focused (None = global mode)
@@ -313,20 +330,27 @@ class SynthMode(Widget):
         self._focus_section: Optional[str] = None
         self._focus_param: int = 0
 
+        # Noise parameter adaptive increment tracking
+        self._noise_last_adjust_time = 0.0  # Timestamp of last adjustment
+        self._noise_repeat_count = 0  # How many times adjusted in sequence
+        self._NOISE_REPEAT_THRESHOLD = 0.15  # 150ms threshold for "held" detection
+
         # Widget references for live updates
         self.waveform_display       = None
         self.waveform_shape_display = None
+        self.noise_display          = None
         self.octave_display         = None
         self.amp_display            = None
         self.master_volume_display  = None
-        self.cutoff_display         = None
-        self.resonance_display      = None
-        self.filter_mode_display    = None
+        self.hpf_cutoff_display    = None
+        self.hpf_resonance_display = None
+        self.cutoff_display        = None
+        self.resonance_display     = None
+        self.key_tracking_display  = None
         self.attack_display         = None
         self.decay_display          = None
         self.sustain_display        = None
         self.release_display        = None
-        self.intensity_display      = None
         # LFO displays
         self.lfo_rate_display    = None
         self.lfo_depth_display   = None
@@ -375,7 +399,8 @@ class SynthMode(Widget):
     def compose(self):
         self.header = HeaderWidget(
             title="S Y N T H   M O D E",
-            subtitle=self._get_status_text(),
+            #escondido para não criar conflito com o audio 
+            #subtitle=self._get_status_text(),
             is_big=False,
         )
         yield self.header
@@ -398,28 +423,36 @@ class SynthMode(Widget):
                     self.waveform_shape_display = Label(self._fmt_waveform_shape(), classes="control-value", id="waveform-shape-display")
                     yield self.waveform_shape_display
                     yield Label(self._row_sep(), classes="control-label")
-                    yield Label(self._row_label("Octave", ""), classes="control-label", id="lbl-oscillator-1")
+                    yield Label(self._row_label("Noise", ""), classes="control-label", id="lbl-oscillator-1")
+                    self.noise_display = Label(self._fmt_knob(self.noise_level, 0.0, 1.0, f"{int(self.noise_level * 100)}%"), classes="control-value", id="noise-display")
+                    yield self.noise_display
+                    yield Label(self._row_sep(), classes="control-label")
+                    yield Label(self._row_label("Octave", ""), classes="control-label", id="lbl-oscillator-2")
                     self.octave_display = Label(self._fmt_octave(), classes="control-value", id="octave-display")
                     yield self.octave_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── FILTER ───────────────────────────────────────────────
                 with Vertical(id="filter-section"):
                     hdr = Label(self._section_top("FILTER", False), classes="section-label", id="hdr-filter")
                     self._section_header_ids["filter"] = "hdr-filter"
                     yield hdr
-                    yield Label(self._row_label("Cutoff", ""), classes="control-label", id="lbl-filter-0")
+                    yield Label(self._row_label("HPF Cut", ""), classes="control-label", id="lbl-filter-0")
+                    self.hpf_cutoff_display = Label(self._fmt_hpf_cutoff(), classes="control-value", id="hpf-cutoff-display")
+                    yield self.hpf_cutoff_display
+                    yield Label(self._row_label("HPF Pk", ""), classes="control-label", id="lbl-filter-1")
+                    self.hpf_resonance_display = Label(self._fmt_hpf_resonance(), classes="control-value", id="hpf-resonance-display")
+                    yield self.hpf_resonance_display
+                    yield Label(self._row_label("LPF Cut", ""), classes="control-label", id="lbl-filter-2")
                     self.cutoff_display = Label(self._fmt_cutoff(), classes="control-value", id="cutoff-display")
                     yield self.cutoff_display
-                    yield Label(self._row_sep(), classes="control-label")
-                    yield Label(self._row_label("Resonance", ""), classes="control-label", id="lbl-filter-1")
+                    yield Label(self._row_label("LPF Pk", ""), classes="control-label", id="lbl-filter-3")
                     self.resonance_display = Label(self._fmt_resonance(), classes="control-value", id="resonance-display")
                     yield self.resonance_display
-                    yield Label(self._row_sep(), classes="control-label")
-                    yield Label(self._row_label("Type", ""), classes="control-label", id="lbl-filter-2")
-                    self.filter_mode_display = Label(self._fmt_filter_mode(), classes="control-value", id="filter-mode-display")
-                    yield self.filter_mode_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._row_label("KTrack", ""), classes="control-label", id="lbl-filter-4")
+                    self.key_tracking_display = Label(self._fmt_key_tracking(), classes="control-value", id="key-tracking-display")
+                    yield self.key_tracking_display
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── ENVELOPE ─────────────────────────────────────────────
                 with Vertical(id="envelope-section"):
@@ -440,13 +473,7 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Release", ""), classes="control-label", id="lbl-envelope-3")
                     self.release_display = Label(self._fmt_time(self.release), classes="control-value", id="release-display")
                     yield self.release_display
-                    yield Label(self._row_sep(), classes="control-label")
-                    yield Label(self._row_label("Intensity", ""), classes="control-label", id="lbl-envelope-4")
-                    self.intensity_display = Label(
-                        self._fmt_knob(self.intensity, 0.0, 1.0, f"{int(self.intensity * 100)}%"),
-                        classes="control-value", id="intensity-display")
-                    yield self.intensity_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── LFO ──────────────────────────────────────────────────
                 with Vertical(id="lfo-section"):
@@ -466,7 +493,12 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Target", ""), classes="control-label", id="lbl-lfo-3")
                     self.lfo_target_display = Label(self._fmt_lfo_target(), classes="control-value", id="lfo-target-display")
                     yield self.lfo_target_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
+
+            # ── SPACING ───────────────────────────────────────────────────
+            yield Label("")
+            yield Label("")
+            yield Label("")
 
             # ── ROW 2: CHORUS · FX · ARPEGGIO · MIXER ───────────────────
             with Horizontal(id="synth-container-bottom"):
@@ -489,7 +521,7 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Voices", ""), classes="control-label", id="lbl-chorus-3")
                     self.chorus_voices_display = Label(self._fmt_chorus_voices(), classes="control-value", id="chorus-voices-display")
                     yield self.chorus_voices_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── FX ───────────────────────────────────────────────────
                 with Vertical(id="fx-section"):
@@ -508,7 +540,7 @@ class SynthMode(Widget):
                     yield self.delay_mix_display
                     yield Label(self._row_label("Rev Size", ""), classes="control-label", id="lbl-fx-3")
                     yield Label(self._fmt_disabled_param("future"), classes="control-value")
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── ARPEGGIO ─────────────────────────────────────────────
                 with Vertical(id="arpeggio-section"):
@@ -531,25 +563,37 @@ class SynthMode(Widget):
                     yield Label(self._row_label("ON/OFF", ""), classes="control-label", id="lbl-arpeggio-4")
                     self.arp_enabled_display = Label(self._fmt_bool_toggle(self.arp_enabled, "ARP ON", "ARP OFF"), classes="control-value", id="arp-enabled-display")
                     yield self.arp_enabled_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── MIXER ────────────────────────────────────────────────
                 with Vertical(id="mixer-section"):
                     hdr = Label(self._section_top("MIXER", False), classes="section-label", id="hdr-mixer")
                     self._section_header_ids["mixer"] = "hdr-mixer"
                     yield hdr
-                    yield Label(self._row_label("Amp", ""), classes="control-label", id="lbl-mixer-0")
+
+                    # Voice Type (top)
+                    yield Label(self._row_label("Voice Type", ""), classes="control-label", id="lbl-mixer-0")
+                    self.voice_type_display = Label(
+                        self._fmt_voice_type(),
+                        classes="control-value", id="voice-type-display")
+                    yield self.voice_type_display
+                    yield Label(self._row_sep(), classes="control-label")
+
+                    # Amp (middle)
+                    yield Label(self._row_label("Amp", ""), classes="control-label", id="lbl-mixer-1")
                     self.amp_display = Label(
                         self._fmt_knob(self.amp_level, 0.0, 1.0, f"{int(self.amp_level * 100)}%"),
                         classes="control-value", id="amp-display")
                     yield self.amp_display
                     yield Label(self._row_sep(), classes="control-label")
-                    yield Label(self._row_label("Master Vol", ""), classes="control-label", id="lbl-mixer-1")
+
+                    # Master Vol (bottom)
+                    yield Label(self._row_label("Master Vol", ""), classes="control-label", id="lbl-mixer-2")
                     self.master_volume_display = Label(
                         self._fmt_knob(self.master_volume, 0.0, 1.0, f"{int(self.master_volume * 100)}%"),
                         classes="control-value", id="master-volume-display")
                     yield self.master_volume_display
-                    yield Label(self._section_bottom(), classes="section-label")
+                    yield Label(self._section_bottom(), classes="section-bottom")
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -778,23 +822,27 @@ class SynthMode(Widget):
         if sec == "oscillator":
             if name == "Wave":
                 self._do_toggle_waveform("forward" if direction == "up" else "backward")
+            elif name == "Noise":
+                self._do_adjust_noise_level(direction)
             elif name == "Octave":
                 self._do_adjust_octave(direction)
         # FILTER
         elif sec == "filter":
-            if name == "Cutoff":      self._do_adjust_cutoff(direction)
-            elif name == "Resonance": self._do_adjust_resonance(direction)
-            elif name == "Type":      self._do_toggle_filter_mode(direction)
+            if name == "HPF Cut":   self._do_adjust_hpf_cutoff(direction)
+            elif name == "HPF Pk":  self._do_adjust_hpf_resonance(direction)
+            elif name == "LPF Cut": self._do_adjust_cutoff(direction)
+            elif name == "LPF Pk":  self._do_adjust_resonance(direction)
+            elif name == "KTrack":  self._do_step_key_tracking(direction)
         # ENVELOPE
         elif sec == "envelope":
             if name == "Attack":      self._do_adjust_attack(direction)
             elif name == "Decay":     self._do_adjust_decay(direction)
             elif name == "Sustain":   self._do_adjust_sustain(direction)
             elif name == "Release":   self._do_adjust_release(direction)
-            elif name == "Intensity": self._do_adjust_intensity(direction)
         # MIXER
         elif sec == "mixer":
-            if name == "Amp":          self._do_adjust_volume(direction)
+            if name == "Voice Type":   self._do_adjust_voice_type(direction)
+            elif name == "Amp":        self._do_adjust_volume(direction)
             elif name == "Master Vol": self._do_adjust_master_volume(direction)
         # LFO
         elif sec == "lfo":
@@ -836,6 +884,33 @@ class SynthMode(Widget):
         self._mark_dirty()
         self._autosave_state()
 
+    def _do_adjust_noise_level(self, direction: str = "up"):
+        """Adjust noise mix level (0.0 - 1.0) with adaptive step size based on repeat frequency."""
+        import time
+        current_time = time.time()
+        time_since_last = current_time - self._noise_last_adjust_time
+
+        # Determine step size: small (0.01) for first press, large (0.05) if rapidly repeated
+        if time_since_last < self._NOISE_REPEAT_THRESHOLD:
+            self._noise_repeat_count += 1
+            step = 0.05 if self._noise_repeat_count > 2 else 0.01  # After 3rd quick press, use larger step
+        else:
+            self._noise_repeat_count = 0
+            step = 0.01  # Start with fine increments
+
+        # Apply adjustment
+        if direction == "up":
+            self.noise_level = min(1.0, self.noise_level + step)
+        else:
+            self.noise_level = max(0.0, self.noise_level - step)
+
+        self._noise_last_adjust_time = current_time
+        self.synth_engine.update_parameters(noise_level=self.noise_level)
+        if self.noise_display:
+            self.noise_display.update(self._fmt_knob(self.noise_level, 0.0, 1.0, f"{int(self.noise_level * 100)}%"))
+        self._mark_dirty()
+        self._autosave_state()
+
     def _do_adjust_octave(self, direction: str = "up"):
         self.octave = min(2, self.octave + 1) if direction == "up" else max(-2, self.octave - 1)
         self.synth_engine.update_parameters(octave=self.octave)
@@ -859,6 +934,26 @@ class SynthMode(Widget):
             self.master_volume_display.update(self._fmt_knob(self.master_volume, 0.0, 1.0, f"{int(self.master_volume * 100)}%"))
         self._autosave_state()
 
+    def _do_adjust_voice_type(self, direction: str = "right"):
+        """Cycle through voice type modes: mono → poly → unison → mono"""
+        modes = ["mono", "poly", "unison"]
+        try:
+            idx = modes.index(self.voice_type.lower())
+        except (ValueError, AttributeError):
+            idx = 1  # Default to poly
+
+        if direction == "right" or direction == "up":
+            idx = (idx + 1) % len(modes)
+        else:  # left or down
+            idx = (idx - 1) % len(modes)
+
+        self.voice_type = modes[idx]
+        self.synth_engine.update_parameters(voice_type=self.voice_type)
+        if self.voice_type_display:
+            self.voice_type_display.update(self._fmt_voice_type())
+        self._mark_dirty()
+        self._autosave_state()
+
     def _do_adjust_cutoff(self, direction: str = "up"):
         self.cutoff = min(20000.0, self.cutoff * 1.1) if direction == "up" else max(20.0, self.cutoff / 1.1)
         self.synth_engine.update_parameters(cutoff=self.cutoff)
@@ -875,13 +970,37 @@ class SynthMode(Widget):
         self._mark_dirty()
         self._autosave_state()
 
-    def _do_toggle_filter_mode(self, direction: str = "up"):
-        modes = ["ladder", "svf"]
-        idx = modes.index(self.filter_mode) if self.filter_mode in modes else 0
-        self.filter_mode = modes[(idx + 1) % len(modes)]
-        self.synth_engine.update_parameters(filter_mode=self.filter_mode)
-        if self.filter_mode_display:
-            self.filter_mode_display.update(self._fmt_filter_mode())
+    def _do_adjust_hpf_cutoff(self, direction: str = "up"):
+        self.hpf_cutoff = min(4000.0, self.hpf_cutoff * 1.15) if direction == "up" else max(20.0, self.hpf_cutoff / 1.15)
+        self.synth_engine.update_parameters(hpf_cutoff=self.hpf_cutoff)
+        if self.hpf_cutoff_display:
+            self.hpf_cutoff_display.update(self._fmt_hpf_cutoff())
+        self._mark_dirty()
+        self._autosave_state()
+
+    def _do_adjust_hpf_resonance(self, direction: str = "up"):
+        self.hpf_resonance = min(0.99, self.hpf_resonance + 0.05) if direction == "up" else max(0.0, self.hpf_resonance - 0.05)
+        self.synth_engine.update_parameters(hpf_resonance=self.hpf_resonance)
+        if self.hpf_resonance_display:
+            self.hpf_resonance_display.update(self._fmt_hpf_resonance())
+        self._mark_dirty()
+        self._autosave_state()
+
+    # Key tracking cycles through 5 discrete steps (0%, 25%, 50%, 75%, 100%)
+    _KEY_TRACKING_STEPS = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    def _do_step_key_tracking(self, direction: str = "up"):
+        steps = self._KEY_TRACKING_STEPS
+        # Find the nearest step index to the current value
+        idx = min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))
+        if direction == "up":
+            idx = min(len(steps) - 1, idx + 1)
+        else:
+            idx = max(0, idx - 1)
+        self.key_tracking = steps[idx]
+        self.synth_engine.update_parameters(key_tracking=self.key_tracking)
+        if self.key_tracking_display:
+            self.key_tracking_display.update(self._fmt_key_tracking())
         self._mark_dirty()
         self._autosave_state()
 
@@ -914,14 +1033,6 @@ class SynthMode(Widget):
         self.synth_engine.update_parameters(release=self.release)
         if self.release_display:
             self.release_display.update(self._fmt_time(self.release))
-        self._mark_dirty()
-        self._autosave_state()
-
-    def _do_adjust_intensity(self, direction: str = "up"):
-        self.intensity = min(1.0, self.intensity + 0.05) if direction == "up" else max(0.0, self.intensity - 0.05)
-        self.synth_engine.update_parameters(intensity=self.intensity)
-        if self.intensity_display:
-            self.intensity_display.update(self._fmt_knob(self.intensity, 0.0, 1.0, f"{int(self.intensity * 100)}%"))
         self._mark_dirty()
         self._autosave_state()
 
@@ -1073,10 +1184,12 @@ class SynthMode(Widget):
     def action_save_preset_new(self):
         params = self._current_params()
         params.pop("master_volume", None)
-        preset = self.preset_manager.save_new(params)
+        # Use suggested name if available (from randomization), otherwise generate new one
+        preset = self.preset_manager.save_new(params, name=self._suggested_preset_name)
         self._current_preset = preset
         self._preset_index = self.preset_manager.find_index_by_filename(preset.filename)
         self._dirty = False
+        self._suggested_preset_name = None  # Clear suggested name after saving
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
         self.app.notify(f'💾 Saved: "{preset.name}"', timeout=3)
@@ -1097,6 +1210,55 @@ class SynthMode(Widget):
         self._update_preset_ui()
         self.app.notify(f'✅ Updated: "{preset.name}"', timeout=3)
 
+    def action_open_preset_browser(self):
+        """Open the factory preset browser screen."""
+        presets_data = get_factory_presets()
+        screen = PresetBrowserScreen(
+            presets_data,
+            synth_engine=self.synth_engine,
+            on_preset_selected=self._on_factory_preset_selected,
+            on_cancel=self._on_preset_browser_cancel,
+        )
+        # Push screen onto the stack
+        self.app.push_screen(screen)
+
+    def _on_factory_preset_selected(self, category_id: str, preset_name: str, preset_data: dict):
+        """Callback when a factory preset is selected from the browser.
+
+        Factory presets are applied directly WITHOUT saving to preset manager.
+        The user must press S to save it as a favorite (user preset).
+        """
+        if preset_data is None:
+            return
+
+        # Ensure factory preset has all required parameters with sensible defaults
+        preset_params = dict(preset_data)  # Copy the preset
+
+        # Add missing parameters that _apply_params expects
+        if "amp_level" not in preset_params:
+            preset_params["amp_level"] = 0.8
+        if "master_volume" not in preset_params:
+            preset_params["master_volume"] = 0.8
+        if "arp_gate" not in preset_params:
+            preset_params["arp_gate"] = 0.5
+        if "chorus_voices" not in preset_params:
+            preset_params["chorus_voices"] = 4
+
+        # Apply factory preset to synth engine directly (no save yet)
+        self._apply_params(preset_params)
+
+        # Mark as dirty and not from preset manager
+        self._current_preset = None
+        self._preset_index = -1
+        self._dirty = True
+        self._suggested_preset_name = f"User: {preset_name}"  # Suggest name for S key save
+
+        self._update_preset_ui()
+
+    def _on_preset_browser_cancel(self):
+        """Callback when preset browser is cancelled."""
+        pass
+
     def _load_preset_at_index(self, index: int):
         preset = self.preset_manager.get(index)
         if preset is None:
@@ -1105,6 +1267,7 @@ class SynthMode(Widget):
         params = self.preset_manager.extract_params(preset)
         self._apply_params(params)
         self._dirty = False
+        self._suggested_preset_name = None  # Clear suggested name when loading a preset
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
 
@@ -1113,15 +1276,20 @@ class SynthMode(Widget):
     def _apply_params(self, params: dict):
         self.waveform   = params.get("waveform",  self.waveform)
         self.octave     = params.get("octave",    self.octave)
+        self.noise_level = params.get("noise_level", self.noise_level)
         self.amp_level  = params.get("amp_level", self.amp_level)
-        self.cutoff     = params.get("cutoff",    self.cutoff)
-        self.resonance   = params.get("resonance",   self.resonance)
-        self.filter_mode = params.get("filter_mode", self.filter_mode)
+        self.cutoff        = params.get("cutoff",        self.cutoff)
+        self.hpf_cutoff    = params.get("hpf_cutoff",    self.hpf_cutoff)
+        self.resonance     = params.get("resonance",     self.resonance)
+        self.hpf_resonance = params.get("hpf_resonance", self.hpf_resonance)
+        self.key_tracking  = params.get("key_tracking",  self.key_tracking)
+        # Snap key_tracking to nearest discrete step when loading from old presets
+        steps = self._KEY_TRACKING_STEPS
+        self.key_tracking = steps[min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))]
         self.attack      = params.get("attack",      self.attack)
         self.decay      = params.get("decay",     self.decay)
         self.sustain    = params.get("sustain",   self.sustain)
         self.release    = params.get("release",   self.release)
-        self.intensity  = params.get("intensity", self.intensity)
         # LFO
         self.lfo_freq   = params.get("lfo_freq",   self.lfo_freq)
         self.lfo_depth  = params.get("lfo_depth",  self.lfo_depth)
@@ -1141,6 +1309,8 @@ class SynthMode(Widget):
         self.arp_mode    = params.get("arp_mode",    self.arp_mode)
         self.arp_gate    = params.get("arp_gate",    self.arp_gate)
         self.arp_range   = params.get("arp_range",   self.arp_range)
+        # Voice Type
+        self.voice_type  = params.get("voice_type",  self.voice_type)
         self._push_params_to_engine()
         self._refresh_all_displays()
 
@@ -1148,16 +1318,18 @@ class SynthMode(Widget):
         self.synth_engine.update_parameters(
             waveform=self.waveform,
             octave=self.octave,
+            noise_level=self.noise_level,
             amp_level=self.amp_level,
             master_volume=self.master_volume,
             cutoff=self.cutoff,
+            hpf_cutoff=self.hpf_cutoff,
             resonance=self.resonance,
-            filter_mode=self.filter_mode,
+            hpf_resonance=self.hpf_resonance,
+            key_tracking=self.key_tracking,
             attack=self.attack,
             decay=self.decay,
             sustain=self.sustain,
             release=self.release,
-            intensity=self.intensity,
             # LFO
             lfo_freq=self.lfo_freq,
             lfo_depth=self.lfo_depth,
@@ -1178,22 +1350,26 @@ class SynthMode(Widget):
             arp_mode=self.arp_mode,
             arp_gate=self.arp_gate,
             arp_range=self.arp_range,
+            # Voice Type
+            voice_type=self.voice_type,
         )
 
     def _current_params(self) -> dict:
         return {
             "waveform":        self.waveform,
             "octave":          self.octave,
+            "noise_level":     self.noise_level,
             "amp_level":       self.amp_level,
             "master_volume":   self.master_volume,
             "cutoff":          self.cutoff,
+            "hpf_cutoff":      self.hpf_cutoff,
             "resonance":       self.resonance,
-            "filter_mode":     self.filter_mode,
+            "hpf_resonance":   self.hpf_resonance,
+            "key_tracking":    self.key_tracking,
             "attack":          self.attack,
             "decay":           self.decay,
             "sustain":         self.sustain,
             "release":         self.release,
-            "intensity":       self.intensity,
             # LFO
             "lfo_freq":        self.lfo_freq,
             "lfo_depth":       self.lfo_depth,
@@ -1213,6 +1389,8 @@ class SynthMode(Widget):
             "arp_mode":        self.arp_mode,
             "arp_gate":        self.arp_gate,
             "arp_range":       self.arp_range,
+            # Voice Type
+            "voice_type":      self.voice_type,
         }
 
     def _mark_dirty(self):
@@ -1222,6 +1400,17 @@ class SynthMode(Widget):
 
     def _autosave_state(self):
         self.config_manager.set_synth_state(self._current_params())
+
+    def _show_randomized_indicator(self, duration: float = 1.5):
+        """Show 🎲 Randomized! indicator in preset bar, then hide it."""
+        self._randomized_just_now = True
+        self._update_preset_ui()
+        self.set_timer(duration, self._hide_randomized_indicator)
+
+    def _hide_randomized_indicator(self):
+        """Hide the randomized indicator and refresh preset bar."""
+        self._randomized_just_now = False
+        self._update_preset_ui()
 
     # ── UI update helpers ────────────────────────────────────────
 
@@ -1309,11 +1498,6 @@ class SynthMode(Widget):
             return
         self._do_adjust_release(direction)
 
-    def action_adjust_intensity(self, direction: str = "up"):
-        if self._focused():
-            return
-        self._do_adjust_intensity(direction)
-
     def action_panic(self):
         self.synth_engine.all_notes_off()
         self.app.notify("🛑 All notes off (Panic)", severity="warning", timeout=2)
@@ -1322,12 +1506,19 @@ class SynthMode(Widget):
         """Roll the dice — generate musically useful random synth parameters."""
         self.waveform = random.choice(["pure_sine", "sine", "square", "sawtooth", "triangle"])
         self.octave = random.choices([-2, -1, 0, 1, 2], weights=[1, 2, 4, 2, 1])[0]
-        self.amp_level = round(random.uniform(0.50, 0.95), 2)
+        self.amp_level = 0.95  # Always set to 95% (not randomized)
         self.cutoff = round(10 ** random.uniform(math.log10(200), math.log10(18000)), 1)
+        self.hpf_cutoff = round(10 ** random.uniform(math.log10(20), math.log10(800)), 1)
         self.resonance = round(random.choices(
             [random.uniform(0.0, 0.3), random.uniform(0.3, 0.65), random.uniform(0.65, 0.9)],
             weights=[50, 35, 15]
         )[0], 2)
+        self.hpf_resonance = round(random.choices(
+            [0.0, random.uniform(0.0, 0.4), random.uniform(0.4, 0.8)],
+            weights=[60, 30, 10]
+        )[0], 2)
+        self.key_tracking = random.choice(self._KEY_TRACKING_STEPS)
+        self.voice_type = random.choice(["mono", "poly", "unison"])
         self.attack = round(10 ** random.uniform(math.log10(0.001), math.log10(2.0)), 4)
         self.decay = round(10 ** random.uniform(math.log10(0.001), math.log10(2.0)), 4)
         self.sustain = round(random.choices(
@@ -1345,9 +1536,21 @@ class SynthMode(Widget):
         self.synth_engine.midi_event_queue.put({'type': 'mute_gate'})
         self._push_params_to_engine()
         self._refresh_all_displays()
-        self._mark_dirty()
+
+        # Generate suggested name for the randomized parameters
+        # (user can save manually if they want)
+        self._suggested_preset_name = self.preset_manager._unique_musical_name()
+
+        # Mark as unsaved since parameters have changed
+        self._current_preset = None
+        self._preset_index = -1
+        self._dirty = True
+
+        self._update_preset_ui()
         self._autosave_state()
-        self.app.notify("🎲 Randomized!", timeout=2)
+
+        # Show 🎲 Randomized! indicator in preset bar (avoids audio thread blocking)
+        self._show_randomized_indicator()
 
     def action_randomize_focused(self):
         """Shift+Minus — randomize only the currently highlighted parameter.
@@ -1378,20 +1581,28 @@ class SynthMode(Widget):
                 if self.octave_display: self.octave_display.update(self._fmt_octave())
         # ── Filter ────────────────────────────────────────────────
         elif sec == "filter":
-            if name == "Cutoff":
+            if name == "HPF Cut":
+                self.hpf_cutoff = round(10 ** random.uniform(math.log10(20), math.log10(3000)), 1)
+                self.synth_engine.update_parameters(hpf_cutoff=self.hpf_cutoff)
+                if self.hpf_cutoff_display: self.hpf_cutoff_display.update(self._fmt_hpf_cutoff())
+            elif name == "HPF Pk":
+                self.hpf_resonance = round(random.uniform(0.0, 0.8), 2)
+                self.synth_engine.update_parameters(hpf_resonance=self.hpf_resonance)
+                if self.hpf_resonance_display: self.hpf_resonance_display.update(self._fmt_hpf_resonance())
+            elif name == "LPF Cut":
                 self.cutoff = round(10 ** random.uniform(math.log10(200), math.log10(18000)), 1)
                 self.synth_engine.update_parameters(cutoff=self.cutoff)
                 if self.cutoff_display: self.cutoff_display.update(self._fmt_cutoff())
-            elif name == "Resonance":
+            elif name == "LPF Pk":
                 self.resonance = round(random.choices(
                     [random.uniform(0.0, 0.3), random.uniform(0.3, 0.65), random.uniform(0.65, 0.9)],
                     weights=[50, 35, 15])[0], 2)
                 self.synth_engine.update_parameters(resonance=self.resonance)
                 if self.resonance_display: self.resonance_display.update(self._fmt_resonance())
-            elif name == "Type":
-                self.filter_mode = random.choice(["ladder", "svf"])
-                self.synth_engine.update_parameters(filter_mode=self.filter_mode)
-                if self.filter_mode_display: self.filter_mode_display.update(self._fmt_filter_mode())
+            elif name == "KTrack":
+                self.key_tracking = random.choice(self._KEY_TRACKING_STEPS)
+                self.synth_engine.update_parameters(key_tracking=self.key_tracking)
+                if self.key_tracking_display: self.key_tracking_display.update(self._fmt_key_tracking())
         # ── Envelope ──────────────────────────────────────────────
         elif sec == "envelope":
             if name == "Attack":
@@ -1412,10 +1623,6 @@ class SynthMode(Widget):
                 self.release = round(10 ** random.uniform(math.log10(0.01), math.log10(3.0)), 4)
                 self.synth_engine.update_parameters(release=self.release)
                 if self.release_display: self.release_display.update(self._fmt_time(self.release))
-            elif name == "Intensity":
-                self.intensity = round(random.uniform(0.40, 1.0), 2)
-                self.synth_engine.update_parameters(intensity=self.intensity)
-                if self.intensity_display: self.intensity_display.update(self._fmt_knob(self.intensity, 0.0, 1.0, f"{int(self.intensity * 100)}%"))
         # ── LFO ───────────────────────────────────────────────────
         elif sec == "lfo":
             if name == "Rate":
@@ -1490,10 +1697,14 @@ class SynthMode(Widget):
                 self._do_toggle_arp_enabled()   # toggle is more useful than random bool
         # ── Mixer ─────────────────────────────────────────────────
         elif sec == "mixer":
-            if name == "Amp":
-                self.amp_level = round(random.uniform(0.5, 0.95), 2)
-                self.synth_engine.update_parameters(amp_level=self.amp_level)
-                if self.amp_display: self.amp_display.update(self._fmt_knob(self.amp_level, 0.0, 1.0, f"{int(self.amp_level * 100)}%"))
+            if name == "Voice Type":
+                self.voice_type = random.choice(["mono", "poly", "unison"])
+                self.synth_engine.update_parameters(voice_type=self.voice_type)
+                if self.voice_type_display:
+                    self.voice_type_display.update(self._fmt_voice_type())
+            elif name == "Amp":
+                # Amp is always 95% — not randomized
+                pass
             elif name == "Master Vol":
                 self.master_volume = round(random.uniform(0.5, 1.0), 2)
                 self.synth_engine.update_parameters(master_volume=self.master_volume)
@@ -1509,14 +1720,17 @@ class SynthMode(Widget):
         if self.waveform_display: self.waveform_display.update(self._fmt_waveform())
         if self.waveform_shape_display: self.waveform_shape_display.update(self._fmt_waveform_shape())
         if self.octave_display: self.octave_display.update(self._fmt_octave())
+        if self.hpf_cutoff_display: self.hpf_cutoff_display.update(self._fmt_hpf_cutoff())
+        if self.hpf_resonance_display: self.hpf_resonance_display.update(self._fmt_hpf_resonance())
         if self.cutoff_display: self.cutoff_display.update(self._fmt_cutoff())
         if self.resonance_display: self.resonance_display.update(self._fmt_resonance())
-        if self.filter_mode_display: self.filter_mode_display.update(self._fmt_filter_mode())
+        if self.key_tracking_display: self.key_tracking_display.update(self._fmt_key_tracking())
         if self.attack_display: self.attack_display.update(self._fmt_time(self.attack))
         if self.decay_display: self.decay_display.update(self._fmt_time(self.decay))
         if self.sustain_display: self.sustain_display.update(self._fmt_knob(self.sustain, 0.0, 1.0, f"{int(self.sustain * 100)}%"))
         if self.release_display: self.release_display.update(self._fmt_time(self.release))
-        if self.intensity_display: self.intensity_display.update(self._fmt_knob(self.intensity, 0.0, 1.0, f"{int(self.intensity * 100)}%"))
+        # Mixer
+        if self.voice_type_display: self.voice_type_display.update(self._fmt_voice_type())
         if self.amp_display: self.amp_display.update(self._fmt_knob(self.amp_level, 0.0, 1.0, f"{int(self.amp_level * 100)}%"))
         if self.master_volume_display: self.master_volume_display.update(self._fmt_knob(self.master_volume, 0.0, 1.0, f"{int(self.master_volume * 100)}%"))
         # LFO
@@ -1630,18 +1844,32 @@ class SynthMode(Widget):
     def _fmt_resonance(self) -> str:
         return self._fmt_knob(self.resonance / 0.9, 0.0, 1.0, f"{int(self.resonance * 100)}%")
 
-    def _fmt_filter_mode(self) -> str:
-        """Selector display for filter type: LADR | SVF."""
-        options = [("ladder", "LADR"), ("svf", "SVF")]
+    def _fmt_hpf_cutoff(self) -> str:
+        log_c = math.log10(max(20.0, self.hpf_cutoff))
+        log_min = math.log10(20.0)
+        log_max = math.log10(4000.0)
+        norm = (log_c - log_min) / (log_max - log_min)
+        label = f"{self.hpf_cutoff / 1000:.2f}kHz" if self.hpf_cutoff >= 1000 else f"{self.hpf_cutoff:.0f}Hz"
+        return self._fmt_knob(norm, 0.0, 1.0, label)
+
+    def _fmt_hpf_resonance(self) -> str:
+        return self._fmt_knob(self.hpf_resonance / 0.99, 0.0, 1.0, f"{int(self.hpf_resonance * 100)}%")
+
+    def _fmt_key_tracking(self) -> str:
+        """Five-mode selector display for key tracking: 0%·25%·50%·75%·100%."""
+        steps = self._KEY_TRACKING_STEPS
+        labels = ["0%", "25%", "50%", "75%", "100%"]
+        # Find current step
+        idx = min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))
         parts = []
-        for key, tag in options:
-            if self.filter_mode == key:
-                parts.append(f"[bold #00ff00 reverse]{tag}[/]")
+        for i, lbl in enumerate(labels):
+            if i == idx:
+                parts.append(f"[bold #00ff00 reverse]{lbl}[/]")
             else:
-                parts.append(f"[#446644]{tag}[/]")
-        line  = " ".join(parts)
-        plain = " ".join(tag for _, tag in options)
-        pad   = max(0, self._W - len(plain) - 2)
+                parts.append(f"[#446644]{lbl}[/]")
+        line  = "·".join(parts)
+        plain = "·".join(labels)
+        pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
         return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
@@ -1819,6 +2047,31 @@ class SynthMode(Widget):
         rp    = pad - lp
         return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
 
+    def _fmt_voice_type(self) -> str:
+        """Format voice type as radio button display: ●MONO ○POLY ○UNISON"""
+        modes = ["MONO", "POLY", "UNISON"]
+        mode_values = ["mono", "poly", "unison"]
+        try:
+            idx = mode_values.index(self.voice_type.lower())
+        except (ValueError, AttributeError):
+            idx = 1  # Default to POLY if invalid
+
+        # Display as: ●MONO ○POLY ○UNISON (with selected one highlighted)
+        display_parts = []
+        for i, mode in enumerate(modes):
+            if i == idx:
+                display_parts.append(f"[bold #00ff00]●{mode}[/]")
+            else:
+                display_parts.append(f"[#666666]○{mode}[/]")
+
+        display = " ".join(display_parts)
+        # Calculate plain text for padding (without markup)
+        plain = " ".join([f"●{m}" if i == idx else f"○{m}" for i, m in enumerate(modes)])
+        pad = max(0, self._W - len(plain))
+        lp = pad // 2
+        rp = pad - lp
+        return f"[#00cc00]│[/]{' ' * lp}{display}{' ' * rp}[#00cc00]│[/]"
+
     # ── Octave display ────────────────────────────────────────────
 
     def _fmt_octave(self) -> str:
@@ -1864,15 +2117,24 @@ class SynthMode(Widget):
 
     def _fmt_preset_bar(self) -> str:
         total = self.preset_manager.count()
+        randomized_indicator = " [bold #00ff00]🎲 Randomized![/]" if self._randomized_just_now else ""
+
         if self._current_preset and total:
             idx   = self._preset_index + 1
             dirty = " [bold yellow]✱[/]" if self._dirty else ""
+
+            # Show origin icon: 👤 for user presets, 🏭 for built-in preset list
+            origin_icon = "👤" if self._current_preset.origin == "user" else "🏭"
+
             return (
-                f"[dim #00aa00]◄[/] [bold #00ff00]{self._current_preset.name}[/]{dirty}"
+                f"[dim #00aa00]◄[/] {origin_icon} [bold #00ff00]{self._current_preset.name}[/]{dirty}"
                 f"  [dim]({idx}/{total})[/]"
-                f"  [dim #00aa00]►[/]"
+                f"  [dim #00aa00]►[/]{randomized_indicator}"
             )
+        elif self._dirty and self._suggested_preset_name:
+            # Show suggested name after randomization
+            return f"[bold yellow]✱ {self._suggested_preset_name}[/]{randomized_indicator}"
         elif self._dirty:
-            return "[bold yellow]✱ unsaved[/]"
+            return f"[bold yellow]✱ unsaved[/]{randomized_indicator}"
         else:
             return "[dim]— no preset —[/]"

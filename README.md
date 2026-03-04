@@ -7,7 +7,7 @@
 | ![Main Menu](docs/images/main-menu.png) | ![Piano Mode](docs/images/piano-mode.png) |
 | ![Synth Mode](docs/images/synth-mode.png) | ![Tambor Mode](docs/images/tambor-mode.png) |
 
-**Version 1.7.0**
+**Version 1.7.5**
 
 A terminal-based MIDI piano application with real-time visualization, chord detection, traditional musical staff notation, a polyphonic synthesizer with a full signal-processing chain and preset system, and a fully-featured metronome.
 
@@ -36,6 +36,27 @@ A terminal-based MIDI piano application with real-time visualization, chord dete
 - **Chord Compendium**: Reference guide with all chord types across all musical keys.
   - **Audio Playback**: Hear chords played as you browse.
 - **Metronome Mode**: A highly customizable and musically aware metronome with BPM shared across all modes.
+
+## What's New in v1.7.5
+
+**Filter, Preset & Envelope refinements**
+
+### Key Tracking — Now Audible
+The Key Tracking parameter in the FILTER section previously had no audible effect due to a velocity multiplier overriding it. Fixed:
+- **Reference note changed to C4** (middle C, 261.63 Hz) — the musical standard. At C4 the filter is unaffected; below C4 it darkens; above C4 it brightens.
+- **Velocity no longer biases filter cutoff** — filter frequency is now driven purely by pitch tracking and the cutoff knob.
+- Result: at 100% key tracking, each octave above C4 doubles the cutoff frequency, and each octave below halves it.
+
+### Preset System Disambiguation
+Two previously overlapping "factory preset" concepts are now clearly separated:
+- **Preset list** (top of Synth Mode, `,` / `.` keys): 10 built-in JSON presets + unlimited user-saved presets.
+- **Factory Presets browser** (`N` key): 128 professionally programmed presets across 8 categories (Bass, Leads, Pads, Plucked, Seq, FX, Misc, Synth).
+- Factory presets now include `hpf_cutoff` and `hpf_resonance` parameters; `key_tracking` values snap to clean steps (0 / 25 / 50 / 75 / 100%).
+
+### Intensity Parameter Removed
+The Envelope Intensity parameter has been removed from the UI and hardcoded to 100% in the engine. Intensity was redundant with Amp level — removing it simplifies the interface and frees up visual space in the ENVELOPE section.
+
+---
 
 ## What's New in v1.7.0
 
@@ -357,7 +378,6 @@ Q/E change the highlighted value.
 | **Y / H** | Decay down / up |
 | **U / J** | Sustain down / up |
 | **I / K** | Release down / up |
-| **O / L** | Intensity down / up |
 | **[ / ]** | Master volume down / up |
 | **↑ / ↓** | Amp level up / down |
 
@@ -410,7 +430,7 @@ Q/E change the highlighted value.
 - **Randomizer**: Press `-` to instantly generate a new random patch
 - **Oscillator**: Sine, Square, Sawtooth, and Triangle waveforms with octave transpose
 - **Filter**: Low-pass filter with logarithmic cutoff (20Hz–20kHz) and resonance
-- **Envelope**: Full ADSR (Attack, Decay, Sustain, Release) + Intensity
+- **Envelope**: Full ADSR (Attack, Decay, Sustain, Release)
 - **AMP**: Master volume with automatic waveform gain compensation
 - **MIDI Controllers**: Pitch bend (±2 semitones) and modulation wheel (CC1)
 

@@ -5,10 +5,10 @@ import re
 from pathlib import Path
 from typing import Optional
 
-# Factory preset filenames — always shown first, sorted alphabetically.
+# Built-in preset filenames — always shown first, sorted alphabetically.
 # Any file NOT in this set is treated as a user preset and appended in
 # creation-time order (oldest → newest), so new saves always go to the end.
-_FACTORY_FILENAMES = {
+_BUILTIN_FILENAMES = {
     "bright_saw_lead.json",
     "church_organ.json",
     "deep_bass.json",
@@ -48,16 +48,19 @@ _NOUNS = [
 DEFAULT_PARAMS: dict = {
     "waveform": "sine",
     "octave": 0,
-    "amp_level": 0.75,
+    "noise_level": 0.0,
+    "amp_level": 0.95,
     "cutoff": 2000.0,
     "hpf_cutoff": 20.0,
     "resonance": 0.3,
-    "filter_mode": "ladder",
+    "hpf_resonance": 0.0,
+    "key_tracking": 0.5,
+    "filter_mode": "ladder",  # kept for backward-compat with old presets; ignored by engine
     "attack": 0.01,
     "decay": 0.2,
     "sustain": 0.7,
     "release": 0.1,
-    "intensity": 0.8,
+    "intensity": 1.0,
     "rank2_enabled": False,
     "rank2_waveform": "sawtooth",
     "rank2_detune": 5.0,
@@ -85,6 +88,8 @@ DEFAULT_PARAMS: dict = {
     "arp_mode":    "up",     # "up" | "down" | "up_down" | "random"
     "arp_gate":    0.5,      # 0.05–1.0 note-on fraction of step
     "arp_range":   1,        # 1–4 octave span
+    # Voice Type
+    "voice_type": "poly",    # "mono" | "poly" | "unison"
 }
 
 PARAM_KEYS = list(DEFAULT_PARAMS.keys())
@@ -93,13 +98,14 @@ PARAM_KEYS = list(DEFAULT_PARAMS.keys())
 class Preset:
     """A single preset entry."""
 
-    def __init__(self, name: str, filename: str, params: dict):
+    def __init__(self, name: str, filename: str, params: dict, origin: str = "user"):
         self.name = name
         self.filename = filename  # basename, e.g. "warm_pad.json"
         self.params = params
+        self.origin = origin  # "built-in" or "user"
 
     def __repr__(self):
-        return f"Preset({self.name!r}, {self.filename!r})"
+        return f"Preset({self.name!r}, {self.filename!r}, origin={self.origin!r})"
 
 
 class PresetManager:
@@ -135,10 +141,43 @@ class PresetManager:
                 return i
         return -1
 
-    def save_new(self, params: dict) -> Preset:
-        """Save params as a brand-new preset with a random musical name."""
-        name = self._unique_musical_name()
+    def save_new(self, params: dict, name: Optional[str] = None) -> Preset:
+        """Save params as a brand-new preset with a random musical name.
+
+        If name is provided, use it; otherwise generate a unique musical name.
+        """
+        if name is None:
+            name = self._unique_musical_name()
         return self._write_preset(name, params)
+
+    def save_from_factory(self, factory_preset_name: str, factory_params: dict) -> Preset:
+        """Create a user preset from a factory preset.
+
+        This is called when user selects a factory preset.
+        Creates a new user preset with "User: " prefix + factory preset name.
+
+        Args:
+            factory_preset_name: Name of the factory preset
+            factory_params: Parameters from the factory preset
+
+        Returns:
+            New user Preset object with "User: " prefix
+        """
+        # Check if we already have a user copy of this factory preset
+        user_name = f"User: {factory_preset_name}"
+        existing_index = next(
+            (i for i, p in enumerate(self.presets)
+             if p.name == user_name and p.origin == "user"),
+            None
+        )
+
+        if existing_index is not None:
+            # Overwrite existing user copy
+            preset = self.presets[existing_index]
+            return self.save_overwrite(preset, factory_params)
+        else:
+            # Create new user preset
+            return self.save_new(factory_params, name=user_name)
 
     def save_overwrite(self, preset: Preset, params: dict) -> Preset:
         """Overwrite an existing preset file with new params, keeping its name."""
@@ -154,27 +193,28 @@ class PresetManager:
 
     def _reload(self):
         """Load all presets with two-tier ordering:
-        1. Factory presets — alphabetically by filename (stable, predictable)
-        2. User presets    — by file modification time, oldest first
-                             so newly saved presets always appear at the end.
+        1. Built-in presets — alphabetically by filename (stable, predictable)
+        2. User presets     — by file modification time, oldest first
+                              so newly saved presets always appear at the end.
         """
         all_paths = list(self.presets_dir.glob("*.json"))
 
-        factory_paths = sorted(
-            [p for p in all_paths if p.name in _FACTORY_FILENAMES]
+        builtin_paths = sorted(
+            [p for p in all_paths if p.name in _BUILTIN_FILENAMES]
         )
         user_paths = sorted(
-            [p for p in all_paths if p.name not in _FACTORY_FILENAMES],
+            [p for p in all_paths if p.name not in _BUILTIN_FILENAMES],
             key=lambda p: p.stat().st_mtime,
         )
 
         presets = []
-        for path in factory_paths + user_paths:
+        for path in builtin_paths + user_paths:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 name = data.get("name", path.stem.replace("_", " ").title())
-                presets.append(Preset(name=name, filename=path.name, params=data))
+                origin = "built-in" if path.name in _BUILTIN_FILENAMES else "user"
+                presets.append(Preset(name=name, filename=path.name, params=data, origin=origin))
             except Exception:
                 pass  # skip malformed files
         self.presets = presets

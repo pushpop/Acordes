@@ -83,20 +83,23 @@ class DrumVoiceManager:
         # This prevents parameter overwriting when multiple drums trigger on same step
         self.midi_note_params[midi_note] = synth_params.copy()
 
-        # Apply drum-specific synthesis parameters immediately before note_on
-        # This ensures parameters are set correctly for this specific drum voice
-        # before the note triggers, preventing parameter conflicts between drums
-        self._apply_drum_parameters(synth_params)
+        # Build the mapped params dict (same logic as _apply_drum_parameters but
+        # returned as a dict instead of sent immediately)
+        params_to_apply = self._build_drum_params(synth_params)
 
         # Apply humanization to velocity (±20% variation)
         humanized_velocity = max(1, min(127, int(velocity * humanize_velocity)))
 
-        # Trigger the note - the SynthEngine will:
-        # - Retrigger if same MIDI note is already playing (no glitch)
-        # - Allocate a new voice if available
-        # - Voice steal if necessary
-        # - Use the parameters we just applied above
-        self.synth_engine.note_on(midi_note, humanized_velocity)
+        # Atomic drum trigger: params and note_on bundled in one queue event so
+        # they cannot be separated by other drums' param updates.  This prevents
+        # the cross-contamination artifact where simultaneous drums (e.g. Kick +
+        # HiHat on the same step) end up sharing the last drum's filter/waveform.
+        if hasattr(self.synth_engine, 'drum_trigger'):
+            self.synth_engine.drum_trigger(midi_note, humanized_velocity, params_to_apply)
+        else:
+            # Fallback for engines that don't support drum_trigger
+            self.synth_engine.update_parameters(**params_to_apply)
+            self.synth_engine.note_on(midi_note, humanized_velocity)
 
         # Track this note as the last triggered note for this drum
         voice_info["last_note"] = midi_note
@@ -118,6 +121,50 @@ class DrumVoiceManager:
             self.synth_engine.note_off(voice_info["last_note"], velocity)
             voice_info["is_active"] = False
 
+    def _build_drum_params(self, synth_params: Dict[str, Any]) -> Dict[str, Any]:
+        """Build the mapped parameter dict from drum preset format to SynthEngine format.
+
+        Returns a dict ready to pass to update_parameters() or drum_trigger().
+        """
+        params_to_apply = {}
+
+        if "attack" in synth_params:
+            params_to_apply["attack"] = synth_params["attack"]
+        if "decay" in synth_params:
+            params_to_apply["decay"] = synth_params["decay"]
+        if "sustain" in synth_params:
+            params_to_apply["sustain"] = synth_params["sustain"]
+        if "release" in synth_params:
+            params_to_apply["release"] = synth_params["release"]
+
+        if "cutoff_freq" in synth_params:
+            params_to_apply["cutoff"] = synth_params["cutoff_freq"]
+        if "resonance" in synth_params:
+            params_to_apply["resonance"] = synth_params["resonance"]
+
+        if "oscillator_type" in synth_params:
+            osc_type = synth_params["oscillator_type"]
+            if osc_type == "noise_white":
+                params_to_apply["waveform"] = "noise_white"
+            elif osc_type == "noise_pink":
+                params_to_apply["waveform"] = "noise_pink"
+            elif osc_type in ["sine", "square", "triangle", "sawtooth", "pure_sine"]:
+                params_to_apply["waveform"] = osc_type
+            else:
+                params_to_apply["waveform"] = "sine"
+
+        if "noise_level" in synth_params:
+            params_to_apply["noise_level"] = synth_params["noise_level"]
+        else:
+            params_to_apply["noise_level"] = 0.0
+
+        # filter_mode removed: LPF always uses ladder in the engine now
+
+        if "volume" in synth_params:
+            params_to_apply["amp_level"] = synth_params["volume"]
+
+        return params_to_apply
+
     def _apply_drum_parameters(self, synth_params: Dict[str, Any]):
         """
         Apply drum-specific parameters to the synthesizer engine.
@@ -126,6 +173,8 @@ class DrumVoiceManager:
         - attack, decay, sustain, release: envelope times (seconds)
         - cutoff_freq → cutoff: filter cutoff frequency
         - oscillator_type → waveform: waveform selection
+        - noise_level → noise_level: noise mix on top of oscillator (0=pure osc, 1=pure noise)
+        - filter_mode → filter_mode: "ladder" (warm) or "svf" (sharp)
         - volume → amp_level: output level
 
         Args:
@@ -161,6 +210,15 @@ class DrumVoiceManager:
                 params_to_apply["waveform"] = osc_type
             else:
                 params_to_apply["waveform"] = "sine"
+
+        # Noise mix on top of oscillator (0=pure osc, 1=pure noise)
+        if "noise_level" in synth_params:
+            params_to_apply["noise_level"] = synth_params["noise_level"]
+        else:
+            params_to_apply["noise_level"] = 0.0  # Reset noise level between drums
+
+        # Filter character
+        # filter_mode removed: LPF always uses ladder in the engine now
 
         # Volume
         if "volume" in synth_params:

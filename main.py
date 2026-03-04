@@ -23,6 +23,7 @@ from midi.input_handler import MIDIInputHandler
 from music.chord_detector import ChordDetector
 from music.chord_library import ChordLibrary
 from music.synth_engine import SynthEngine
+from music.synth_engine_subprocess import SynthEngineSubprocess
 
 from modes.config_mode import ConfigMode
 from modes.piano_mode import PianoMode
@@ -237,55 +238,72 @@ class MainScreen(Screen):
 
 
     def _switch_mode(self, create_fn, mode_name: str):
-        """Central mode-switch helper.
+        """Central mode-switch helper with deferred rendering for audio thread safety.
 
         Always silences the synth before swapping widgets so that any notes
         held in the outgoing mode (Piano, Compendium, Synth) cannot latch into
         the incoming mode.  The incoming mode's on_mount will re-register its
         own MIDI callbacks, so there is no risk of the old callback firing after
         the switch.
+
+        OPTIMIZATION (Phase 1: Non-blocking UI):
+        - Immediate (blocking): all_notes_off() — safety critical
+        - Deferred (non-blocking): widget mounting, help bars, focus
+        This prevents UI thread from blocking the audio thread during mode switches.
         """
         # Silence any notes that may still be held from the current mode.
+        # MUST be synchronous to prevent note latching.
         self.app_context["synth_engine"].all_notes_off()
 
+        # Unmount old mode immediately (fast operation)
         content = self.query_one("#content-area")
         content.remove_children()
-        mode_widget = create_fn()
-        # Hide mode during mounting to prevent cascading widget render artifacts
-        mode_widget.add_class("mode-mounting")
-        content.mount(mode_widget)
 
-        # Reveal the mode after it's fully composed
-        def show_mode():
-            mode_widget.remove_class("mode-mounting")
+        # DEFER all heavy widget operations to prevent audio thread blocking
+        def mount_new_mode():
+            """Mount new mode and update UI non-blockingly."""
+            # Create and mount the new mode widget
+            mode_widget = create_fn()
+            # Hide mode during mounting to prevent cascading widget render artifacts
+            mode_widget.add_class("mode-mounting")
+            content.mount(mode_widget)
 
-        self.call_later(show_mode)
+            # Reveal the mode after it's fully composed
+            def show_mode():
+                mode_widget.remove_class("mode-mounting")
 
-        # Give focus to the mounted mode if it supports focus (for BINDINGS to work)
-        if hasattr(mode_widget, 'can_focus') and mode_widget.can_focus:
-            mode_widget.focus()
+            self.call_later(show_mode)
 
-        # Manage mode-specific help bars: mount only for modes that have them
-        modes_with_help = {
-            "synth": SynthHelpBar,
-            "tambor": TamborHelpBar,
-            "metronome": MetronomeHelpBar,
-            "compendium": CompendiumHelpBar,
-        }
+            # Give focus to the mounted mode if it supports focus (for BINDINGS to work)
+            if hasattr(mode_widget, 'can_focus') and mode_widget.can_focus:
+                mode_widget.focus()
 
-        if mode_name in modes_with_help:
-            # Mount the appropriate help bar if not already mounted
-            if self._help_bars[mode_name] is None:
-                help_bar_class = modes_with_help[mode_name]
-                self._help_bars[mode_name] = help_bar_class(id=f"{mode_name}-help-bar")
-                self.mount(self._help_bars[mode_name])
+            # Manage mode-specific help bars: mount only for modes that have them
+            modes_with_help = {
+                "synth": SynthHelpBar,
+                "tambor": TamborHelpBar,
+                "metronome": MetronomeHelpBar,
+                "compendium": CompendiumHelpBar,
+            }
 
-        # Unmount help bars for modes we're not in
-        for mode, help_bar in self._help_bars.items():
-            if mode != mode_name and help_bar is not None:
-                help_bar.remove()
-                self._help_bars[mode] = None
+            if mode_name in modes_with_help:
+                # Mount the appropriate help bar if not already mounted
+                if self._help_bars[mode_name] is None:
+                    help_bar_class = modes_with_help[mode_name]
+                    self._help_bars[mode_name] = help_bar_class(id=f"{mode_name}-help-bar")
+                    self.mount(self._help_bars[mode_name])
 
+            # Unmount help bars for modes we're not in
+            for mode, help_bar in self._help_bars.items():
+                if mode != mode_name and help_bar is not None:
+                    help_bar.remove()
+                    self._help_bars[mode] = None
+
+        # Schedule mode mounting on the next event loop iteration
+        # This frees the audio thread during UI widget construction
+        self.call_later(mount_new_mode)
+
+        # Update current mode immediately (safe, non-blocking)
         self.app_context["current_mode"] = mode_name
 
     def action_show_piano(self, save_history=True):
@@ -380,7 +398,7 @@ class AcordesApp(App):
         self.midi_handler = MIDIInputHandler()
         self.chord_detector = ChordDetector()
         self.chord_library = ChordLibrary()
-        self.synth_engine = SynthEngine()
+        self.synth_engine = SynthEngineSubprocess()
 
         # Pre-load/Warm-up audio system
         self.synth_engine.warm_up()
