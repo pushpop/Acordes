@@ -2,6 +2,7 @@
 import math
 import random
 import re
+import time
 from typing import TYPE_CHECKING, Optional
 
 from textual.binding import Binding
@@ -274,7 +275,7 @@ class SynthMode(Widget):
         self._dirty: bool = False
         self._suggested_preset_name: Optional[str] = None  # Suggested name after randomization
         self._randomized_just_now: bool = False  # Show "🎲 Randomized!" in preset bar temporarily
-        self._active_notification_remover: Optional[object] = None  # Track active notification to dismiss on new ones
+        self._last_notification_time: float = 0.0  # Debounce notifications: only show one per 150ms
 
         params = self._load_initial_params()
         self.waveform   = params["waveform"]
@@ -656,10 +657,16 @@ class SynthMode(Widget):
     def on_unmount(self):
         """Save state when switching away — do NOT close the shared engine."""
         self._autosave_state()
-        # Dismiss any active notification when leaving the mode
-        if self._active_notification_remover:
-            self._active_notification_remover()
-            self._active_notification_remover = None
+
+    # ── Notifications (debounced to prevent stacking) ──────────────
+
+    def _show_notification(self, message: str, severity: str = "information", timeout: float = 2.0):
+        """Show a notification only if 150ms has elapsed since the last one.
+        This prevents rapid notifications from stacking on top of each other."""
+        now = time.time()
+        if now - self._last_notification_time >= 0.15:
+            self._last_notification_time = now
+            self.app.notify(message, severity=severity, timeout=timeout)
 
     # ── MIDI plumbing ────────────────────────────────────────────
 
@@ -1345,17 +1352,11 @@ class SynthMode(Widget):
         self._suggested_preset_name = None  # Clear suggested name after saving
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
-        # Dismiss previous notification if any, then show new one
-        if self._active_notification_remover:
-            self._active_notification_remover()
-        self._active_notification_remover = self.app.notify(f'💾 Saved: "{preset.name}"', timeout=3)
+        self._show_notification(f'💾 Saved: "{preset.name}"', timeout=3)
 
     def action_save_preset_overwrite(self):
         if self._current_preset is None:
-            # Dismiss previous notification if any, then show new one
-            if self._active_notification_remover:
-                self._active_notification_remover()
-            self._active_notification_remover = self.app.notify(
+            self._show_notification(
                 "⚠ No preset loaded — use Ctrl+N to save a new one",
                 severity="warning", timeout=3
             )
@@ -1367,10 +1368,7 @@ class SynthMode(Widget):
         self._dirty = False
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
-        # Dismiss previous notification if any, then show new one
-        if self._active_notification_remover:
-            self._active_notification_remover()
-        self._active_notification_remover = self.app.notify(f'✅ Updated: "{preset.name}"', timeout=3)
+        self._show_notification(f'✅ Updated: "{preset.name}"', timeout=3)
 
     def action_open_preset_browser(self):
         """Open the factory preset browser screen."""
@@ -1639,10 +1637,7 @@ class SynthMode(Widget):
 
     def action_panic(self):
         self.synth_engine.all_notes_off()
-        # Dismiss previous notification if any, then show new one
-        if self._active_notification_remover:
-            self._active_notification_remover()
-        self._active_notification_remover = self.app.notify("🛑 All notes off (Panic)", severity="warning", timeout=2)
+        self._show_notification("🛑 All notes off (Panic)", severity="warning", timeout=2)
 
     def action_randomize(self):
         """Roll the dice — generate musically useful random synth parameters."""
@@ -1879,10 +1874,7 @@ class SynthMode(Widget):
 
         self._mark_dirty()
         self._autosave_state()
-        # Dismiss previous notification if any, then show new one
-        if self._active_notification_remover:
-            self._active_notification_remover()
-        self._active_notification_remover = self.app.notify(f"🎲 {name} randomized!", timeout=1)
+        self._show_notification(f"🎲 {name} randomized!", timeout=1)
 
     # ── Display refresh ──────────────────────────────────────────
 
