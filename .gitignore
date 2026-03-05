@@ -48,6 +48,11 @@ imgs/
 *.png
 *.jpg
 
+# Exception: track images in docs/images (project branding and documentation)
+!docs/images/
+!docs/images/*.png
+!docs/images/*.jpg
+
 # IDE and editor settings
 .claude/
 .gemini/
