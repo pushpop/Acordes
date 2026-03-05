@@ -1,18 +1,16 @@
 # Acordes launcher for Windows (PowerShell)
-# Uses uv to manage Python versions and dependencies across platforms.
-# Silent when everything is already set up — only prints when setup work is needed.
+# Uses uv to manage Python versions and dependencies.
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $PinFile = Join-Path $ScriptDir ".python-version"
 $VenvDir = Join-Path $ScriptDir ".venv"
 
-# Check if uv is installed
-if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
+# Check uv is installed
+$uvCmd = Get-Command "uv" -ErrorAction SilentlyContinue
+if ($uvCmd -eq $null) {
     Write-Host ""
     Write-Host " ERROR: uv is not installed." -ForegroundColor Red
-    Write-Host ""
-    Write-Host " uv manages Python versions and dependencies across all platforms."
     Write-Host ""
     Write-Host " Install via PowerShell:"
     Write-Host "   powershell -ExecutionPolicy BypassUser -c 'irm https://astral.sh/uv/install.ps1 | iex'"
@@ -23,72 +21,60 @@ if (-not (Get-Command "uv" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# Pin Python version — only when .python-version is missing
+# Pin Python version if not already done
+$needsSetup = $false
 if (-not (Test-Path $PinFile)) {
-    Write-Host " First run — setting up Acordes..." -ForegroundColor Cyan
+    $needsSetup = $true
+    Write-Host " First run - setting up Acordes..." -ForegroundColor Cyan
     Write-Host ""
     Write-Host " Pinning Python 3.12..."
-    Write-Host ""
 
     & uv python pin 3.12 2>$null
     if ($LASTEXITCODE -ne 0) {
         & uv python pin 3.11 2>$null
         if ($LASTEXITCODE -ne 0) {
             Write-Host ""
-            Write-Host " ERROR: Neither Python 3.12 nor 3.11 are installed." -ForegroundColor Red
-            Write-Host ""
-            Write-Host " Install Python via uv:  uv python install 3.12"
-            Write-Host " Or from:                https://www.python.org/downloads/python-3.12.10/"
+            Write-Host " ERROR: Neither Python 3.12 nor 3.11 could be pinned." -ForegroundColor Red
+            Write-Host " Install Python via uv: uv python install 3.12"
             Write-Host ""
             Read-Host "Press Enter to exit"
             exit 1
         }
         Write-Host " Pinned Python 3.11"
-        Write-Host ""
     }
     else {
         Write-Host " Pinned Python 3.12"
-        Write-Host ""
     }
+    Write-Host ""
 }
 
-# Sync dependencies — only when .venv is missing
+# Install dependencies if .venv is missing
 if (-not (Test-Path $VenvDir)) {
-    if (-not (Test-Path $PinFile)) {
-        Write-Host " First run — setting up Acordes..." -ForegroundColor Cyan
+    if (-not $needsSetup) {
+        Write-Host " First run - setting up Acordes..." -ForegroundColor Cyan
         Write-Host ""
     }
-
     Write-Host " Installing dependencies (this may take a minute)..."
-    Write-Host ""
 
     & uv sync --quiet 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
-        Write-Host " ================================================================" -ForegroundColor Red
         Write-Host " ERROR: Dependency installation failed." -ForegroundColor Red
-        Write-Host " ================================================================"
-        Write-Host ""
         Write-Host " Common fixes:"
-        Write-Host "   1. Install Python:   uv python install 3.12"
-        Write-Host "   2. PyAudio issues:   https://visualstudio.microsoft.com/visual-cpp-build-tools/"
-        Write-Host ""
-        Write-Host " ================================================================"
+        Write-Host "   1. Install Python: uv python install 3.12"
+        Write-Host "   2. PyAudio issues: https://visualstudio.microsoft.com/visual-cpp-build-tools/"
         Write-Host ""
         Read-Host "Press Enter to exit"
         exit 1
     }
-
     Write-Host " Done." -ForegroundColor Green
     Write-Host ""
 }
 else {
-    # .venv exists — sync silently to pick up any new dependencies
     & uv sync --quiet 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host ""
-        Write-Host " ERROR: Dependency sync failed." -ForegroundColor Red
-        Write-Host " Run manually for details:  uv sync"
+        Write-Host " ERROR: Dependency sync failed. Run 'uv sync' for details." -ForegroundColor Red
         Write-Host ""
         Read-Host "Press Enter to exit"
         exit 1
@@ -97,13 +83,12 @@ else {
 
 # Launch Acordes
 & uv run python (Join-Path $ScriptDir "main.py")
-$code = $LASTEXITCODE
+$exitCode = $LASTEXITCODE
 
-if ($code -ne 0) {
+if ($exitCode -ne 0) {
     Write-Host ""
-    Write-Host " Acordes exited with error (code $code)." -ForegroundColor Red
-    Write-Host " Check the output above for details."
+    Write-Host " Acordes exited with error (code $exitCode)." -ForegroundColor Red
     Write-Host ""
     Read-Host "Press Enter to exit"
-    exit $code
+    exit $exitCode
 }
