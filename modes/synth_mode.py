@@ -274,6 +274,7 @@ class SynthMode(Widget):
         self._dirty: bool = False
         self._suggested_preset_name: Optional[str] = None  # Suggested name after randomization
         self._randomized_just_now: bool = False  # Show "🎲 Randomized!" in preset bar temporarily
+        self._active_notification_remover: Optional[object] = None  # Track active notification to dismiss on new ones
 
         params = self._load_initial_params()
         self.waveform   = params["waveform"]
@@ -655,6 +656,10 @@ class SynthMode(Widget):
     def on_unmount(self):
         """Save state when switching away — do NOT close the shared engine."""
         self._autosave_state()
+        # Dismiss any active notification when leaving the mode
+        if self._active_notification_remover:
+            self._active_notification_remover()
+            self._active_notification_remover = None
 
     # ── MIDI plumbing ────────────────────────────────────────────
 
@@ -1340,11 +1345,17 @@ class SynthMode(Widget):
         self._suggested_preset_name = None  # Clear suggested name after saving
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
-        self.app.notify(f'💾 Saved: "{preset.name}"', timeout=3)
+        # Dismiss previous notification if any, then show new one
+        if self._active_notification_remover:
+            self._active_notification_remover()
+        self._active_notification_remover = self.app.notify(f'💾 Saved: "{preset.name}"', timeout=3)
 
     def action_save_preset_overwrite(self):
         if self._current_preset is None:
-            self.app.notify(
+            # Dismiss previous notification if any, then show new one
+            if self._active_notification_remover:
+                self._active_notification_remover()
+            self._active_notification_remover = self.app.notify(
                 "⚠ No preset loaded — use Ctrl+N to save a new one",
                 severity="warning", timeout=3
             )
@@ -1356,7 +1367,10 @@ class SynthMode(Widget):
         self._dirty = False
         self.config_manager.set_last_preset(preset.filename)
         self._update_preset_ui()
-        self.app.notify(f'✅ Updated: "{preset.name}"', timeout=3)
+        # Dismiss previous notification if any, then show new one
+        if self._active_notification_remover:
+            self._active_notification_remover()
+        self._active_notification_remover = self.app.notify(f'✅ Updated: "{preset.name}"', timeout=3)
 
     def action_open_preset_browser(self):
         """Open the factory preset browser screen."""
@@ -1625,7 +1639,10 @@ class SynthMode(Widget):
 
     def action_panic(self):
         self.synth_engine.all_notes_off()
-        self.app.notify("🛑 All notes off (Panic)", severity="warning", timeout=2)
+        # Dismiss previous notification if any, then show new one
+        if self._active_notification_remover:
+            self._active_notification_remover()
+        self._active_notification_remover = self.app.notify("🛑 All notes off (Panic)", severity="warning", timeout=2)
 
     def action_randomize(self):
         """Roll the dice — generate musically useful random synth parameters."""
@@ -1862,7 +1879,10 @@ class SynthMode(Widget):
 
         self._mark_dirty()
         self._autosave_state()
-        self.app.notify(f"🎲 {name} randomized!", timeout=1)
+        # Dismiss previous notification if any, then show new one
+        if self._active_notification_remover:
+            self._active_notification_remover()
+        self._active_notification_remover = self.app.notify(f"🎲 {name} randomized!", timeout=1)
 
     # ── Display refresh ──────────────────────────────────────────
 
