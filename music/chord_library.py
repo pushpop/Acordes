@@ -1,5 +1,5 @@
 """Complete chord compendium data structure."""
-from typing import Dict, List
+from typing import Dict, List, Set, Optional
 import mingus.core.chords as chords
 
 
@@ -90,3 +90,59 @@ class ChordLibrary:
             Dictionary mapping keys to chord types to note lists.
         """
         return self.library
+
+    def detect_chord_from_notes(self, note_names, bass_note: Optional[str] = None) -> Optional[str]:
+        """Detect a chord from note names (without octaves).
+
+        Matches the played notes against all chords in the library, including
+        inversions. Returns the chord with root position or slash notation for
+        inversions (e.g., "C Major" or "C Major/E").
+
+        Args:
+            note_names: Set or list of note names without octaves (e.g., {"C", "E", "G"})
+            bass_note: Optional explicitly specified bass note for inversion detection.
+                      If not provided, uses the first note if list, or lowest note if set.
+
+        Returns:
+            Chord name string ("C Major", "Am7", "G Major/B") or None if no match.
+        """
+        if len(note_names) < 2:
+            return None
+
+        # Handle both list and set inputs, preserving order if list
+        if isinstance(note_names, list):
+            unique_notes = note_names
+            if not bass_note:
+                bass_note = unique_notes[0]  # Use first (lowest MIDI) note as bass
+        else:
+            # If set, sort by pitch order
+            unique_notes = sorted(list(note_names), key=lambda n: self.KEYS.index(n) if n in self.KEYS else 12)
+            if not bass_note:
+                bass_note = unique_notes[0]
+
+        if len(unique_notes) < 2:
+            return None
+
+        # Try each note as a potential root
+        for potential_root in self.KEYS:
+            if potential_root not in self.library:
+                continue
+
+            # Check all chord types for this root
+            for chord_type, chord_notes in self.library[potential_root].items():
+                # Normalize chord notes for comparison (remove duplicates, sort)
+                normalized_chord = set(chord_notes)
+                normalized_played = set(unique_notes)
+
+                # Check if the played notes match this chord
+                if normalized_chord == normalized_played:
+                    # Found a match! Now check if it's in root position or inverted
+                    if bass_note == potential_root:
+                        # Root position
+                        return f"{potential_root} {chord_type}"
+                    else:
+                        # Inversion - add slash notation
+                        return f"{potential_root} {chord_type}/{bass_note}"
+
+        # No matching chord found
+        return None

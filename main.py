@@ -405,8 +405,8 @@ class AcordesApp(App):
         self.config_manager = ConfigManager()
         self.device_manager = MIDIDeviceManager(self.config_manager)
         self.midi_handler = MIDIInputHandler(config_manager=self.config_manager)
-        self.chord_detector = ChordDetector()
         self.chord_library = ChordLibrary()
+        self.chord_detector = ChordDetector(chord_library=self.chord_library)
         self.synth_engine = SynthEngine()
 
         # Pre-load/Warm-up audio system
