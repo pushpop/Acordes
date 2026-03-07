@@ -209,20 +209,25 @@ class ConfigMode(Screen):
     def action_refresh_devices(self):
         """Refresh the device list."""
         self.refresh_device_list()
-        self.app.notify("Device list refreshed")
 
     def _curve_list_is_focused(self) -> bool:
         """Return True if the velocity curve list currently has Textual focus."""
         return self.focused is self.query_one("#curve-list", ListView)
 
     def action_focus_next_section(self):
-        """Tab — move focus from device list to curve list."""
+        """Tab — move focus from device list to curve list, highlight active curve."""
         curve_list = self.query_one("#curve-list", ListView)
+        # Auto-highlight the currently active velocity curve
+        if self.pending_curve in self.velocity_curves:
+            curve_list.index = self.velocity_curves.index(self.pending_curve)
         curve_list.focus()
 
     def action_focus_prev_section(self):
-        """Shift+Tab — move focus from curve list back to device list."""
+        """Shift+Tab — move focus from curve list back to device list, highlight active device."""
         device_list = self.query_one("#device-list", ListView)
+        # Auto-highlight the currently active device
+        if self.pending_device in self.devices:
+            device_list.index = self.devices.index(self.pending_device)
         device_list.focus()
 
     def action_select_item(self):
@@ -244,10 +249,9 @@ class ConfigMode(Screen):
                 # Apply selection
                 result = self.device_manager.select_device(selected_device)
                 if result:
-                    self.app.notify(f"✓ Device: {selected_device}")
                     self.refresh_device_list()
                 else:
-                    self.app.notify(f"✗ Failed to select: {selected_device}")
+                    pass  # failure visible: device list won't update its selection marker
 
     def _select_curve(self):
         """Select the highlighted velocity curve."""
@@ -260,5 +264,4 @@ class ConfigMode(Screen):
 
                 # Save to config_manager
                 self.config_manager.set_velocity_curve(selected_curve)
-                self.app.notify(f"✓ Curve: {selected_curve}")
                 self.refresh_curve_list()
