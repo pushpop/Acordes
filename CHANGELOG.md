@@ -172,7 +172,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Project Organization**: Cleanup of excess development documentation
   - Removed 9 planning/development markdown files (ARTIFACT_ELIMINATION_TEST.md, AUDIO_THREADING_PLAN.md, COMPENDIUM_*.md, PRESET_BROWSER_*.md, SYNTH_SUBPROCESS_DESIGN.md, TEST_PRESET_BROWSER.md)
   - Removed requirements-windows.txt (outdated stub)
-  - Removed run.bat (Windows CMD launcher — use run.ps1 instead)
+  - Removed run.bat (Windows CMD launcher;use run.ps1 instead)
 
 - **Documentation Reorganization**:
   - **README.md**: Cleaner structure with broad project overview, architecture, and quick-start guide
@@ -195,10 +195,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Works across all parameter types (additive, multiplicative, knob-style)
 
 - **EG Parameter Minimums & Resonance Caps**:
-  - Attack minimum: 8 ms (was 1 ms — prevents hard transients)
+  - Attack minimum: 8 ms (was 1 ms;prevents hard transients)
   - Decay minimum: 5 ms (was 1 ms)
   - Release minimum: 8 ms (was 1 ms)
-  - Filter Resonance max: 0.80 (was 0.90 — eliminates self-oscillation artifacts)
+  - Filter Resonance max: 0.80 (was 0.90;eliminates self-oscillation artifacts)
   - HPF Resonance max: 0.85 (was 0.99)
   - All clamped on preset load in `_apply_params()`
 
@@ -240,7 +240,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Compendium Search Functionality**: Real-time search across all 258+ music items
-  - Search input at top of Compendium Mode — filters tree on every keystroke
+  - Search input at top of Compendium Mode;filters tree on every keystroke
   - Searches all fields: name, description, details, examples, metadata (case-insensitive)
   - Results grouped by category (Chords, Scales, Modes, Instruments, Genres) with item counts
   - Existing chord auto-play and detail panel work seamlessly with search results
@@ -251,13 +251,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `on_input_changed()` event handler for real-time filtering
 
 - **Music Modes Category (NEW)**: 7 diatonic modes with complete theory
-  - Ionian (1st degree) — Major scale equivalent
-  - Dorian (2nd degree) — Jazzy, funky, groovy minor
-  - Phrygian (3rd degree) — Dark, exotic, Spanish/flamenco
-  - Lydian (4th degree) — Ethereal, dreamy, bright
-  - Mixolydian (5th degree) — Major with bluesy quality
-  - Aeolian (6th degree) — Natural minor (sad, introspective)
-  - Locrian (7th degree) — Very dark, dissonant, unstable
+  - Ionian (1st degree);Major scale equivalent
+  - Dorian (2nd degree);Jazzy, funky, groovy minor
+  - Phrygian (3rd degree);Dark, exotic, Spanish/flamenco
+  - Lydian (4th degree);Ethereal, dreamy, bright
+  - Mixolydian (5th degree);Major with bluesy quality
+  - Aeolian (6th degree);Natural minor (sad, introspective)
+  - Locrian (7th degree);Very dark, dissonant, unstable
   - Each mode includes intervals, semitones, usage, and related modes
   - New `data/compendium/modes.json` file with 7 modal entries
 
@@ -286,20 +286,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - All 258+ items organized across 6 categories with cross-references
 
 ### Changed
-- `ENABLE_COMMAND_PALETTE = False` in `AcordesApp` class (`main.py`) — Textual command palette disabled for cleaner interface
+- `ENABLE_COMMAND_PALETTE = False` in `AcordesApp` class (`main.py`);Textual command palette disabled for cleaner interface
 - Version updated from 1.5.0 → 1.6.0 in `main.py` and documentation
 - **Header title no longer expands on click**: Disabled Textual Header expand behavior via `can_focus=False`, `expand=False`, and `action_toggle_header()` override for cleaner UI
 - **Category descriptions in Compendium**: Selecting major categories (Chords, Scales, Modes, Instruments, Genres) now displays category description and subcategories in detail panel
 - **Fixed category icons in full tree**: Category nodes now display correct icons (🎹 🎧 📊 🎼 🎸) in full tree view, matching search results
 
 ### Architecture Notes
-- Search implementation is non-destructive — existing tree building methods unchanged
-- Search is real-time via `Input.Changed` event handler — no Enter key needed
+- Search implementation is non-destructive;existing tree building methods unchanged
+- Search is real-time via `Input.Changed` event handler;no Enter key needed
 - Substring matching (not fuzzy) for predictable, responsive filtering
 - Instrument hierarchy created via `_build_instruments_tree()` method recognizing family category nodes
 - All existing features (detail panel, auto-play, navigation) work unchanged with search results
 - Data validation test (`test_compendium_data.py`) updated to handle categories.json different structure
-- Fully backward compatible — old presets and saved state load correctly
+- Fully backward compatible;old presets and saved state load correctly
 
 ---
 
@@ -333,13 +333,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **LFO shape & target routing** (`music/synth_engine.py`, `modes/synth_mode.py`): LFO section upgraded from a single sine modulator to a full 4-shape, 4-target modulation bus.
-  - Shapes: **SIN** (sine), **TRI** (triangle), **SQR** (square), **S&H** (sample & hold — latches a new random value on each LFO period).
+  - Shapes: **SIN** (sine), **TRI** (triangle), **SQR** (square), **S&H** (sample & hold;latches a new random value on each LFO period).
   - Targets: **ALL**, **VCO** (pitch), **VCF** (filter), **VCA** (amplitude). Target routing replaces the old per-destination `lfo_vco_mod` / `lfo_vcf_mod` / `lfo_vca_mod` manual sliders while retaining backward compat with old presets.
   - New params in `DEFAULT_PARAMS`: `lfo_shape`, `lfo_target`, `lfo_depth`.
   - Phase-wrap S&H detection: uses `lfo_phase_prev > lfo_phase` (valid because the max increment per buffer at 20 Hz is ~0.67 rad, well below 2π).
 - **FX Delay** (`music/synth_engine.py`, `modes/synth_mode.py`): Stereo ping-pong echo with per-sample feedback loop.
   - Parameters: `delay_time` (50 ms – 2 s), `delay_feedback` (0 – 0.9), `delay_mix` (0 – 1 wet/dry).
-  - Fully bypassed when `delay_mix == 0` — zero CPU cost when off.
+  - Fully bypassed when `delay_mix == 0`;zero CPU cost when off.
   - **Rev Size** placeholder shown in UI (greyed out, labelled "future") to reserve UI space for a future reverb implementation.
 - **BBD-style Chorus** (`music/synth_engine.py`, `modes/synth_mode.py`): Tape-emulation chorus with 1–4 modulated delay taps.
   - Parameters: `chorus_rate` (0.1 – 10 Hz), `chorus_depth` (0 – 1 → 0–25 ms sweep), `chorus_mix` (0 – 1 wet/dry), `chorus_voices` (1–4 taps, phases 90° apart).
@@ -347,24 +347,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Arpeggiator** (`music/synth_engine.py`, `modes/synth_mode.py`, `config_manager.py`, `modes/metronome_mode.py`): Audio-callback-driven polyphonic arpeggiator with sample-accurate timing.
   - Modes: **UP**, **DOWN**, **UP+DOWN** (bounce), **RANDOM**.
   - Parameters: `arp_bpm` (50–300, shared with Metronome), `arp_gate` (5–100% note-on fraction), `arp_range` (1–4 octave span), `arp_enabled` (on/off toggle).
-  - Step counter carries the remainder across buffer boundaries — no cumulative phase error.
+  - Step counter carries the remainder across buffer boundaries;no cumulative phase error.
   - BPM is stored in `config_manager` (not in presets) so Metronome and Arpeggiator always stay in sync.
 - **Shared BPM** (`config_manager.py`, `modes/metronome_mode.py`, `main.py`): MetronomeMode now accepts `config_manager` as an optional constructor argument. BPM changes in Metronome write to `config_manager.set_bpm()`, and the Arpeggiator reads/writes the same key, so both modes share a single persistent BPM setting.
 
 ### Changed
 - `SynthMode._SECTION_PARAMS["fx"]` updated: `["Delay Time", "Delay Fdbk", "Delay Mix", "Rev Size"]`.
 - `SynthMode._SECTION_PARAMS["arpeggio"]` updated: added `"ON/OFF"` toggle row (5 params total).
-- All four previously dummy sections (LFO, Chorus, FX, Arpeggio) are now fully interactive — every param is wired to the focus-navigation system (Enter → arrows → Q/W ± to adjust).
-- `action_randomize` does NOT randomise the new FX / Chorus / Arp params — it only rolls dice on the core synthesis chain (waveform, octave, ADSR, filter), keeping effects settings stable between randomize presses.
+- All four previously dummy sections (LFO, Chorus, FX, Arpeggio) are now fully interactive;every param is wired to the focus-navigation system (Enter → arrows → Q/W ± to adjust).
+- `action_randomize` does NOT randomise the new FX / Chorus / Arp params;it only rolls dice on the core synthesis chain (waveform, octave, ADSR, filter), keeping effects settings stable between randomize presses.
 
 ## [1.4.3] - 2026-02-19
 
 ### Fixed
-- **Low-frequency onset thump** (`music/synth_engine.py`): Sine waveform at octave=-2 with short attack produced an audible thump on note onset. Root cause: the DC blocker (coeff=0.999, pole at 2.4 Hz) has a ~66 ms settling time at 55 Hz, but the onset ramp was a fixed 3 ms — covering less than 1/6 of a 55 Hz cycle.
-  - **Frequency-adaptive `ONSET_RAMP`**: Duration now computed as `max(3ms, min(30ms, 1.5 × period_ms))` per voice, stored in `voice.onset_ms` set at trigger time. At 55 Hz: 27 ms; at 440 Hz: 3 ms (unchanged — no regression at mid/high frequencies).
+- **Low-frequency onset thump** (`music/synth_engine.py`): Sine waveform at octave=-2 with short attack produced an audible thump on note onset. Root cause: the DC blocker (coeff=0.999, pole at 2.4 Hz) has a ~66 ms settling time at 55 Hz, but the onset ramp was a fixed 3 ms;covering less than 1/6 of a 55 Hz cycle.
+  - **Frequency-adaptive `ONSET_RAMP`**: Duration now computed as `max(3ms, min(30ms, 1.5 × period_ms))` per voice, stored in `voice.onset_ms` set at trigger time. At 55 Hz: 27 ms; at 440 Hz: 3 ms (unchanged;no regression at mid/high frequencies).
   - **Frequency-adaptive `ANTI_I`**: Envelope soft-start window in `_apply_envelope` now reads `voice.onset_ms / 1000.0` instead of the hardcoded 5 ms constant, matching the onset ramp duration so the exponential attenuation covers the DC blocker's full settling window.
-  - **Adaptive DC blocker coefficient** (`_apply_dc_blocker`): Coefficient is now computed per-voice based on `voice.frequency` — `0.9990` above 100 Hz (pole 2.4 Hz, standard behaviour), linearly interpolated to `0.9997` below 50 Hz (pole ≈ 0.7 Hz). This reduces phase distortion at very low fundamentals; combined with the longer onset ramp, the onset transient is fully hidden.
-- **Randomize click on held notes** (`music/synth_engine.py`, `modes/synth_mode.py`): Pressing `-` (randomize) while a note was held caused an audible click because `waveform`, `octave`, and envelope parameters (`attack`, `decay`, `sustain`, `release`) were applied via `setattr` instantly on the next audio buffer — creating mid-note frequency, waveshape, and amplitude discontinuities.
+  - **Adaptive DC blocker coefficient** (`_apply_dc_blocker`): Coefficient is now computed per-voice based on `voice.frequency`;`0.9990` above 100 Hz (pole 2.4 Hz, standard behaviour), linearly interpolated to `0.9997` below 50 Hz (pole ≈ 0.7 Hz). This reduces phase distortion at very low fundamentals; combined with the longer onset ramp, the onset transient is fully hidden.
+- **Randomize click on held notes** (`music/synth_engine.py`, `modes/synth_mode.py`): Pressing `-` (randomize) while a note was held caused an audible click because `waveform`, `octave`, and envelope parameters (`attack`, `decay`, `sustain`, `release`) were applied via `setattr` instantly on the next audio buffer;creating mid-note frequency, waveshape, and amplitude discontinuities.
   - **Output mute gate** (`_mute_ramp_remaining` / `_mute_ramp_fadein` / `_MUTE_RAMP_LEN=384`): A new `'mute_gate'` event type arms a ~8 ms (384-sample) fade-out ramp on the mixed output. When the fade-out completes, a matching fade-in is automatically queued. Both the `mute_gate` and `param_update` events are drained in the same `_process_midi_events()` call, so the new params are applied under silence and the fade-in plays with the new waveform/octave already active.
   - `action_randomize` now enqueues `{'type': 'mute_gate'}` before `_push_params_to_engine()` so the gate is always armed before any parameter changes land on the audio thread.
 
@@ -372,10 +372,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - **Synth Mode focus navigation overhaul** (`modes/synth_mode.py`):
-  - Up/Down arrows now cross section row boundaries — pressing Up at the first param of a section jumps to the last param of the same column in the adjacent row. All 8 sections (including LFO, Chorus, FX, Arpeggio) are reachable without mouse.
+  - Up/Down arrows now cross section row boundaries;pressing Up at the first param of a section jumps to the last param of the same column in the adjacent row. All 8 sections (including LFO, Chorus, FX, Arpeggio) are reachable without mouse.
   - Added **Alt+Left / Alt+Right** bindings to decrease/increase the focused parameter value as an alternative to Q/W.
   - **Q** now decreases and **W** increases the focused parameter (was Q increase / A decrease). In legacy (unfocused) mode, Q/W adjusts octave down/up.
-  - Added **,** (comma) and **.** (full\_stop) bindings for preset cycling — work in both focus and legacy modes.
+  - Added **,** (comma) and **.** (full\_stop) bindings for preset cycling;work in both focus and legacy modes.
   - All letter-key legacy shortcuts (E/D, R/F, T/G, Y/H, U/J, O/L, etc.) are silently suppressed while in focus mode to prevent accidental edits during navigation.
 
 ### Fixed
@@ -388,18 +388,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **OS audio thread priority** (`music/synth_engine.py`): PortAudio callback thread now receives elevated OS scheduling priority at startup to prevent the Textual UI thread from starving it during widget rebuilds (mode switches).
-  - **Windows**: `SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` via `ctypes/kernel32` — no admin rights required.
+  - **Windows**: `SetPriorityClass(ABOVE_NORMAL_PRIORITY_CLASS)` via `ctypes/kernel32`;no admin rights required.
   - **Linux**: `SCHED_FIFO` real-time scheduling via `pthread_setschedparam` + `PR_SET_TIMERSLACK` (100 µs) for tighter sleep granularity. Falls back to `os.nice(-10)` without `CAP_SYS_NICE`.
-  - **macOS**: Mach `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)` — the same API used by Core Audio. Falls back to `os.nice(-10)` on failure.
-  - All paths are silent on failure — audio still works, just with less OS scheduling protection.
+  - **macOS**: Mach `thread_policy_set(THREAD_TIME_CONSTRAINT_POLICY)`;the same API used by Core Audio. Falls back to `os.nice(-10)` on failure.
+  - All paths are silent on failure;audio still works, just with less OS scheduling protection.
 - **Thread-safe parameter routing** (`music/synth_engine.py`): `update_parameters()` and `all_notes_off()` now enqueue events rather than writing directly to shared attributes from the UI thread. Applied on the audio thread at the next buffer boundary, eliminating 25+ cross-thread data races that caused clicks when moving ADSR/filter knobs or switching modes while notes were playing.
-- **Per-sample master gain ramp** (`music/synth_engine.py`): Voice count is now pre-calculated before the mixing loop so `gain_ramp` (via `np.linspace`) targets the correct value for the current buffer — previously lagged one buffer behind, producing a residual step discontinuity on voice-count changes.
+- **Per-sample master gain ramp** (`music/synth_engine.py`): Voice count is now pre-calculated before the mixing loop so `gain_ramp` (via `np.linspace`) targets the correct value for the current buffer;previously lagged one buffer behind, producing a residual step discontinuity on voice-count changes.
 - **Smooth silence gain decay** (`music/synth_engine.py`): `master_gain_current` now decays smoothly toward 1.0 during silence (coefficient 0.90/buffer) instead of hard-resetting, preventing a level spike on the first buffer after a silent gap. Smoothing coefficient tightened `0.98 → 0.80` so gain tracks voice-count changes within ~2 buffers (~10 ms).
 - **Per-voice onset ramp** (`music/synth_engine.py`): 3 ms linear fade-in applied to each voice's post-envelope signal before the DC blocker on every new trigger. Suppresses the DC blocker's differentiator startup transient (first-sample high-frequency click) that was most audible on square and sawtooth waveforms at non-zero oscillator phases.
-- **ANTI_I extended and repositioned** (`music/synth_engine.py`): Onset soft-start window extended from 2 ms to 5 ms to cover the DC blocker settling time. Moved to after the CROSS voice-steal crossfade so stolen voices still start from their pre-steal level — ANTI_I only attenuates, so both mechanisms compose cleanly.
+- **ANTI_I extended and repositioned** (`music/synth_engine.py`): Onset soft-start window extended from 2 ms to 5 ms to cover the DC blocker settling time. Moved to after the CROSS voice-steal crossfade so stolen voices still start from their pre-steal level;ANTI_I only attenuates, so both mechanisms compose cleanly.
 - **Voice steal filter zero** (`music/synth_engine.py`): Filter and DC blocker states are explicitly zeroed before `trigger()` on a stolen voice, preventing stale frequency-domain state from the old note from bleeding into the new note's first few output samples.
-- **Piano mode `on_mount`/`on_unmount`** (`modes/piano_mode.py`): Restored correct lifecycle structure — a linter had relocated `set_interval` and display initialisation into `on_unmount`, causing Piano Mode to show no display and produce no sound on first visit without a prior Synth Mode visit.
-- **Stereo centre for single notes** (`music/synth_engine.py`): Pan table reordered so voice 0 (always the first triggered for any single note) is at `pan=0.5` — previously `0.35`, causing a ~63% L/R power imbalance on solo notes. Subsequent voices spread symmetrically outward in pairs.
+- **Piano mode `on_mount`/`on_unmount`** (`modes/piano_mode.py`): Restored correct lifecycle structure;a linter had relocated `set_interval` and display initialisation into `on_unmount`, causing Piano Mode to show no display and produce no sound on first visit without a prior Synth Mode visit.
+- **Stereo centre for single notes** (`music/synth_engine.py`): Pan table reordered so voice 0 (always the first triggered for any single note) is at `pan=0.5`;previously `0.35`, causing a ~63% L/R power imbalance on solo notes. Subsequent voices spread symmetrically outward in pairs.
 - **tanh drive reduced** (`music/synth_engine.py`): `comp` multiplier lowered (`1.4 → 0.9` for sine) and post-tanh makeup gain added, keeping sustain-level signals in tanh's linear region. Eliminates the attack-peak/sustain-sag shape caused by differential saturation at different envelope stages.
 
 ## [1.3.0] - 2026-02-17
@@ -435,11 +435,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.2.0] - 2026-02-17
 
 ### Added
-- **Synth Preset System** (`music/preset_manager.py` — new module):
+- **Synth Preset System** (`music/preset_manager.py`;new module):
   - 10 factory presets covering a wide sonic range: `default`, `warm_pad`, `bright_saw_lead`, `deep_bass`, `soft_strings`, `church_organ`, `glass_bells`, `hollow_reed`, `plucky_square`, `vintage_synth`.
-  - Presets stored as individual JSON files in `presets/` — easy to share, back up, or hand-edit.
+  - Presets stored as individual JSON files in `presets/`;easy to share, back up, or hand-edit.
   - Two-tier ordering: factory presets sorted alphabetically, user presets appended in creation order (newest always at end).
-  - Save a new preset at any time with **Ctrl+N** — gets a randomly generated bilingual (English + European Portuguese) musical name (e.g. *amber reed*, *escuro sino*, *vazio echo*).
+  - Save a new preset at any time with **Ctrl+N**;gets a randomly generated bilingual (English + European Portuguese) musical name (e.g. *amber reed*, *escuro sino*, *vazio echo*).
   - Update / overwrite the currently loaded preset with **Ctrl+S**.
   - Cycle through all presets with **,** (previous) and **.** (next).
   - Preset bar above the synth boxes shows `[index/total] Preset Name` with a `*` dirty marker after any parameter change.
@@ -467,7 +467,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - **Piano Mode audio glitches when MIDI keys are held**:
   - Root cause: `_poll_midi` unconditionally called `_update_display` every 10 ms (100×/second), causing heavy Textual render work (piano widget, chord display, staff widget) to compete with the PyAudio audio callback thread.
-  - Fix: added change-detection guard (`_last_displayed_notes`) — display updates only when the active note set actually changes.
+  - Fix: added change-detection guard (`_last_displayed_notes`);display updates only when the active note set actually changes.
   - Removed `header.update_subtitle()` from the polling hot loop (MIDI connection status never changes during play).
 - **Double SynthEngine bug**: `SynthMode` was previously instantiating its own private `SynthEngine`, independent of the shared instance used by `PianoMode` and `CompendiumMode`. Now all modes share a single engine via `app_context`.
 - **New user presets appearing alphabetically instead of at the end**: `PresetManager._reload()` now uses a two-tier sort so user presets always append in creation-time order after the factory set.

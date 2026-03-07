@@ -59,7 +59,7 @@
 
 ---
 
-## Synth Mode — Presets & Utility
+## Synth Mode;Presets & Utility
 
 | Key | Action |
 |---|---|
@@ -69,11 +69,11 @@
 | **Ctrl+N** | Save current patch as new preset |
 | **Ctrl+S** | Overwrite currently loaded preset |
 | **-** (minus) | Randomize all parameters |
-| **Space** | Panic — silence all voices immediately |
+| **Space** | Panic;silence all voices immediately |
 
 ---
 
-## Synth Mode — Focus Mode Navigation
+## Synth Mode;Focus Mode Navigation
 
 Press **Enter** to enter focus mode. In focus mode, a parameter cell is highlighted and can be adjusted.
 
@@ -93,7 +93,7 @@ Press **Enter** to enter focus mode. In focus mode, a parameter cell is highligh
 
 ---
 
-## Synth Mode — Legacy Keys (Unfocused, No MIDI Keyboard Needed)
+## Synth Mode;Legacy Keys (Unfocused, No MIDI Keyboard Needed)
 
 These keys work when **not** in focus mode. Useful for quick tweaks without a MIDI keyboard.
 
@@ -143,7 +143,7 @@ The synth responds to physical MIDI controllers:
 ## Focus Mode Details
 
 Focus mode provides precise, arrow-key based parameter editing with exponential acceleration:
-- Hold a key down to continuously adjust — the adjustment rate **accelerates** after ~1 second
+- Hold a key down to continuously adjust;the adjustment rate **accelerates** after ~1 second
 - Fast taps produce small increments (1%)
 - Sustained holds produce larger jumps (up to 2× speed)
 - This gives you both precision and speed without needing a mouse
@@ -172,6 +172,6 @@ When you save a new preset with **Ctrl+N**, Acordes automatically generates a ra
 ## Special Notes
 
 - **Config Mode Velocity Curve**: The velocity curve you select in Config Mode applies to **all** MIDI input across all modes (Piano, Synth, Compendium)
-- **Shared BPM**: The Metronome and Arpeggiator share the same BPM setting — change it in either mode and both update
+- **Shared BPM**: The Metronome and Arpeggiator share the same BPM setting;change it in either mode and both update
 - **Preset Persistence**: The last preset you loaded is automatically restored when you restart the app
 - **Synth State**: All synth parameter tweaks are auto-saved to disk, even if you don't save a preset

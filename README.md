@@ -1,4 +1,4 @@
-# Acordes — Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -42,7 +42,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - Chord display above the keyboard
 - Musical staff notation (side-by-side bass and treble clefs)
 
-### Synth Mode — The Heart of Acordes
+### Synth Mode: The Heart of Acordes
 A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 
 **Synthesis Architecture**:
@@ -98,7 +98,7 @@ A comprehensive music theory reference hub:
 - Shared BPM with Arpeggiator
 - Italian tempo markings (Andante, Allegro, Presto, etc.)
 
-### Tambor Mode — Drum Machine
+### Tambor Mode: Drum Machine
 - **16-Step Sequencer**: Pattern-based drum programming
 - **8 Drum Sounds**: Kick, Snare, Hi-Hats (open/closed), Clap, Toms (high/mid/low), Cowbell
 - **64 Pattern Slots**: Save and recall your drum patterns
@@ -173,7 +173,7 @@ chmod +x run.sh   # only needed once after a fresh git clone
 
 The launcher automatically:
 1. Installs `uv` if not found (via the official curl installer)
-2. Installs system audio libraries (PortAudio headers) if missing — uses `dnf`, `apt`, `pacman`, or `brew`
+2. Installs system audio libraries (PortAudio headers) if missing; uses `dnf`, `apt`, `pacman`, or `brew`
 3. Pins and installs Python 3.12 automatically if not present
 4. Syncs all Python dependencies with `uv sync`
 5. Launches the application
@@ -438,7 +438,7 @@ All core synthesis happens in `music/synth_engine.py`. The parameter system is f
 
 ## License
 
-MIT License — See [LICENSE](LICENSE) for details.
+MIT License; see [LICENSE](LICENSE) for details.
 
 ---
 

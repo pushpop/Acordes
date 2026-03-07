@@ -21,9 +21,9 @@ uv run python main.py
 **Python version:** `uv python pin` ensures Python 3.12 (falls back to 3.11 if unavailable). PyAudio and python-rtmidi have no pre-built wheels for 3.13+, so `uv` automatically selects the compatible version and installs it if needed.
 
 **Project Configuration:**
-- `pyproject.toml` — Modern Python project setup (PEP 517), defines metadata and dependencies
-- `requirements.txt` — Kept for reference; `uv sync` uses `pyproject.toml`
-- `.python-version` — Auto-created by `uv python pin` (do not edit manually)
+- `pyproject.toml`;Modern Python project setup (PEP 517), defines metadata and dependencies
+- `requirements.txt`;Kept for reference; `uv sync` uses `pyproject.toml`
+- `.python-version`;Auto-created by `uv python pin` (do not edit manually)
 
 There are no tests, no linting config, and no CI pipeline.
 
@@ -33,7 +33,7 @@ There are no tests, no linting config, and no CI pipeline.
 
 `main.py` owns the Textual `App` and `MainScreen`. All shared components (synth engine, MIDI handler, config, chord library) are created here and passed into modes via constructor parameters or the `app_context` dict.
 
-Mode switching happens in `MainScreen._switch_mode()`: it calls `synth_engine.all_notes_off()`, removes all children from the `#content-area` container, then mounts the new mode widget. Modes are fully unmounted/remounted on every switch — there is no caching.
+Mode switching happens in `MainScreen._switch_mode()`: it calls `synth_engine.all_notes_off()`, removes all children from the `#content-area` container, then mounts the new mode widget. Modes are fully unmounted/remounted on every switch;there is no caching.
 
 ### Modes (`modes/`)
 
@@ -42,10 +42,10 @@ Each mode is a Textual `Widget` subclass. Modes use `on_mount()` / `on_unmount()
 **Widget lifecycle:** `compose()` yields child widgets in order (determines initial layout), then `on_mount()` is called (can mount additional widgets or start timers). Set `can_focus = True` and define `BINDINGS` list if the mode needs keyboard input; `_switch_mode()` will call `widget.focus()` after mounting to activate key bindings.
 
 Key modes:
-- **`synth_mode.py`** — The most complex mode. Manages 8 UI sections (OSC, FILTER, ENVELOPE, LFO, CHORUS, FX, ARPEGGIO, MIXER) rendered as a parameter grid. Has two input sub-modes: *focus mode* (WASD cursor + Q/E value change + `_` randomize focused param) and *legacy mode* (letter keys mapped to individual params). All parameter changes go through `_push_params_to_engine()` → `synth_engine.update_parameters(**kwargs)`.
-- **`piano_mode.py`** — Visualises the MIDI keyboard, runs chord detection, also drives synth.
-- **`metronome_mode.py`** — Shares BPM with the arpeggiator via `config_manager.get_bpm()` / `set_bpm()`.
-- **`tambor/tambor_mode.py`** — Drum machine sequencer (16-step sequencer, 8 drum sounds, pattern management, fills, humanize). Integrated from standalone Tambor project. Uses the shared Acordes `SynthEngine` to generate drum sounds via MIDI triggers. Pattern playback enqueues note-on/off events to `synth_engine.midi_event_queue` for sample-accurate timing. BPM syncs with metronome via `config_manager`.
+- **`synth_mode.py`**;The most complex mode. Manages 8 UI sections (OSC, FILTER, ENVELOPE, LFO, CHORUS, FX, ARPEGGIO, MIXER) rendered as a parameter grid. Has two input sub-modes: *focus mode* (WASD cursor + Q/E value change + `_` randomize focused param) and *legacy mode* (letter keys mapped to individual params). All parameter changes go through `_push_params_to_engine()` → `synth_engine.update_parameters(**kwargs)`.
+- **`piano_mode.py`**;Visualises the MIDI keyboard, runs chord detection, also drives synth.
+- **`metronome_mode.py`**;Shares BPM with the arpeggiator via `config_manager.get_bpm()` / `set_bpm()`.
+- **`tambor/tambor_mode.py`**;Drum machine sequencer (16-step sequencer, 8 drum sounds, pattern management, fills, humanize). Integrated from standalone Tambor project. Uses the shared Acordes `SynthEngine` to generate drum sounds via MIDI triggers. Pattern playback enqueues note-on/off events to `synth_engine.midi_event_queue` for sample-accurate timing. BPM syncs with metronome via `config_manager`.
 
 ### MIDI flow
 
@@ -62,7 +62,7 @@ MIDI hardware
 
 ### Audio engine (`music/synth_engine.py`)
 
-All parameter changes from the UI thread are enqueued via `synth_engine.update_parameters(**kwargs)` and applied at the top of `_audio_callback()` by `_process_midi_events()`. **Never write directly to engine attributes from the UI thread** — this causes data races.
+All parameter changes from the UI thread are enqueued via `synth_engine.update_parameters(**kwargs)` and applied at the top of `_audio_callback()` by `_process_midi_events()`. **Never write directly to engine attributes from the UI thread**;this causes data races.
 
 Signal chain per buffer (inside `_audio_callback`):
 1. Drain MIDI event queue (param updates, note on/off, all-notes-off)
@@ -91,10 +91,19 @@ Presets are JSON files in `presets/`. `PresetManager` loads all `.json` files; f
 
 Patterns are JSON files stored in `presets/tambor/` (separate from synth presets). Each pattern file contains drum step data, BPM, pre-scale, mute/solo state, and humanize settings. `PatternManager` handles file I/O; `PatternSaver`/`PatternLoader` use a background thread pool for non-blocking saves/loads to avoid UI freezes during file I/O. The UI thread enqueues save requests; the background thread processes them asynchronously.
 
+## Documentation Style
+
+- Avoid em dashes in all documentation and comments. Use these alternatives instead:
+  - Commas for brief asides or additional information
+  - Periods to separate complete thoughts
+  - Semicolons to connect related independent clauses
+  - Parentheses for supplementary information
+  - Colons to introduce explanations or lists
+
 ## Key conventions
 
 - **Thread safety:** UI thread ↔ audio thread communicate exclusively through `synth_engine.midi_event_queue`. The `param_update` event type is the only safe way to change synth parameters mid-playback.
 - **Textual key bindings:** Textual 0.75+ maps Shift+Minus to the key name `"underscore"` (not `"shift+minus"`). Special characters follow Textual's `_character_to_key()` translation.
 - **Textual CSS selectors:** ID selectors (`#help-bar`) and element selectors (`TamborMode > HelpBar`) behave differently in widget layout. Yielding a widget in `compose()` places it in the parent's children list in order; re-mounting widgets via `mount()` appends them to the end. Use ID selectors for styling that should be independent of parent type.
-- **`requirements-windows.txt`** is an outdated stub — `requirements.txt` is the authoritative file for all platforms.
+- **`requirements-windows.txt`** is an outdated stub; `requirements.txt` is the authoritative file for all platforms.
 - **`venv/`** is gitignored. The launcher scripts recreate it automatically.
