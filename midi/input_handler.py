@@ -18,6 +18,8 @@ class MIDIInputHandler:
         self._note_off_callback: Optional[Callable[[int], None]] = None
         self._pitch_bend_callback: Optional[Callable[[int], None]] = None
         self._control_change_callback: Optional[Callable[[int, int], None]] = None
+        # Called once when the MIDI port raises an error (device disconnected)
+        self._disconnect_callback: Optional[Callable] = None
         # Optional config_manager reference for velocity curve lookup
         self._config_manager = config_manager
 
@@ -94,7 +96,12 @@ class MIDIInputHandler:
                 elif msg.type == 'control_change':
                     self._handle_control_change(msg.control, msg.value)
         except Exception as e:
-            print(f"Error polling MIDI messages: {e}")
+            print(f"MIDI device disconnected: {e}")
+            # Close the dead port so future polls are no-ops instead of
+            # spamming errors every 10ms until the user notices.
+            self.close_device()
+            if self._disconnect_callback:
+                self._disconnect_callback()
 
     def _handle_note_on(self, note: int, velocity: int):
         """Handle NOTE_ON message with velocity.

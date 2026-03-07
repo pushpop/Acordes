@@ -417,6 +417,10 @@ class AcordesApp(App):
         if selected_device:
             self.midi_handler.open_device(selected_device)
 
+        # Register disconnect handler — fires once when the MIDI port errors out
+        # (device unplugged mid-session). Switches to config so user can reconnect.
+        self.midi_handler._disconnect_callback = self._on_midi_disconnect
+
         # Create app context to share with main screen
         self.app_context = {
             "device_manager": self.device_manager,
@@ -460,6 +464,25 @@ class AcordesApp(App):
             self.sub_title = f"🎹 Device: {selected}"
         else:
             self.sub_title = "⚠ No MIDI device selected (press C to configure)"
+
+    def _on_midi_disconnect(self):
+        """Called when the MIDI port errors out (device unplugged mid-session).
+
+        Silences the synth and opens the config screen so the user can
+        reconnect or select a different device. Uses call_later to safely
+        re-enter the Textual event loop from the poll timer context.
+        """
+        self.synth_engine.all_notes_off()
+        self.update_sub_title()
+
+        def open_config():
+            try:
+                main_screen = self.query_one(MainScreen)
+                main_screen.action_show_config()
+            except Exception:
+                pass
+
+        self.call_later(open_config)
 
     def _create_main_menu_mode(self, main_screen):
         """Create main menu widget."""
