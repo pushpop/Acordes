@@ -24,22 +24,22 @@ DRUM_PRESETS = {
         "midi_note": 36,        # Bass Drum 1  (65.4 Hz — deep sub-bass)
         "display_name": "Kick",
         "synth_params": {
-            # Sine body + 15% noise texture for the "thud" transient
+            # Pure sine wave for clean, round electronic kick
             "oscillator_type": "sine",
-            "noise_level": 0.15,
+            "noise_level": 0.01,  # Minimal noise — pure sine tone
 
-            # Long decay sustains the sub-bass boom
-            "attack":  0.001,    # 1ms fast onset
-            "decay":   0.38,     # 380ms boom tail
+            # Fast attack for punch, long decay for sub-bass boom
+            "attack":  0.0005,   # 0.5ms punchy onset
+            "decay":   0.45,     # 450ms extended boom for low-end presence
             "sustain": 0.0,
-            "release": 0.07,     # 70ms release
+            "release": 0.08,     # 80ms tight release
 
-            # Low-pass keeps sub-bass, cuts mud
-            "cutoff_freq": 550,
-            "resonance":   0.1,
-            "filter_mode": "ladder",  # warm, analog low-pass
+            # Clean warmth without muddiness
+            "cutoff_freq": 700,
+            "resonance":   0.10,
+            "filter_mode": "ladder",
 
-            "volume": 0.95,
+            "volume": 1.0,       # Full volume for punchy character
         }
     },
 
@@ -47,20 +47,21 @@ DRUM_PRESETS = {
         "midi_note": 38,        # Acoustic Snare  (pitch irrelevant — all noise)
         "display_name": "Snare",
         "synth_params": {
-            # White noise for crack and buzz
+            # White noise for sharp transient
             "oscillator_type": "noise_white",
 
-            "attack":  0.0002,   # 0.2ms ultra-fast snap
-            "decay":   0.18,     # 180ms for body + crack
+            # Ultra-fast attack for crisp snap, short decay for snappy character
+            "attack":  0.00001,  # 0.01ms super-sharp snap
+            "decay":   0.12,     # 120ms shorter — snappier response
             "sustain": 0.0,
-            "release": 0.04,     # 40ms
+            "release": 0.03,     # 30ms tight tail
 
-            # Mid-high cutoff gives the sharp crack character
-            "cutoff_freq": 3500,
+            # Clean, defined crack without muddiness
+            "cutoff_freq": 5000,
             "resonance":   0.55,
-            "filter_mode": "svf",     # sharp, modern crack
+            "filter_mode": "svf",
 
-            "volume": 0.88,
+            "volume": 0.90,
         }
     },
 
@@ -70,18 +71,18 @@ DRUM_PRESETS = {
         "synth_params": {
             "oscillator_type": "noise_white",
 
-            # Very tight — defines the "tick" character
-            "attack":  0.0001,   # 0.1ms
-            "decay":   0.04,     # 40ms tight choke
+            # Very fast, very tight — classic electronic hihat "tick"
+            "attack":  0.00002,  # 0.02ms ultra-tight snap
+            "decay":   0.04,     # 40ms tight envelope
             "sustain": 0.0,
-            "release": 0.007,    # 7ms
+            "release": 0.004,    # 4ms snap-closed effect
 
-            # Ultra-high cutoff for metallic shimmer
-            "cutoff_freq": 14000,
-            "resonance":   0.70,
+            # Clean, defined shimmer without harshness
+            "cutoff_freq": 15000,
+            "resonance":   0.60,
             "filter_mode": "svf",
 
-            "volume": 0.65,
+            "volume": 0.68,
         }
     },
 
@@ -91,14 +92,15 @@ DRUM_PRESETS = {
         "synth_params": {
             "oscillator_type": "noise_white",
 
-            # Long sustained shimmer
-            "attack":  0.0002,   # 0.2ms
-            "decay":   0.38,     # 380ms open ring
-            "sustain": 0.12,     # Sustained brightness
-            "release": 0.15,     # 150ms tail
+            # Slightly slower attack for open character, sustained ring
+            "attack":  0.00025,  # 0.25ms
+            "decay":   0.45,     # 450ms long shimmer
+            "sustain": 0.15,     # Sustained brightness for open effect
+            "release": 0.18,     # 180ms tail
 
-            "cutoff_freq": 12000,
-            "resonance":   0.80,  # high resonance = metallic shimmer
+            # Clean, bright sustained tone
+            "cutoff_freq": 12500,
+            "resonance":   0.70,
             "filter_mode": "svf",
 
             "volume": 0.70,
@@ -111,17 +113,18 @@ DRUM_PRESETS = {
         "synth_params": {
             "oscillator_type": "noise_white",
 
-            # 3ms attack delay gives the clap its characteristic "smack" shape
-            "attack":  0.003,    # 3ms — mimics hand-clap transient
-            "decay":   0.09,     # 90ms
+            # Fast attack for clean smack
+            "attack":  0.0003,   # 0.3ms — sharp, clean transient
+            "decay":   0.10,     # 100ms tight body
             "sustain": 0.0,
-            "release": 0.025,    # 25ms
+            "release": 0.025,    # 25ms clean release
 
-            "cutoff_freq": 5000,
+            # Clean midrange — punchy without muddiness
+            "cutoff_freq": 5500,
             "resonance":   0.45,
             "filter_mode": "svf",
 
-            "volume": 0.87,
+            "volume": 0.88,
         }
     },
 
@@ -129,22 +132,22 @@ DRUM_PRESETS = {
         "midi_note": 50,        # Hi Tom  (196 Hz — high-pitched tom)
         "display_name": "Tom Hi",
         "synth_params": {
-            # Triangle wave: odd harmonics give a softer "thonk" vs sine
-            # Small noise_level adds the stick-on-head click transient
-            "oscillator_type": "triangle",
-            "noise_level": 0.06,
+            # Pure sine wave for clean, round tom
+            "oscillator_type": "sine",
+            "noise_level": 0.01,  # Minimal noise — clean tone
 
-            "attack":  0.001,    # 1ms
-            "decay":   0.14,     # 140ms
+            # Fast attack for punch, quick decay for definition
+            "attack":  0.0003,   # 0.3ms punchy
+            "decay":   0.11,     # 110ms tight — punchy tom character
             "sustain": 0.0,
-            "release": 0.05,     # 50ms
+            "release": 0.035,    # 35ms
 
-            # Open filter lets harmonics through for tom brightness
-            "cutoff_freq": 6000,
-            "resonance":   0.40,
-            "filter_mode": "ladder",   # warm tom character
+            # Clean, focused high tom
+            "cutoff_freq": 7200,
+            "resonance":   0.35,
+            "filter_mode": "ladder",
 
-            "volume": 0.80,
+            "volume": 0.83,
         }
     },
 
@@ -152,19 +155,21 @@ DRUM_PRESETS = {
         "midi_note": 47,        # Mid Tom  (175 Hz)
         "display_name": "Tom Mid",
         "synth_params": {
-            "oscillator_type": "triangle",
-            "noise_level": 0.06,
+            "oscillator_type": "sine",
+            "noise_level": 0.01,
 
-            "attack":  0.001,
-            "decay":   0.19,     # Slightly longer than hi-tom
+            # Medium attack/decay for definition
+            "attack":  0.0005,   # 0.5ms
+            "decay":   0.15,     # 150ms
             "sustain": 0.0,
-            "release": 0.06,
+            "release": 0.04,     # 40ms
 
-            "cutoff_freq": 4500,
-            "resonance":   0.35,
+            # Clean, balanced mid tom
+            "cutoff_freq": 5200,
+            "resonance":   0.30,
             "filter_mode": "ladder",
 
-            "volume": 0.80,
+            "volume": 0.85,
         }
     },
 
@@ -172,20 +177,21 @@ DRUM_PRESETS = {
         "midi_note": 43,        # Low Tom  (156 Hz)
         "display_name": "Tom Low",
         "synth_params": {
-            "oscillator_type": "triangle",
-            "noise_level": 0.08,   # Slightly more noise for floor-tom "thud"
+            "oscillator_type": "sine",
+            "noise_level": 0.01,  # Minimal noise for clean low tom
 
-            "attack":  0.002,    # 2ms
-            "decay":   0.26,     # 260ms — longest tom decay
+            # Slower attack for deep thump, longer decay
+            "attack":  0.0008,   # 0.8ms
+            "decay":   0.20,     # 200ms for bass presence
             "sustain": 0.0,
-            "release": 0.09,
+            "release": 0.06,     # 60ms
 
-            # Lower cutoff focuses on the body frequency
-            "cutoff_freq": 3000,
-            "resonance":   0.30,
+            # Lower cutoff for deep, clean tom body
+            "cutoff_freq": 3600,
+            "resonance":   0.25,
             "filter_mode": "ladder",
 
-            "volume": 0.82,
+            "volume": 0.86,
         }
     },
 }
