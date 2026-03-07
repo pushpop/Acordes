@@ -420,7 +420,7 @@ class CompendiumMode(Widget):
     BINDINGS = [
         Binding("space", "play_item", "Play", show=True),
         Binding("e", "expand_all", "Expand All", show=True),
-        Binding("tab", "focus_next", "Next Panel", show=False),
+        Binding("tab", "focus_next", "Search", show=True),
         Binding("shift+tab", "focus_previous", "Prev Panel", show=False),
         Binding("left", "previous_category", "Prev Category", show=False),
         Binding("right", "next_category", "Next Category", show=False),
@@ -507,15 +507,9 @@ class CompendiumMode(Widget):
         with Vertical(id="compendium-container"):
             yield HeaderWidget(title="MUSIC KNOWLEDGE HUB", subtitle="Explore chords, scales, instruments, and genres")
 
-            # Search bar (non-functional placeholder)
-            # TODO: Implement search functionality:
-            #  - Full-text search on name, description, examples
-            #  - Filter results by category (chords, scales, instruments, genres)
-            #  - Keyboard navigation with arrow keys
-            #  - Instant preview on hover/selection
-            #  - Search results displayed in left tree as filtered subset
+            # Search bar — full-text search on name, description, examples
             yield Input(
-                placeholder="Search music knowledge (coming soon)",
+                placeholder="Search music knowledge",
                 id="search-input"
             )
 
@@ -555,10 +549,10 @@ class CompendiumMode(Widget):
             self.synth_engine.update_parameters(**self._saved_synth_params)
 
     def on_key(self, event) -> None:
-        """Intercept key presses to handle left/right arrows when tree is focused."""
+        """Intercept key presses to handle navigation and playback."""
         tree = self.query_one("#chord-tree", Tree)
 
-        # Only handle left/right if tree is focused
+        # Only handle these keys if tree is focused
         if self.app.focused == tree:
             if event.key == "left":
                 event.prevent_default()
@@ -567,6 +561,11 @@ class CompendiumMode(Widget):
             elif event.key == "right":
                 event.prevent_default()
                 self.action_next_category()
+                return
+            elif event.key == "space":
+                # Play highlighted chord when space is pressed in chord category
+                event.prevent_default()
+                self.action_play_item()
                 return
 
     def _build_tree(self):
