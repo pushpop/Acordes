@@ -18,8 +18,7 @@ class ConfigMode(Screen):
         Binding("escape", "dismiss", "Close", show=True),
         Binding("r", "refresh_devices", "Refresh", show=True),
         Binding("space", "select_item", "Select", show=True),
-        Binding("tab", "focus_next_section", "Next section", show=True),
-        Binding("shift+tab", "focus_prev_section", "Prev section", show=False),
+        Binding("tab", "toggle_list_focus", "Switch list", show=True),
     ]
 
     CSS = """
@@ -214,21 +213,22 @@ class ConfigMode(Screen):
         """Return True if the velocity curve list currently has Textual focus."""
         return self.focused is self.query_one("#curve-list", ListView)
 
-    def action_focus_next_section(self):
-        """Tab — move focus from device list to curve list, highlight active curve."""
-        curve_list = self.query_one("#curve-list", ListView)
-        # Auto-highlight the currently active velocity curve
-        if self.pending_curve in self.velocity_curves:
-            curve_list.index = self.velocity_curves.index(self.pending_curve)
-        curve_list.focus()
-
-    def action_focus_prev_section(self):
-        """Shift+Tab — move focus from curve list back to device list, highlight active device."""
+    def action_toggle_list_focus(self):
+        """Tab — toggle focus between device list and velocity curve list."""
         device_list = self.query_one("#device-list", ListView)
-        # Auto-highlight the currently active device
-        if self.pending_device in self.devices:
-            device_list.index = self.devices.index(self.pending_device)
-        device_list.focus()
+        curve_list = self.query_one("#curve-list", ListView)
+
+        # Toggle focus between the two lists
+        if self.focused is device_list:
+            # Switch from device list to curve list
+            if self.pending_curve in self.velocity_curves:
+                curve_list.index = self.velocity_curves.index(self.pending_curve)
+            curve_list.focus()
+        else:
+            # Switch from curve list back to device list
+            if self.pending_device in self.devices:
+                device_list.index = self.devices.index(self.pending_device)
+            device_list.focus()
 
     def action_select_item(self):
         """Space — select highlighted item in whichever list currently has focus."""

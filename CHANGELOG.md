@@ -5,6 +5,31 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.8] - 2026-03-07
+
+### Fixed
+
+**Synth Mode Focus Persistence**:
+- Added parameter focus state tracking: focus mode now remembers the last accessed parameter when re-entering
+- First entry defaults to OSCILLATOR - Wave, subsequent entries return to last position
+- Implemented `_last_focus_section` and `_last_focus_param` state variables in `modes/synth_mode.py`
+- Focus position saved when exiting focus mode, restored when re-entering
+
+**Config Mode Usability**:
+- Fixed TAB key to toggle focus between MIDI device and velocity curve lists instead of moving forward
+- Removed Shift+TAB shortcut for clarity
+- Auto-highlights active device/curve when switching focus between lists
+- Improved visual feedback when toggling between lists
+
+**Application Launch Flow**:
+- Fixed black screen when user exits config mode without selecting a MIDI device
+- Restructured `_after_engine_ready()` to always push MainScreen first, then optionally ConfigMode on top
+- Ensures main menu is visible when config mode is dismissed via Escape
+- Callback now properly reconnects MIDI device if user selected one in config
+
+**Parameter Naming**:
+- Fixed parameter name in Tambor mode: `arpeggiator_enabled` changed to `arp_enabled` for consistency
+
 ## [1.8.6] - 2026-03-07
 
 ### Fixed

@@ -1,0 +1,197 @@
+# ABOUTME: SynthEngine proxy that runs the audio engine in a separate process.
+# ABOUTME: Isolates PyAudio from the Textual UI thread to prevent GIL-caused audio artifacts.
+
+import multiprocessing
+import queue
+import threading
+from music.preset_manager import DEFAULT_PARAMS
+
+
+def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr):
+    """Entry point for the audio subprocess.
+
+    Constructs SynthEngine, signals the main process when ready, then
+    forwards commands from cmd_queue to the engine until a shutdown
+    command is received.
+
+    Runs on Windows via 'spawn', so no inherited state from the parent
+    process: all imports happen fresh here.
+    """
+    try:
+        # Import here so only the audio process loads PyAudio/numpy.
+        from music.synth_engine import SynthEngine
+
+        engine = SynthEngine()
+        engine.warm_up()
+        ready_event.set()
+
+        # Command forwarding loop.  Runs on the subprocess main thread.
+        # The audio callback runs on PortAudio's internal C thread, so
+        # this loop and the callback only compete for the GIL inside this
+        # one process — Textual cannot interfere.
+        while True:
+            try:
+                msg = cmd_queue.get(timeout=0.5)
+            except Exception:
+                # Queue.Empty or interrupted — check if engine is still running.
+                if not engine.running:
+                    break
+                continue
+
+            if not isinstance(msg, dict):
+                continue
+
+            msg_type = msg.get('type', '')
+
+            if msg_type == 'shutdown':
+                break
+            elif msg_type == 'note_on':
+                # Call engine.note_on so held_notes bookkeeping stays correct.
+                engine.note_on(msg['note'], msg['velocity'])
+            elif msg_type == 'note_off':
+                engine.note_off(msg['note'], msg.get('velocity', 0))
+            elif msg_type == 'all_notes_off':
+                engine.all_notes_off()
+            elif msg_type == 'pitch_bend':
+                engine.pitch_bend_change(msg['value'])
+            elif msg_type == 'modulation':
+                engine.modulation_change(msg['value'])
+            else:
+                # param_update, soft_all_notes_off, mute_gate, drum_trigger
+                # go directly to the engine's internal threading.Queue for
+                # sample-accurate processing on the audio callback thread.
+                engine.midi_event_queue.put(msg)
+
+    except Exception as exc:
+        err_bytes = str(exc).encode('utf-8')[:255]
+        for i, b in enumerate(err_bytes):
+            error_msg_arr[i] = b
+        error_event.set()
+    finally:
+        try:
+            engine.close()
+        except Exception:
+            pass
+
+
+class SynthEngineProxy:
+    """Drop-in replacement for SynthEngine that runs the engine in a child process.
+
+    All method calls are serialized as dicts sent through a multiprocessing.Queue.
+    The child process is completely isolated from the Textual GIL, so UI redraws
+    (opening modals, mounting screens) cannot cause audio callback deadline misses.
+
+    API compatibility: all methods and attributes used by existing modes are
+    implemented here.  No mode code needs to change.
+    """
+
+    def __init__(self):
+        self._cmd_queue = multiprocessing.Queue()
+        self._ready_event = multiprocessing.Event()
+        self._error_event = multiprocessing.Event()
+        # Shared byte array for error message from child process (256 bytes max).
+        self._error_msg_arr = multiprocessing.Array('c', 256)
+
+        # Local shadow of engine parameters — updated on every update_parameters()
+        # call so get_current_params() can return accurate state without IPC.
+        self._shadow_params: dict = dict(DEFAULT_PARAMS)
+
+        # Expose cmd_queue as midi_event_queue so modes that put events directly
+        # (e.g. synth_mode's mute_gate) work without modification.
+        self.midi_event_queue = self._cmd_queue
+
+        # held_notes mirrors the engine's held set; kept in sync by note_on/off.
+        self.held_notes: set = set()
+
+        self._process = multiprocessing.Process(
+            target=_audio_process_main,
+            args=(
+                self._cmd_queue,
+                self._ready_event,
+                self._error_event,
+                self._error_msg_arr,
+            ),
+            daemon=True,
+            name="acordes-audio",
+        )
+        self._process.start()
+
+    # ── Startup / lifecycle ───────────────────────────────────────
+
+    def wait_ready(self, timeout: float = 15.0) -> bool:
+        """Block until the audio process signals ready or timeout expires."""
+        return self._ready_event.wait(timeout)
+
+    def get_error(self) -> str:
+        """Return error message from child process, or empty string if none."""
+        if self._error_event.is_set():
+            raw = bytes(self._error_msg_arr).split(b'\x00')[0]
+            return raw.decode('utf-8', errors='replace')
+        return ""
+
+    def is_available(self) -> bool:
+        return self._ready_event.is_set() and self._process.is_alive()
+
+    def warm_up(self):
+        """No-op: the audio process warms up automatically after construction."""
+        pass
+
+    def close(self):
+        """Shut down the audio process cleanly."""
+        try:
+            self._cmd_queue.put({'type': 'shutdown'})
+        except Exception:
+            pass
+        self._process.join(timeout=3.0)
+        if self._process.is_alive():
+            self._process.terminate()
+
+    # ── Note events ───────────────────────────────────────────────
+
+    def note_on(self, note: int, velocity: int = 127):
+        self.held_notes.add(note)
+        self._cmd_queue.put({'type': 'note_on', 'note': note, 'velocity': velocity})
+
+    def note_off(self, note: int, velocity: int = 0):
+        self.held_notes.discard(note)
+        self._cmd_queue.put({'type': 'note_off', 'note': note, 'velocity': velocity})
+
+    def all_notes_off(self):
+        self.held_notes.clear()
+        self._cmd_queue.put({'type': 'all_notes_off'})
+
+    def soft_all_notes_off(self):
+        self._cmd_queue.put({'type': 'soft_all_notes_off'})
+
+    # ── Parameter updates ─────────────────────────────────────────
+
+    def update_parameters(self, **kwargs):
+        """Forward parameter changes and update local shadow for get_current_params()."""
+        self._shadow_params.update(kwargs)
+        self._cmd_queue.put({'type': 'param_update', 'params': kwargs})
+
+    def get_current_params(self) -> dict:
+        """Return the last-known parameter state from the local shadow copy."""
+        return dict(self._shadow_params)
+
+    # ── MIDI expression ───────────────────────────────────────────
+
+    def pitch_bend_change(self, value: int):
+        self._cmd_queue.put({'type': 'pitch_bend', 'value': value})
+
+    def modulation_change(self, value: int):
+        self._cmd_queue.put({'type': 'modulation', 'value': value})
+
+    # ── Tambor drum trigger ───────────────────────────────────────
+
+    def drum_trigger(self, note: int, velocity: int, params: dict):
+        self._cmd_queue.put({
+            'type': 'drum_trigger',
+            'note': note,
+            'velocity': velocity,
+            'params': params,
+        })
+
+    def preload(self, midi_note: int, synth_params: dict):
+        """Stub: preload is a drum_synth concern, not implemented on SynthEngine."""
+        pass

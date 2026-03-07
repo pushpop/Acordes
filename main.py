@@ -456,7 +456,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.8.7"
+    VERSION = "1.8.8"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -510,16 +510,23 @@ class AcordesApp(App):
     def _after_engine_ready(self):
         """Called by LoadingScreen once the audio process signals ready."""
         self.pop_screen()  # dismiss loading screen
+
+        # Always push MainScreen first so there is always a screen below config.
+        # When ConfigMode is dismissed (Escape or device selected) it simply pops,
+        # revealing MainScreen which is already fully composed with main_menu.
+        main_screen = MainScreen(self.app_context)
+        self.push_screen(main_screen)
+
         if not self.device_manager.get_selected_device():
             def on_config_closed(result):
                 self.update_sub_title()
-                main_screen = MainScreen(self.app_context)
-                self.push_screen(main_screen)
+                # Reconnect MIDI if user selected a device
+                selected = self.device_manager.get_selected_device()
+                if selected and not self.midi_handler.is_device_open():
+                    self.midi_handler.open_device(selected)
             config = ConfigMode(self.device_manager, self.config_manager)
             self.push_screen(config, on_config_closed)
-        else:
-            main_screen = MainScreen(self.app_context)
-            self.push_screen(main_screen)
+
         self.update_sub_title()
 
     def update_sub_title(self):

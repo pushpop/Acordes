@@ -704,7 +704,7 @@ class TamborMode(Vertical):
         if self.synth_engine:
             self.synth_engine.update_parameters(
                 voice_type="poly",
-                arpeggiator_enabled=False,
+                arp_enabled=False,
             )
 
         # Refresh BPM from config_manager (for mode switching sync)

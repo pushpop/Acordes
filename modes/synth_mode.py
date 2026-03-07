@@ -340,6 +340,9 @@ class SynthMode(Widget):
         # _focus_param:   index into _SECTION_PARAMS[section] for the active param
         self._focus_section: Optional[str] = None
         self._focus_param: int = 0
+        # Track last accessed parameter for focus mode persistence
+        self._last_focus_section: Optional[str] = None
+        self._last_focus_param: int = 0
 
         # Focus-mode acceleration tracking — for smooth key-hold acceleration
         self._focus_adjust_start_time: Optional[float] = None  # When adjustment started
@@ -673,12 +676,15 @@ class SynthMode(Widget):
     # ── Notifications (debounced to prevent stacking) ──────────────
 
     def _show_notification(self, message: str, severity: str = "information", timeout: float = 2.0):
-        """Show a notification only if 150ms has elapsed since the last one.
-        This prevents rapid notifications from stacking on top of each other."""
+        """Show a message in the header subtitle, then restore normal subtitle after timeout.
+        Debounced to 150ms so rapid calls don't flicker. No toast popups — they consume
+        rendering resources and interrupt the audio thread indirectly via Textual redraws."""
         now = time.time()
         if now - self._last_notification_time >= 0.15:
             self._last_notification_time = now
-            self.app.notify(message, severity=severity, timeout=timeout)
+            if self.header:
+                self.header.update_subtitle(message)
+                self.set_timer(timeout, self._update_preset_ui)
 
     # ── MIDI plumbing ────────────────────────────────────────────
 
@@ -717,6 +723,10 @@ class SynthMode(Widget):
 
     def _set_focus(self, section: Optional[str], param: int = 0):
         old_sec = self._focus_section
+        # Save focus position when exiting focus mode (section=None from previously focused)
+        if old_sec is not None and section is None:
+            self._last_focus_section = old_sec
+            self._last_focus_param = self._focus_param
         self._focus_section = section
         # Clamp param index to valid range for the new section
         if section is not None:
@@ -826,11 +836,16 @@ class SynthMode(Widget):
             self.screen.action_quit_app()
 
     def action_nav_enter(self):
-        """Enter focus on the first section / exit focus if already in it."""
+        """Enter focus, restoring last accessed parameter, or exit focus if already in it."""
         if self._focused():
             self._set_focus(None)
         else:
-            self._set_focus(_SECTION_GRID[0][0], 0)
+            # Restore last accessed parameter if available
+            if self._last_focus_section is not None:
+                self._set_focus(self._last_focus_section, self._last_focus_param)
+            else:
+                # First entry: start at first section, first parameter
+                self._set_focus(_SECTION_GRID[0][0], 0)
 
     # ── WASD — focus-only navigation (silently ignored when unfocused) ────
 
