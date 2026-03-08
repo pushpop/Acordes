@@ -215,10 +215,11 @@ For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 
 ### What's New (v1.8.9)
 
-**Audio Device Selection**:
+**Audio Device Selection & Validation**:
 - Select audio output device at startup (Windows, macOS, Linux/ALSA)
 - On first launch, app defers engine initialization until audio device is chosen in Config Mode
-- On subsequent launches, the saved audio device is used automatically
+- On subsequent launches, the saved audio device is validated; if missing (e.g. USB interface unplugged), automatically re-routes to Config Mode
+- User never encounters errors from missing or invalid audio devices
 - Fixes ALSA sound card selection issues on Fedora and other Linux distributions
 - Windows: PyAudio device deduplication (removes Host API duplicates, prefers WASAPI for best latency)
 

@@ -22,11 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New `list_output_devices()` deduplicates by device name, preferring WASAPI for best latency
 - Cleans up device list to show one entry per unique device
 
-**Engine Startup Deferral** (`main.py`):
+**Engine Startup Deferral & Device Validation** (`main.py`):
 - Audio engine (`SynthEngineProxy`) is now lazily initialized
 - On first launch: waits for user to select audio device in Config Mode before starting
-- On subsequent launches: starts engine immediately with saved device
-- Improves startup flow and allows reliable audio device configuration on first use
+- On subsequent launches: validates that saved audio device is still present in system
+  - If saved device is gone (e.g. USB interface unplugged), automatically clears saved config
+  - Routes user to Config Mode to select a new device (e.g. fallback to built-in speakers)
+  - User never faces errors from missing/invalid audio devices
+- Improves startup flow and ensures reliable audio device configuration on every launch
 
 **Launcher Improvements** (`run.sh`):
 - Cleaner output: `uv sync` runs silently on success, verbose output only on failure

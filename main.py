@@ -24,6 +24,7 @@ from midi.input_handler import MIDIInputHandler
 from music.chord_detector import ChordDetector
 from music.chord_library import ChordLibrary
 from music.engine_proxy import SynthEngineProxy
+from music.synth_engine import list_output_devices
 
 from modes.config_mode import ConfigMode
 from modes.piano_mode import PianoMode
@@ -527,22 +528,36 @@ class AcordesApp(App):
         First launch (no saved audio device): show config so the user can pick
         their audio output and MIDI device before the engine starts.
 
-        Subsequent launches: start the engine immediately with the saved device.
+        Subsequent launches: validate that the saved audio device index is still
+        present in the system. If the device is gone (e.g. USB interface unplugged),
+        clear the saved device and show config mode so the user can pick a new one.
         """
         self.update_sub_title()
         saved_audio_index = self.config_manager.get_audio_device_index()
 
+        # Validate saved device is still available.
+        if saved_audio_index is not None:
+            available = {idx for idx, _ in list_output_devices()}
+            if saved_audio_index not in available:
+                # Device no longer present — clear saved choice and re-configure.
+                saved_name = self.config_manager.get_audio_device_name() or str(saved_audio_index)
+                self.config_manager.set_audio_device(None, None)
+                saved_audio_index = None
+                self._missing_audio_device_name = saved_name
+            else:
+                self._missing_audio_device_name = None
+        else:
+            self._missing_audio_device_name = None
+
         if saved_audio_index is None:
-            # First launch — no audio device configured yet.
-            # Show config screen; engine starts after user completes setup.
-            def on_first_config_closed(result):
+            # No valid audio device: first launch or device went missing.
+            def on_config_closed(result):
                 chosen_index = self.config_manager.get_audio_device_index()
                 self._start_audio_engine(chosen_index)
-
             config = ConfigMode(self.device_manager, self.config_manager)
-            self.push_screen(config, on_first_config_closed)
+            self.push_screen(config, on_config_closed)
         else:
-            # Subsequent launch — start engine with saved device directly.
+            # Saved device confirmed present — start engine directly.
             self._start_audio_engine(saved_audio_index)
 
     def _after_engine_ready(self):
