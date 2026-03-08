@@ -9,13 +9,13 @@ import queue
 import random as _rnd
 from typing import Optional, List
 
-# Check for PyAudio availability
+# Check for sounddevice availability
 try:
-    import pyaudio
+    import sounddevice as sd
     AUDIO_AVAILABLE = True
 except ImportError:
     AUDIO_AVAILABLE = False
-    pyaudio = None
+    sd = None
 
 
 class Voice:
@@ -203,48 +203,36 @@ class Voice:
 
 
 def list_output_devices() -> list:
-    """Return all PyAudio output-capable devices as [(index, name), ...].
+    """Return all output-capable audio devices as [(index, name), ...].
 
-    Creates a temporary PyAudio instance for enumeration only, then closes it.
-    Safe to call from the UI process before the audio engine is started.
-    Returns an empty list if PyAudio is unavailable.
+    Uses sounddevice (PortAudio) for enumeration. Safe to call from the UI
+    process before the audio engine is started. Returns an empty list if
+    sounddevice is unavailable.
+
+    On Windows, PortAudio lists the same physical device once per host API
+    (MME, DirectSound, WASAPI, WDM-KS). Duplicates are collapsed by name,
+    preferring WASAPI for best latency.
     """
-    if not AUDIO_AVAILABLE or pyaudio is None:
+    if not AUDIO_AVAILABLE or sd is None:
         return []
-    pa = None
     try:
-        pa = pyaudio.PyAudio()
+        hostapis = sd.query_hostapis()
+        devices  = sd.query_devices()
 
-        # On Windows, PortAudio lists the same physical device once per host API
-        # (MME, DirectSound, WASAPI, WDM-KS). Collect all candidates, then keep
-        # one entry per unique name, preferring WASAPI (host API index 3 on most
-        # Windows installs) for best latency. Falls back to whatever entry appears
-        # last if WASAPI is not available for that device.
-        candidates = {}  # name -> (index, host_api_index)
-        for i in range(pa.get_device_count()):
-            info = pa.get_device_info_by_index(i)
-            if info.get('maxOutputChannels', 0) > 0:
-                name = info['name']
-                host_api = info.get('hostApi', -1)
-                existing = candidates.get(name)
-                if existing is None:
-                    candidates[name] = (i, host_api)
-                else:
-                    # Prefer WASAPI (host API type 3 = paWASAPI in PortAudio enum).
-                    wasapi_type = 3
-                    host_api_info = pa.get_host_api_info_by_index(host_api)
-                    if host_api_info.get('type') == wasapi_type:
-                        candidates[name] = (i, host_api)
+        candidates = {}  # name -> (index, hostapi_name)
+        for i, d in enumerate(devices):
+            if d['max_output_channels'] > 0:
+                name         = d['name']
+                hostapi_name = hostapis[d['hostapi']]['name']
+                if name not in candidates:
+                    candidates[name] = (i, hostapi_name)
+                elif 'WASAPI' in hostapi_name:
+                    # Prefer WASAPI over MME / DirectSound on Windows
+                    candidates[name] = (i, hostapi_name)
 
         return [(idx, name) for name, (idx, _) in candidates.items()]
     except Exception:
         return []
-    finally:
-        if pa is not None:
-            try:
-                pa.terminate()
-            except Exception:
-                pass
 
 
 class SynthEngine:
@@ -254,12 +242,11 @@ class SynthEngine:
         self.sample_rate = 48000
         self.buffer_size = 528
         self.num_voices = 8
-        self.audio = None
         self.stream = None
-        # -1 = No Audio mode (engine runs silently, no PyAudio stream opened)
-        # -2 = System Default (passed as None to PyAudio — OS chooses the output)
+        # -1 = No Audio mode (engine runs silently, no audio stream opened)
+        # -2 = System Default (None passed to sounddevice — OS chooses the output)
         # None = system default (same as -2, legacy behavior)
-        # >=0 = specific device index
+        # >=0 = specific sounddevice device index
         self._output_device_index = output_device_index
         self.running = False
 
@@ -347,7 +334,6 @@ class SynthEngine:
         self._cb_wet_l    = np.zeros(_bs, dtype=np.float32)
         self._cb_wet_r    = np.zeros(_bs, dtype=np.float32)
         self._cb_gain_ramp = np.zeros(_bs, dtype=np.float32)
-        self._cb_out      = np.zeros(_bs * 2, dtype=np.int32)
         # Float index array reused for vectorized ring-buffer index math
         self._cb_indices  = np.arange(_bs, dtype=np.float32)
 
@@ -475,23 +461,26 @@ class SynthEngine:
 
         if self._output_device_index == -1:
             # No Audio mode: engine processes MIDI but produces no sound.
-            # PyAudio is not initialized; _audio_callback is never called.
+            # No audio stream is opened; _audio_callback is never called.
             self.running = True
 
-        elif AUDIO_AVAILABLE and pyaudio is not None:
+        elif AUDIO_AVAILABLE and sd is not None:
             try:
-                self.audio = pyaudio.PyAudio()
-                # -2 or None = use system default (OS/PipeWire/PulseAudio routes to speakers)
-                if self._output_device_index is not None and self._output_device_index >= 0:
-                    device_index = self._output_device_index
-                else:
-                    device_index = self.audio.get_default_output_device_info()['index']
-                self.stream = self.audio.open(
-                    format=pyaudio.paInt24, channels=2, rate=self.sample_rate,
-                    output=True, output_device_index=device_index,
-                    frames_per_buffer=self.buffer_size, stream_callback=self._audio_callback, start=False
+                # -2 or None = let sounddevice use the OS/PipeWire default output.
+                device_index = (
+                    self._output_device_index
+                    if self._output_device_index is not None and self._output_device_index >= 0
+                    else None
                 )
-                self.stream.start_stream()
+                self.stream = sd.OutputStream(
+                    samplerate=self.sample_rate,
+                    blocksize=self.buffer_size,
+                    device=device_index,
+                    channels=2,
+                    dtype='float32',
+                    callback=self._audio_callback,
+                )
+                self.stream.start()
                 self.running = True
                 self._elevate_audio_priority()
             except Exception as e:
@@ -1595,13 +1584,13 @@ class SynthEngine:
                     v.feg_is_releasing = True
                     v.feg_release_start = v.feg_time
 
-    def _audio_callback(self, in_data, frame_count, time_info, status):
+    def _audio_callback(self, outdata, frame_count, time, status):
         try:
             # Output initial silence for ~50ms after startup to avoid filter transients
             if self._startup_silence_samples > 0:
-                silence = bytes(frame_count * 2 * 3)  # 3 bytes per sample × 2 channels
+                outdata.fill(0)
                 self._startup_silence_samples -= frame_count
-                return (silence, pyaudio.paContinue)
+                return
 
             self._process_midi_events()
             self._update_voice_frequencies()
@@ -1745,8 +1734,8 @@ class SynthEngine:
                 # triggered (in _trigger_note) and decremented here while draining so
                 # the callback returns to silence naturally once the tail expires.
                 if self._fx_tail_samples <= 0:
-                    # Silence: 3 bytes per sample × 2 channels × frame_count frames
-                    return (bytes(frame_count * 2 * 3), pyaudio.paContinue)
+                    outdata.fill(0)
+                    return
                 self._fx_tail_samples = max(0, self._fx_tail_samples - frame_count)
                 # Fall through: voices produce silence, FX blocks drain their buffers.
 
@@ -2074,21 +2063,14 @@ class SynthEngine:
             # output value — eliminates tanh/gain rounding mismatch at buffer boundaries.
             self._last_output_L = float(mixed_l[-1])
             self._last_output_R = float(mixed_r[-1])
-            # Use pre-allocated int32 buffer — write L/R interleaved via assignment.
-            # Assignment to an int32 slice does implicit float→int truncation regardless
-            # of numpy version; np.clip(..., out=int32) requires casting='unsafe' in
-            # numpy >= 1.24 and would silently fail (caught by the except block = silence).
-            out = self._cb_out[:frame_count * 2]
-            out[0::2] = np.clip(mixed_l * 8388607, -8388607, 8388607)
-            out[1::2] = np.clip(mixed_r * 8388607, -8388607, 8388607)
-            # paInt24: view int32 as uint8, take the 3 LSBs per word (little-endian).
-            # Avoids the astype('<i4') copy — int32 view is already correct on LE systems.
-            out24 = out.view(np.uint8).reshape(-1, 4)[:, :3].tobytes()
-            return (out24, pyaudio.paContinue)
-        except Exception as e:
+            # Write float32 L/R directly into sounddevice's output buffer.
+            # outdata shape is (frame_count, 2); mixed_l/r are already float32 and clipped
+            # by tanh, so no additional conversion or scaling is needed.
+            outdata[:, 0] = mixed_l
+            outdata[:, 1] = mixed_r
+        except Exception:
             import traceback; traceback.print_exc()
-            # Silence: 3 bytes per sample × 2 channels × frame_count frames
-            return (bytes(frame_count * 2 * 3), pyaudio.paContinue)
+            outdata.fill(0)
 
     def note_on(self, note: int, velocity: int = 127):
         self.held_notes.add(note)
@@ -2219,8 +2201,9 @@ class SynthEngine:
 
     def close(self):
         self.running = False
-        if self.stream: self.stream.stop_stream(); self.stream.close()
-        if self.audio: self.audio.terminate()
+        if self.stream:
+            self.stream.stop()
+            self.stream.close()
 
     def is_available(self) -> bool: return AUDIO_AVAILABLE and self.running
 

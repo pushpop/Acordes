@@ -4,5 +4,5 @@ python-rtmidi>=1.4.0
 pygame>=2.0.0
 mingus>=0.6.1
 numpy>=1.24.0
-pyaudio>=0.2.13
+sounddevice>=0.4.6
 scipy>=1.10.0

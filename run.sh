@@ -47,40 +47,42 @@ if ! command -v uv &>/dev/null; then
     fi
 fi
 
-# ── 2. Install system audio dependencies (required to compile PyAudio) ─────────
-# PyAudio requires PortAudio headers and a C compiler to build from source.
-# Detect the package manager and install deps before attempting uv sync.
+# ── 2. Install system audio dependencies (PortAudio runtime for sounddevice) ───
+# sounddevice ships pre-built wheels on Windows/macOS and links to the system
+# PortAudio shared library on Linux. No C compiler or headers are required.
 _install_system_audio_deps() {
     if command -v dnf &>/dev/null; then
-        echo " Fedora/RHEL detected — installing audio build dependencies..."
-        sudo dnf install -y portaudio-devel python3-devel gcc 2>&1 | grep -v "^Last\|^Loaded\|^Updating\|Nothing to do" || true
+        echo " Fedora/RHEL detected — installing PortAudio runtime..."
+        sudo dnf install -y portaudio 2>&1 | grep -v "^Last\|^Loaded\|^Updating\|Nothing to do" || true
     elif command -v apt-get &>/dev/null; then
-        echo " Debian/Ubuntu detected — installing audio build dependencies..."
-        sudo apt-get install -y portaudio19-dev python3-dev gcc 2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
+        echo " Debian/Ubuntu detected — installing PortAudio runtime..."
+        sudo apt-get install -y libportaudio2 2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
     elif command -v pacman &>/dev/null; then
-        echo " Arch Linux detected — installing audio build dependencies..."
-        sudo pacman -S --noconfirm portaudio python gcc 2>&1 | grep -v "^warning" || true
+        echo " Arch Linux detected — installing PortAudio..."
+        sudo pacman -S --noconfirm portaudio 2>&1 | grep -v "^warning" || true
     elif command -v brew &>/dev/null; then
         echo " macOS/Homebrew detected — installing PortAudio..."
         brew install portaudio 2>&1 | grep -v "^==> Already\|^Warning" || true
     else
         echo ""
         echo " WARNING: Could not detect package manager."
-        echo " If the build fails, install these packages manually:"
-        echo "   Fedora : sudo dnf install portaudio-devel python3-devel gcc"
-        echo "   Ubuntu : sudo apt install portaudio19-dev python3-dev gcc"
-        echo "   Arch   : sudo pacman -S portaudio python gcc"
+        echo " If audio fails, install the PortAudio runtime manually:"
+        echo "   Fedora : sudo dnf install portaudio"
+        echo "   Ubuntu : sudo apt install libportaudio2"
+        echo "   Arch   : sudo pacman -S portaudio"
         echo "   macOS  : brew install portaudio"
         echo ""
     fi
 }
 
-# Only run system dep install if portaudio headers are not already present
-if ! pkg-config --exists portaudio-2.0 2>/dev/null && \
-   ! [ -f /usr/include/portaudio.h ] && \
-   ! [ -f /usr/local/include/portaudio.h ]; then
+# Check for the PortAudio shared library (runtime, not headers).
+# sounddevice needs the .so at runtime; no compiler or -devel package required.
+if ! ldconfig -p 2>/dev/null | grep -q libportaudio && \
+   ! [ -f /usr/lib/libportaudio.so.2 ] && \
+   ! [ -f /usr/local/lib/libportaudio.so.2 ] && \
+   ! command -v brew &>/dev/null; then
     echo ""
-    echo " PortAudio headers not found — installing system dependencies..."
+    echo " PortAudio library not found — installing system dependencies..."
     _install_system_audio_deps
     echo ""
 fi
@@ -123,10 +125,10 @@ if [ ! -d "$VENV_DIR" ]; then
         echo ""
         echo "$SYNC_LOG"
         echo ""
-        echo " If PyAudio failed to build, install system audio libraries first:"
-        echo "   Fedora : sudo dnf install portaudio-devel python3-devel gcc"
-        echo "   Ubuntu : sudo apt install portaudio19-dev python3-dev gcc"
-        echo "   Arch   : sudo pacman -S portaudio python gcc"
+        echo " If sounddevice failed, install the PortAudio runtime library first:"
+        echo "   Fedora : sudo dnf install portaudio"
+        echo "   Ubuntu : sudo apt install libportaudio2"
+        echo "   Arch   : sudo pacman -S portaudio"
         echo "   macOS  : brew install portaudio"
         echo ""
         echo " Then run ./run.sh again."

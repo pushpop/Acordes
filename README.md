@@ -112,21 +112,24 @@ A comprehensive music theory reference hub:
 
 ## Requirements
 
-- **Python 3.11 or 3.12** (PyAudio and python-rtmidi lack pre-built wheels for 3.13+)
+- **Python 3.11 or 3.12** (python-rtmidi lacks pre-built wheels for 3.13+)
 - **MIDI Input Device** (USB MIDI keyboard, controller, or virtual MIDI)
 - **Audio Output** (system speakers or audio interface)
 
 ### Platform-Specific Audio Setup
 
-**Windows**: PyAudio is included in the Windows installer via pipwin.
-**Linux**: Install PortAudio library first:
-```bash
-sudo apt-get install portaudio19-dev python3-dev
-```
+**Windows / macOS**: No extra setup needed. sounddevice ships pre-built wheels.
 
-**macOS**: Install PortAudio via Homebrew:
+**Linux**: Install the PortAudio runtime library (the `run.sh` launcher does this automatically):
 ```bash
-brew install portaudio
+# Fedora / RHEL:
+sudo dnf install portaudio
+
+# Ubuntu / Debian:
+sudo apt install libportaudio2
+
+# Arch Linux:
+sudo pacman -S portaudio
 ```
 
 ---
@@ -222,7 +225,7 @@ For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 - On subsequent launches, the saved audio device is validated; if missing (e.g. USB interface unplugged), automatically re-routes to Config Mode
 - User never encounters errors from missing or invalid audio devices
 - Fixes ALSA sound card selection issues on Fedora and other Linux distributions
-- Windows: PyAudio device deduplication (removes Host API duplicates, prefers WASAPI for best latency)
+- Windows: PortAudio device deduplication (removes Host API duplicates, prefers WASAPI for best latency)
 - Subtitle shows both MIDI device and audio output (e.g., `🎹 Device | 🔊 System Default`)
 
 **Launcher Improvements**:
@@ -243,7 +246,7 @@ See **[CHANGELOG.md](CHANGELOG.md)** for full technical details.
 │  ├─ 8-voice polyphonic synthesis (voices 0-7)
 │  ├─ Dual-rank per-voice architecture
 │  ├─ MIDI event queue (thread-safe parameter routing)
-│  ├─ PyAudio real-time I/O (48 kHz, 1024-sample buffer)
+│  ├─ sounddevice real-time I/O (48 kHz, 528-sample buffer)
 │  └─ Preset manager with factory + user presets
 │
 ├─ MIDI I/O (midi/)
@@ -284,7 +287,7 @@ Voice Allocation (8-voice polyphony with stealing)
 
 Audio Callback (48 kHz)
   ↓
-PyAudio → System Audio Output
+sounddevice (PortAudio) → System Audio Output
 ```
 
 ### Key Design Decisions
@@ -299,42 +302,38 @@ PyAudio → System Audio Output
 
 ## Troubleshooting
 
-### PyAudio Installation Fails (Python 3.13+)
+### Python Version (3.13+ Not Supported)
 
-PyAudio and python-rtmidi lack pre-built wheels for Python 3.13+. The easiest solution is to use Python 3.12:
+python-rtmidi lacks pre-built wheels for Python 3.13+. Use Python 3.12:
 
 ```
 https://www.python.org/downloads/python-3.12.10/
 ```
 
-You can have multiple Python versions installed side-by-side. After installing 3.12, delete `venv/` and run the launcher again.
+You can have multiple Python versions installed side-by-side. After installing 3.12, delete `.venv/` and run the launcher again.
 
 ### No Sound (Synth / Metronome Mode)
 
-1. **Windows**: Use the pipwin method if the standard `pip install pyaudio` fails:
-   ```cmd
-   venv\Scripts\pip install pipwin
-   venv\Scripts\pipwin install pyaudio
-   ```
-
-2. **Linux**: Install PortAudio headers first (the `run.sh` script does this automatically):
+1. **Linux**: Install the PortAudio runtime library (the `run.sh` script does this automatically):
    ```bash
    # Fedora / RHEL:
-   sudo dnf install portaudio-devel python3-devel gcc
+   sudo dnf install portaudio
 
    # Ubuntu / Debian:
-   sudo apt-get install portaudio19-dev python3-dev gcc
+   sudo apt install libportaudio2
 
    # Arch Linux:
-   sudo pacman -S portaudio python gcc
+   sudo pacman -S portaudio
    ```
    Then run `./run.sh` again.
 
-3. **macOS**: Install via Homebrew:
+2. **macOS**: Install via Homebrew:
    ```bash
    brew install portaudio
-   pip install pyaudio pygame
    ```
+
+3. **Windows**: sounddevice ships pre-built wheels — no extra steps required.
+   If you encounter issues, ensure your audio drivers are up to date.
 
 ### No MIDI Devices Found
 
@@ -425,7 +424,7 @@ acordes/
 
 - **TUI Framework**: [Textual](https://textual.textualize.io/) (modern Python TUI library)
 - **MIDI I/O**: [mido](https://mido.readthedocs.io/) + [python-rtmidi](https://github.com/SpotlightKid/python-rtmidi)
-- **Audio**: [PyAudio](https://people.csail.mit.edu/hubert/pyaudio/) (PortAudio bindings), [Pygame](https://www.pygame.org/)
+- **Audio**: [sounddevice](https://python-sounddevice.readthedocs.io/) (PortAudio bindings), [Pygame](https://www.pygame.org/)
 - **DSP**: [NumPy](https://numpy.org/), [SciPy](https://scipy.org/) (vectorized signal processing)
 - **Music Theory**: [mingus](https://github.com/bartmejias/mingus) (chord recognition)
 
