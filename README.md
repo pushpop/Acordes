@@ -207,6 +207,55 @@ python main.py
 
 ---
 
+## Updating Acordes
+
+To update to a new version:
+
+### Option 1: Using Git (Recommended)
+
+If you cloned the repository with `git clone`, pull the latest changes:
+
+```bash
+# Navigate to the Acordes directory
+cd path/to/Acordes
+
+# Check for updates
+git status
+
+# Pull the latest changes
+git pull origin main
+
+# Re-sync dependencies (uv will reinstall any new packages)
+uv sync
+```
+
+Then run the app normally:
+
+```bash
+# Windows
+.\run.ps1
+
+# Linux / macOS
+./run.sh
+```
+
+### Option 2: Manual Update (If Git is Not Available)
+
+1. Download the latest source code from [GitHub](https://github.com/pushpop/Acordes)
+2. Extract it to a new folder (or replace your existing folder)
+3. Delete the `.venv/` folder (if it exists) to ensure a clean install
+4. Run the launcher (`run.ps1` or `run.sh`) to reinstall dependencies and start the app
+
+### Preserving Your Settings
+
+Your configuration and user presets are stored in `config.json` and `presets/` and will **not** be overwritten by updates. They are safe to keep.
+
+### Checking Your Version
+
+In the app, look at the window title which displays the current version (e.g. `Acordes v1.9.0`).
+
+---
+
 ## Quick Start
 
 1. **Connect a MIDI Device**: Plug in a USB MIDI keyboard or controller
