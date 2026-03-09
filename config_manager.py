@@ -31,8 +31,9 @@ class ConfigManager:
             "last_synth_preset": None,
             "synth_state": None,
             "metronome_bpm": 120,
-            "audio_device_index": None,  # sounddevice output device index (None = not yet chosen)
-            "audio_device_name": None,   # Human-readable name for display
+            "audio_device_index": None,   # sounddevice output device index (None = not yet chosen)
+            "audio_device_name": None,    # Human-readable name for display
+            "audio_backend": None,        # Host API name filter (None = not yet chosen)
         }
 
     def save_config(self):
@@ -105,6 +106,15 @@ class ConfigManager:
     def get_audio_device_name(self) -> Optional[str]:
         """Get the saved audio output device display name."""
         return self.config.get("audio_device_name")
+
+    def get_audio_backend(self) -> Optional[str]:
+        """Get the saved audio backend/host API name (None = not yet chosen)."""
+        return self.config.get("audio_backend")
+
+    def set_audio_backend(self, backend_name: Optional[str]):
+        """Save the selected audio backend/host API name."""
+        self.config["audio_backend"] = backend_name
+        self.save_config()
 
     # ── Shared BPM (Metronome ↔ Arpeggiator) ─────────────────────
 

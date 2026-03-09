@@ -81,6 +81,31 @@ else {
     }
 }
 
+# ── Install ASIO-enabled PortAudio DLL if provided ────────────────────────────
+# If portaudio-asio\libportaudio64bit.dll exists in the project folder, copy it
+# into the sounddevice package so ASIO backends (Steinberg, ASIO4ALL, etc.) appear
+# in the config screen. Safe no-op if the file is absent.
+$AsioDll    = Join-Path $ScriptDir "portaudio-asio\libportaudio64bit.dll"
+$SdDataDir  = Join-Path $VenvDir "Lib\site-packages\_sounddevice_data\portaudio-binaries"
+$TargetDll  = Join-Path $SdDataDir "libportaudio64bit.dll"
+$BackupDll  = Join-Path $SdDataDir "libportaudio64bit.dll.bak"
+
+if (Test-Path $AsioDll) {
+    if (Test-Path $SdDataDir) {
+        # Back up the original DLL once so the user can restore it if needed
+        if ((Test-Path $TargetDll) -and -not (Test-Path $BackupDll)) {
+            Copy-Item $TargetDll $BackupDll -Force
+        }
+        # Only copy if the ASIO DLL differs from what is already in place
+        $asioHash   = (Get-FileHash $AsioDll   -Algorithm MD5).Hash
+        $targetHash = if (Test-Path $TargetDll) { (Get-FileHash $TargetDll -Algorithm MD5).Hash } else { "" }
+        if ($asioHash -ne $targetHash) {
+            Copy-Item $AsioDll $TargetDll -Force
+            Write-Host " ASIO PortAudio DLL installed." -ForegroundColor Cyan
+        }
+    }
+}
+
 # Launch Acordes
 & uv run python (Join-Path $ScriptDir "main.py")
 $exitCode = $LASTEXITCODE

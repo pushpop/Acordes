@@ -1,0 +1,4 @@
+# The DLL is a third-party binary — users obtain it themselves per README.md.
+# Do not commit it to the repository.
+*.dll
+*.bak

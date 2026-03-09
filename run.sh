@@ -150,5 +150,24 @@ else
     fi
 fi
 
-# ── 5. Launch ──────────────────────────────────────────────────────────────────
+# ── 5. ASIO PortAudio DLL install (Windows/Cygwin only, no-op elsewhere) ───────
+# On native Linux/macOS PortAudio is a system library — no DLL replacement needed.
+# This block only runs under Cygwin or Git Bash where a .dll path might exist.
+ASIO_DLL="$SCRIPT_DIR/portaudio-asio/libportaudio64bit.dll"
+if [ -f "$ASIO_DLL" ]; then
+    SD_DIR="$VENV_DIR/Lib/site-packages/_sounddevice_data/portaudio-binaries"
+    TARGET="$SD_DIR/libportaudio64bit.dll"
+    BACKUP="$SD_DIR/libportaudio64bit.dll.bak"
+    if [ -d "$SD_DIR" ]; then
+        if [ -f "$TARGET" ] && [ ! -f "$BACKUP" ]; then
+            cp "$TARGET" "$BACKUP"
+        fi
+        if ! cmp -s "$ASIO_DLL" "$TARGET" 2>/dev/null; then
+            cp "$ASIO_DLL" "$TARGET"
+            echo " ASIO PortAudio DLL installed."
+        fi
+    fi
+fi
+
+# ── 6. Launch ──────────────────────────────────────────────────────────────────
 uv run python "$SCRIPT_DIR/main.py"

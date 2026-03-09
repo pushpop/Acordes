@@ -471,7 +471,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.8.11"
+    VERSION = "1.9.0"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -567,6 +567,12 @@ class AcordesApp(App):
         if saved_audio_index is None:
             # No valid audio device: first launch or device went missing.
             def on_config_closed(result):
+                # Auto-save backend if user closed without choosing one.
+                # Use the OS recommendation rather than a generic "System Default"
+                # so the engine starts on the best available driver automatically.
+                if self.config_manager.get_audio_backend() is None:
+                    from music.synth_engine import recommended_audio_backend
+                    self.config_manager.set_audio_backend(recommended_audio_backend())
                 chosen_index = self.config_manager.get_audio_device_index()
                 if chosen_index is None:
                     # User closed config without selecting audio device.

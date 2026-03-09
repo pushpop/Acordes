@@ -235,12 +235,101 @@ def list_output_devices() -> list:
         return []
 
 
+def list_audio_backends() -> list:
+    """Return all host APIs that have at least one output device, as [(name, hostapi_index), ...].
+
+    Used by the config screen to populate the audio backend selector.
+    Returns an empty list if sounddevice is unavailable.
+    """
+    if not AUDIO_AVAILABLE or sd is None:
+        return []
+    try:
+        hostapis = sd.query_hostapis()
+        devices  = sd.query_devices()
+
+        # Count output-capable devices per host API
+        output_counts = {}
+        for d in devices:
+            if d['max_output_channels'] > 0:
+                hid = d['hostapi']
+                output_counts[hid] = output_counts.get(hid, 0) + 1
+
+        result = []
+        for hid, api in enumerate(hostapis):
+            if output_counts.get(hid, 0) > 0:
+                result.append((api['name'], hid))
+        return result
+    except Exception:
+        return []
+
+
+def list_output_devices_for_backend(hostapi_name: str) -> list:
+    """Return output devices for a specific host API as [(index, name), ...].
+
+    Unlike list_output_devices(), this does NOT collapse duplicates — it shows
+    every device that belongs to the requested backend so the user can pick
+    the exact ASIO/WASAPI/DirectSound device they want.
+    Returns an empty list if sounddevice is unavailable or backend not found.
+    """
+    if not AUDIO_AVAILABLE or sd is None:
+        return []
+    try:
+        hostapis = sd.query_hostapis()
+        devices  = sd.query_devices()
+
+        # Find the hostapi index matching the name
+        target_hid = next(
+            (hid for hid, api in enumerate(hostapis) if api['name'] == hostapi_name),
+            None
+        )
+        if target_hid is None:
+            return []
+
+        return [
+            (i, d['name'])
+            for i, d in enumerate(devices)
+            if d['hostapi'] == target_hid and d['max_output_channels'] > 0
+        ]
+    except Exception:
+        return []
+
+
+def recommended_audio_backend() -> str:
+    """Return the recommended audio backend name for the current OS and installed drivers.
+
+    Priority order per platform:
+      Windows : ASIO (lowest latency, direct hardware) → WASAPI → DirectSound → System Default
+      macOS   : Core Audio (only real option) → System Default
+      Linux   : JACK (pro real-time) → PipeWire → PulseAudio → ALSA → System Default
+
+    Only returns a backend that is actually present in the PortAudio device list.
+    Falls back to "System Default" if nothing preferred is found.
+    """
+    import platform
+    available_names = [name for name, _ in list_audio_backends()]
+
+    def first_match(preferences):
+        for pref in preferences:
+            for name in available_names:
+                if pref.lower() in name.lower():
+                    return name
+        return "System Default"
+
+    system = platform.system()
+    if system == "Windows":
+        return first_match(["ASIO", "WASAPI", "DirectSound"])
+    elif system == "Darwin":
+        return first_match(["Core Audio"])
+    else:  # Linux and others
+        return first_match(["JACK", "PipeWire", "PulseAudio", "ALSA"])
+
+
 class SynthEngine:
     """8-voice polyphonic synthesizer engine with stabilized gain and master volume."""
 
     def __init__(self, output_device_index=None):
         self.sample_rate = 48000
-        self.buffer_size = 528
+        self.buffer_size = 1024
         self.num_voices = 8
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
@@ -446,10 +535,10 @@ class SynthEngine:
         self.mod_wheel = 0.0
 
         # ── Oversampling configuration (Phase 3) ──────────────────────────────
-        # 4× internal oscillator oversampling for alias-free sawtooth/square/triangle
-        self.OVERSAMPLE_FACTOR = 4              # Generate at 192 kHz, downsample to 48 kHz
+        # 2× internal oscillator oversampling for alias-free sawtooth/square/triangle
+        self.OVERSAMPLE_FACTOR = 2              # Generate at 96 kHz, downsample to 48 kHz
         self.ENABLE_OVERSAMPLING = True         # Toggle for performance testing
-        self.OVERSAMPLE_SAMPLE_RATE = 48000 * self.OVERSAMPLE_FACTOR  # 192 kHz
+        self.OVERSAMPLE_SAMPLE_RATE = 48000 * self.OVERSAMPLE_FACTOR  # 96 kHz
         self._downsample_filter_taps = None     # Pre-computed FIR filter (initialized below)
 
         self.voices: List[Voice] = [Voice(self.sample_rate, i) for i in range(self.num_voices)]
@@ -949,20 +1038,14 @@ class SynthEngine:
         a1 = 1.0 - alpha
 
         for i in range(N):
-            # Input saturated with global feedback from previous stage-4 output
-            x0 = float(np.tanh(float(samples[i]) - 4.0 * k * s3))
-            # Per-stage tanh saturation — each integrator clips softly like a real
-            # Moog ladder transistor stage, producing even harmonics when driven.
-            # math.tanh is used here (scalar) which is faster than np.tanh in a loop.
-            s0 = math.tanh(a1 * s0 + alpha * x0)
-            s1 = math.tanh(a1 * s1 + alpha * s0)
-            s2 = math.tanh(a1 * s2 + alpha * s1)
-            s3 = math.tanh(a1 * s3 + alpha * s2)
+            # Input saturated with global feedback from previous stage-4 output.
+            # math.tanh on scalar is faster than np.tanh in a Python loop.
+            x0 = math.tanh(float(samples[i]) - 4.0 * k * s3)
+            s0 = a1 * s0 + alpha * x0
+            s1 = a1 * s1 + alpha * s0
+            s2 = a1 * s2 + alpha * s1
+            s3 = a1 * s3 + alpha * s2
             out[i] = s3
-
-        # Gain compensation: per-stage tanh reduces output level ~1-2 dB for clean signals.
-        # Scale up to restore unity gain so mix levels remain stable when drive is at 1.0.
-        out *= 1.1
 
         return out, [s0, s1, s2, s3]
 
@@ -995,9 +1078,11 @@ class SynthEngine:
             lp = lp + f * bp              # integrate bp → lp (previous bp)
             hp = float(samples[i]) - lp - q * bp
             bp = bp + f * hp              # integrate hp → bp
-            # Soft tanh saturation — same limits as before but smooth analog character
-            lp = math.tanh(lp * 0.25) * 4.0
-            bp = math.tanh(bp * 0.25) * 4.0
+            # Hard clamp prevents integrator blow-up at extreme q values.
+            if lp > 4.0: lp = 4.0
+            elif lp < -4.0: lp = -4.0
+            if bp > 4.0: bp = 4.0
+            elif bp < -4.0: bp = -4.0
             out[i] = lp
 
         return out, lp, bp
@@ -1032,10 +1117,11 @@ class SynthEngine:
             lp = lp + f * bp
             hp = float(samples[i]) - lp - q * bp
             bp = bp + f * hp
-            # Soft tanh saturation — analog-style limiting, smoother than hard clamp
-            lp = math.tanh(lp * 0.25) * 4.0
-            bp = math.tanh(bp * 0.25) * 4.0
-            # HP is bounded naturally by bp saturation; no separate clamp needed
+            # Hard clamp prevents integrator blow-up at extreme q values.
+            if lp > 4.0: lp = 4.0
+            elif lp < -4.0: lp = -4.0
+            if bp > 4.0: bp = 4.0
+            elif bp < -4.0: bp = -4.0
             if routing == "lp_hp":
                 out[i] = hp
             elif routing == "bp_lp":
@@ -1753,9 +1839,16 @@ class SynthEngine:
             # so gain_ramp interpolates from the previous buffer's settled value
             # to the new smoothed value — a true per-sample continuous transition.
             gain_prev = self.master_gain_current
-            # Faster coefficient (0.80) so the gain tracks voice-count changes
-            # within ~2 buffers (~10ms) rather than drifting for 50ms+.
-            self.master_gain_current = self.master_gain_current * 0.80 + self.master_gain_target * 0.20
+            # Asymmetric smoothing: when voices join, gain must drop immediately to
+            # prevent the mixed signal from overdriving tanh during the attack transient.
+            # When voices release, gain rises slowly to avoid a sudden loudness jump.
+            # This mirrors the compressor attack/release pattern: fast attack, slow release.
+            if self.master_gain_target < self.master_gain_current:
+                # More voices joined — snap gain down to target this buffer.
+                self.master_gain_current = self.master_gain_target
+            else:
+                # Voices releasing — smooth gain up slowly (~20 buffers ≈ 220 ms).
+                self.master_gain_current = self.master_gain_current * 0.95 + self.master_gain_target * 0.05
             # Per-sample gain ramp: eliminates the buffer-boundary step discontinuity
             # that caused clicks when active_count changed between buffers.
             # Built from pre-allocated buffers — no malloc in the hot path.
@@ -2042,9 +2135,15 @@ class SynthEngine:
             # reaches full scale at unity drive regardless of waveform compensation.
             # Normalization factor clamped to avoid division by near-zero at very low drive.
             norm = np.tanh(max(drive, 0.01))
-            sat_l = mixed_l * drive * gain_ramp
+            # Pre-clamp sat to ±drive so tanh(sat)/tanh(drive) never exceeds 1.0.
+            # Filter gain compensation (ladder out *= 1.05) and PolyBLEP corrections can push
+            # the pre-tanh signal above 1.0, causing the normalized output to exceed 1.0 and
+            # hard-clip at the np.clip below. Pre-clamping shifts the ceiling from a flat hard
+            # clip to a smooth tanh saturation at exactly full scale — the analog character
+            # is preserved while the hard-clipping distortion is eliminated.
+            sat_l = np.clip(mixed_l * drive * gain_ramp, -drive, drive)
             mixed_l = np.tanh(sat_l) / norm * self.master_volume
-            sat_r = mixed_r * drive * gain_ramp
+            sat_r = np.clip(mixed_r * drive * gain_ramp, -drive, drive)
             mixed_r = np.tanh(sat_r) / norm * self.master_volume
 
             # Engine-level inter-buffer crossfade: blend from the last buffer's final
@@ -2059,15 +2158,16 @@ class SynthEngine:
                 mixed_l[:n_xf] = self._last_output_L * (1.0 - p) + mixed_l[:n_xf] * p
                 mixed_r[:n_xf] = self._last_output_R * (1.0 - p) + mixed_r[:n_xf] * p
                 self._transition_xf_remaining -= n_xf
-            # Store post-tanh last sample so the next crossfade can start from the exact
-            # output value — eliminates tanh/gain rounding mismatch at buffer boundaries.
-            self._last_output_L = float(mixed_l[-1])
-            self._last_output_R = float(mixed_r[-1])
-            # Write float32 L/R directly into sounddevice's output buffer.
-            # outdata shape is (frame_count, 2); mixed_l/r are already float32 and clipped
-            # by tanh, so no additional conversion or scaling is needed.
-            outdata[:, 0] = mixed_l
-            outdata[:, 1] = mixed_r
+            # Write float32 L/R into sounddevice's output buffer.
+            # Store the clipped values so the inter-buffer crossfade blends from the
+            # exact DAC output (not the pre-clip tanh value). Pre-clamping sat to ±drive
+            # above means these clips should rarely fire; kept as a safety net.
+            clipped_l = np.clip(mixed_l, -1.0, 1.0)
+            clipped_r = np.clip(mixed_r, -1.0, 1.0)
+            self._last_output_L = float(clipped_l[-1])
+            self._last_output_R = float(clipped_r[-1])
+            outdata[:, 0] = clipped_l
+            outdata[:, 1] = clipped_r
         except Exception:
             import traceback; traceback.print_exc()
             outdata.fill(0)

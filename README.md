@@ -25,7 +25,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.8.11
+**Latest Version**: 1.9.0
 
 ---
 
@@ -33,9 +33,11 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 
 ### Config Mode
 - Display and select MIDI input devices
-- Display and select audio output devices (Windows, macOS, Linux/ALSA)
+- Select audio backend / host API (WASAPI, DirectSound on Windows; ASIO if provided; Core Audio on macOS; ALSA/PulseAudio on Linux)
+- Display and select audio output devices (filtered by selected backend)
 - Configure velocity curve response (5 types: Linear, Soft, Normal, Strong, Very Strong)
-- TAB to cycle between MIDI, Audio, and Velocity Curve sections
+- 2×2 grid layout: Backend (top-left) | Audio Output (top-right) | MIDI Input (bottom-left) | Velocity (bottom-right)
+- TAB to cycle between sections; ↑↓ to navigate within; SPACE to select
 
 ### Piano Mode
 - Real-time visual 3-octave piano keyboard
@@ -216,27 +218,41 @@ python main.py
 
 For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 
-### What's New (v1.8.11)
+### What's New (v1.9.0)
 
-**Compendium Mode Audio Fix**:
-- Fixed critical race condition in chord browser causing noise and artifacts when navigating quickly
-- Replaced `threading.Timer` with Textual timers for reliable, cancellable stagger effects
-- Added 150ms debounce to auto-play: smooth browsing experience without audio glitches
-- Uses `soft_all_notes_off()` to prevent "ghost notes" from racing callbacks
-- Result: Clean, responsive chord browsing even at keyboard repeat rates
+**Audio Backend Selection**:
+- Config mode now displays and selects audio backends / host APIs (WASAPI, DirectSound on Windows; ASIO via optional DLL; Core Audio on macOS; ALSA/PulseAudio on Linux)
+- OS-aware backend recommendation on first launch (ASIO → WASAPI → DirectSound on Windows)
+- Devices list filtered by selected backend for cleaner UI
+- Backend selection persists across restarts in `config.json`
 
-**Configuration Auto-Save**:
-- Auto-saves "System Default" audio device if user closes config without selecting (v1.8.10)
-- Added "No MIDI Device" option for optional MIDI input
-- Tracks configuration state with new `midi_device_configured` flag
-- App no longer reopens config mode unnecessarily on subsequent launches
+**ASIO Support on Windows**:
+- Optional ASIO-enabled PortAudio DLL support for lower-latency audio and better hardware compatibility
+- Launcher (`run.ps1`) auto-installs ASIO DLL if present in `portaudio-asio/` folder
+- Seamless integration: place DLL once, runs on every launch
+- Supports Steinberg ASIO, ASIO4ALL, and all installed ASIO drivers
+- See [ASIO Support on Windows](#asio-support-on-windows) in Troubleshooting for setup
 
-**Previous Release (v1.8.9+)**:
-- PyAudio → sounddevice migration for better ALSA compatibility on Linux
-- Audio device selection at startup with validation on launch
-- System Default, No Audio, and hardware device options
-- Windows device deduplication (WASAPI preferred)
-- Subtitle shows MIDI + audio device status
+**Config Mode UI Redesign**:
+- New 2×2 grid layout instead of vertical scroll
+- Top row: Audio Backend | Audio Output Device
+- Bottom row: MIDI Input Device | Velocity Curve
+- Tab-navigable sections for faster configuration without scrolling
+
+**Performance Optimizations**:
+- Asymmetric gain smoothing: instant snap down when voices join, smooth ramp up on release (eliminates gain dip artifacts in poly mode)
+- Reduced oversampling from 4× (192 kHz) to 2× (96 kHz) for CPU savings on high-voice counts
+- Increased audio buffer from 528 to 1024 samples for better headroom on resource-constrained systems
+- Removed per-stage saturator overhead in ladder filter for lower latency
+
+**Previous Release (v1.8.11)**:
+- Fixed critical race condition in chord browser causing noise/artifacts
+- Configuration auto-save (System Default audio device, optional MIDI)
+- Textual timer-based stagger effects with debounce
+
+**Earlier (v1.8.9+)**:
+- PyAudio → sounddevice migration
+- Audio device selection at startup
 
 See **[CHANGELOG.md](CHANGELOG.md)** for full technical details.
 
@@ -251,7 +267,7 @@ See **[CHANGELOG.md](CHANGELOG.md)** for full technical details.
 │  ├─ 8-voice polyphonic synthesis (voices 0-7)
 │  ├─ Dual-rank per-voice architecture
 │  ├─ MIDI event queue (thread-safe parameter routing)
-│  ├─ sounddevice real-time I/O (48 kHz, 528-sample buffer)
+│  ├─ sounddevice real-time I/O (48 kHz, 1024-sample buffer)
 │  └─ Preset manager with factory + user presets
 │
 ├─ MIDI I/O (midi/)
@@ -339,6 +355,28 @@ You can have multiple Python versions installed side-by-side. After installing 3
 
 3. **Windows**: sounddevice ships pre-built wheels — no extra steps required.
    If you encounter issues, ensure your audio drivers are up to date.
+
+### ASIO Support on Windows
+
+By default, sounddevice on Windows uses WASAPI or DirectSound. To use ASIO drivers (for lower latency or better hardware compatibility with drivers like Steinberg, ASIO4ALL, or others):
+
+1. Download `libportaudio64bit-asio.dll` from:
+   [spatialaudio/portaudio-binaries](https://github.com/spatialaudio/portaudio-binaries)
+
+2. Rename the file to `libportaudio64bit.dll` (remove `-asio`)
+
+3. Place it in the `portaudio-asio/` folder:
+   ```
+   acordes/
+   └── portaudio-asio/
+       └── libportaudio64bit.dll     ← Drop it here
+   ```
+
+4. Run `.\run.ps1` as normal. The launcher will automatically install the ASIO-enabled DLL.
+
+5. In the app, press **C** for config. "ASIO" will now appear in the Audio Backend list alongside WASAPI and DirectSound. Select it, then pick your ASIO device.
+
+The launcher backs up the original DLL as `libportaudio64bit.dll.bak` on first replacement, so you can restore the default sounddevice behavior if needed.
 
 ### No MIDI Devices Found
 
