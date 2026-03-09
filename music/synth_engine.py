@@ -327,9 +327,9 @@ def recommended_audio_backend() -> str:
 class SynthEngine:
     """8-voice polyphonic synthesizer engine with stabilized gain and master volume."""
 
-    def __init__(self, output_device_index=None):
+    def __init__(self, output_device_index=None, buffer_size=1024):
         self.sample_rate = 48000
-        self.buffer_size = 1024
+        self.buffer_size = buffer_size
         self.num_voices = 8
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
@@ -463,7 +463,7 @@ class SynthEngine:
         self.hpf_cutoff_smoothing = 0.85
         self.resonance_current   = 0.3
         self.resonance_target    = 0.3
-        self.resonance_smoothing = 0.90
+        self.resonance_smoothing = 0.94  # Slower convergence reduces transients when changing resonance with held notes in UNISON (8 simultaneous voices)
         self.hpf_resonance_current   = 0.0
         self.hpf_resonance_target    = 0.0
         self.hpf_resonance_smoothing = 0.90
@@ -1041,11 +1041,20 @@ class SynthEngine:
             # Input saturated with global feedback from previous stage-4 output.
             # math.tanh on scalar is faster than np.tanh in a Python loop.
             x0 = math.tanh(float(samples[i]) - 4.0 * k * s3)
+            # Stages s0-s2 are linear integrators: cascading tanh on all 4 stages
+            # compresses the ladder output to a 0.9 dB window for drive 1.0→8.0,
+            # making filter drive inaudible.  Only the final output stage (s3) uses
+            # tanh, which gives analog output saturation while preserving the full
+            # drive sweep range through stages s0-s2.
             s0 = a1 * s0 + alpha * x0
             s1 = a1 * s1 + alpha * s0
             s2 = a1 * s2 + alpha * s1
-            s3 = a1 * s3 + alpha * s2
+            s3 = math.tanh(a1 * s3 + alpha * s2)
             out[i] = s3
+
+        # Single output-stage tanh compresses passband to ~0.76 at unity drive.
+        # ×1.3 restores unity-gain output level at drive=1.0.
+        out *= 1.3
 
         return out, [s0, s1, s2, s3]
 
@@ -1113,22 +1122,48 @@ class SynthEngine:
         lp = lp_state
         bp = bp_state
 
-        for i in range(N):
-            lp = lp + f * bp
-            hp = float(samples[i]) - lp - q * bp
-            bp = bp + f * hp
-            # Hard clamp prevents integrator blow-up at extreme q values.
-            if lp > 4.0: lp = 4.0
-            elif lp < -4.0: lp = -4.0
-            if bp > 4.0: bp = 4.0
-            elif bp < -4.0: bp = -4.0
-            if routing == "lp_hp":
+        # Routing is resolved once here so the inner loop contains no string
+        # comparisons — each branch is a tight loop over samples only.
+        if routing == "lp_hp":
+            for i in range(N):
+                lp = lp + f * bp
+                hp = float(samples[i]) - lp - q * bp
+                bp = bp + f * hp
+                # Hard clamp prevents integrator blow-up at extreme q values.
+                if lp > 4.0: lp = 4.0
+                elif lp < -4.0: lp = -4.0
+                if bp > 4.0: bp = 4.0
+                elif bp < -4.0: bp = -4.0
                 out[i] = hp
-            elif routing == "bp_lp":
+        elif routing == "bp_lp":
+            for i in range(N):
+                lp = lp + f * bp
+                hp = float(samples[i]) - lp - q * bp
+                bp = bp + f * hp
+                if lp > 4.0: lp = 4.0
+                elif lp < -4.0: lp = -4.0
+                if bp > 4.0: bp = 4.0
+                elif bp < -4.0: bp = -4.0
                 out[i] = bp
-            elif routing == "notch_lp":
+        elif routing == "notch_lp":
+            for i in range(N):
+                lp = lp + f * bp
+                hp = float(samples[i]) - lp - q * bp
+                bp = bp + f * hp
+                if lp > 4.0: lp = 4.0
+                elif lp < -4.0: lp = -4.0
+                if bp > 4.0: bp = 4.0
+                elif bp < -4.0: bp = -4.0
                 out[i] = float(samples[i]) - lp  # notch = input - lp (Chamberlin formula)
-            else:  # "lp_lp"
+        else:  # "lp_lp"
+            for i in range(N):
+                lp = lp + f * bp
+                hp = float(samples[i]) - lp - q * bp
+                bp = bp + f * hp
+                if lp > 4.0: lp = 4.0
+                elif lp < -4.0: lp = -4.0
+                if bp > 4.0: bp = 4.0
+                elif bp < -4.0: bp = -4.0
                 out[i] = lp
 
         return out, lp, bp
@@ -1185,11 +1220,6 @@ class SynthEngine:
             voice.filter_state_svf2_lp, voice.filter_state_svf2_bp = hpf_lp_s, hpf_bp_s
 
         # ── LPF stage: 4-pole Moog ladder (always) ───────────────────────────
-
-        # Filter drive: pre-filter gain multiplier. Hitting the ladder stages harder
-        # drives the per-stage tanh saturation, producing harmonic richness and warmth.
-        if self.filter_drive_current != 1.0:
-            samples = samples * self.filter_drive_current
 
         # Thermal noise floor — ~-100 dBFS (amplitude 1e-5), inaudible in isolation
         # but prevents filter dead-zone lock when self-oscillating at max resonance,
@@ -1719,11 +1749,9 @@ class SynthEngine:
                                               + self.hpf_resonance_target * (1.0 - self.hpf_resonance_smoothing))
             else:
                 self.hpf_resonance_current = self.hpf_resonance_target
-            if abs(self.filter_drive_current - self.filter_drive_target) > 0.001:
-                self.filter_drive_current = (self.filter_drive_current * self.filter_drive_smoothing
-                                             + self.filter_drive_target * (1.0 - self.filter_drive_smoothing))
-            else:
-                self.filter_drive_current = self.filter_drive_target
+            # Drive is a character knob — no smoothing needed.  Instant update
+            # means the user hears the effect the moment they change the value.
+            self.filter_drive_current = self.filter_drive_target
 
             # ── LFO (shape-aware, single depth + target routing) ────────────
             lfo_phase_prev = self.lfo_phase
@@ -2127,24 +2155,24 @@ class SynthEngine:
             # Square waves have high RMS relative to peak so they get slightly less drive.
             # Sine is quieter by nature and gets a small boost. Saw/tri at unity.
             comp = 0.9 if self.waveform in ["sine", "pure_sine"] else (0.75 if self.waveform == "square" else 1.0)
-            # drive controls soft-clip saturation character — amp_level only.
-            # master_volume is applied AFTER saturation as a clean linear gain so both
-            # controls have full, independent audible range without cancelling each other.
-            drive = self.amp_level_current * comp
-            # tanh soft-clip: warm, analog saturation. Normalized by tanh(drive) so output
-            # reaches full scale at unity drive regardless of waveform compensation.
-            # Normalization factor clamped to avoid division by near-zero at very low drive.
-            norm = np.tanh(max(drive, 0.01))
-            # Pre-clamp sat to ±drive so tanh(sat)/tanh(drive) never exceeds 1.0.
-            # Filter gain compensation (ladder out *= 1.05) and PolyBLEP corrections can push
-            # the pre-tanh signal above 1.0, causing the normalized output to exceed 1.0 and
-            # hard-clip at the np.clip below. Pre-clamping shifts the ceiling from a flat hard
-            # clip to a smooth tanh saturation at exactly full scale — the analog character
-            # is preserved while the hard-clipping distortion is eliminated.
-            sat_l = np.clip(mixed_l * drive * gain_ramp, -drive, drive)
-            mixed_l = np.tanh(sat_l) / norm * self.master_volume
-            sat_r = np.clip(mixed_r * drive * gain_ramp, -drive, drive)
-            mixed_r = np.tanh(sat_r) / norm * self.master_volume
+            # Voice-count gain ramp normalises poly voice sum, then tanh soft-clips
+            # at ±ceiling. filter_drive (applied post-ladder per voice) pushes the
+            # mixed signal above the ceiling, causing progressive saturation.
+            # At drive=1.0 the signal sits well below ceiling — gentle saturation.
+            # At drive=8.0 the signal is 8× larger — heavy clipping and rich harmonics.
+            # amp_level sets the output ceiling; comp adjusts for waveform RMS differences.
+            ceiling = self.amp_level_current * comp
+            mixed_l *= gain_ramp
+            mixed_r *= gain_ramp
+            # Drive applied here — after _sanitize_signal has already guarded per-voice
+            # filter output. Multiplying the summed mix by filter_drive pushes the signal
+            # above ceiling into tanh saturation. drive=1.0 leaves the signal near the
+            # linear region (gentle warmth). drive=8.0 pushes it 8× above ceiling,
+            # producing heavy clipping and rich odd/even harmonics.
+            mixed_l *= self.filter_drive_current
+            mixed_r *= self.filter_drive_current
+            mixed_l = np.tanh(mixed_l / ceiling) * ceiling * self.master_volume
+            mixed_r = np.tanh(mixed_r / ceiling) * ceiling * self.master_volume
 
             # Engine-level inter-buffer crossfade: blend from the last buffer's final
             # post-tanh output toward the new output over _TRANSITION_XF_SAMPLES samples.

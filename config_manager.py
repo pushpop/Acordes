@@ -34,6 +34,7 @@ class ConfigManager:
             "audio_device_index": None,   # sounddevice output device index (None = not yet chosen)
             "audio_device_name": None,    # Human-readable name for display
             "audio_backend": None,        # Host API name filter (None = not yet chosen)
+            "buffer_size": 1024,          # Audio buffer size in samples
         }
 
     def save_config(self):
@@ -114,6 +115,17 @@ class ConfigManager:
     def set_audio_backend(self, backend_name: Optional[str]):
         """Save the selected audio backend/host API name."""
         self.config["audio_backend"] = backend_name
+        self.save_config()
+
+    # ── Buffer size ───────────────────────────────────────────────
+
+    def get_buffer_size(self) -> int:
+        """Get the saved audio buffer size in samples (default: 1024)."""
+        return int(self.config.get("buffer_size", 1024))
+
+    def set_buffer_size(self, size: int):
+        """Save the selected audio buffer size in samples."""
+        self.config["buffer_size"] = int(size)
         self.save_config()
 
     # ── Shared BPM (Metronome ↔ Arpeggiator) ─────────────────────

@@ -7,7 +7,7 @@ import threading
 from music.preset_manager import DEFAULT_PARAMS
 
 
-def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, output_device_index=None):
+def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, output_device_index=None, buffer_size=1024):
     """Entry point for the audio subprocess.
 
     Constructs SynthEngine, signals the main process when ready, then
@@ -21,7 +21,7 @@ def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, outp
         # Import here so only the audio process loads PyAudio/numpy.
         from music.synth_engine import SynthEngine
 
-        engine = SynthEngine(output_device_index=output_device_index)
+        engine = SynthEngine(output_device_index=output_device_index, buffer_size=buffer_size)
         engine.warm_up()
         ready_event.set()
 
@@ -85,8 +85,9 @@ class SynthEngineProxy:
     implemented here.  No mode code needs to change.
     """
 
-    def __init__(self, output_device_index=None):
+    def __init__(self, output_device_index=None, buffer_size=1024):
         self._output_device_index = output_device_index
+        self._buffer_size = buffer_size
         self._cmd_queue = multiprocessing.Queue()
         self._ready_event = multiprocessing.Event()
         self._error_event = multiprocessing.Event()
@@ -112,6 +113,7 @@ class SynthEngineProxy:
                 self._error_event,
                 self._error_msg_arr,
                 output_device_index,
+                buffer_size,
             ),
             daemon=True,
             name="acordes-audio",
@@ -171,11 +173,17 @@ class SynthEngineProxy:
                 self._error_event,
                 self._error_msg_arr,
                 output_device_index,
+                self._buffer_size,
             ),
             daemon=True,
             name="acordes-audio",
         )
         self._process.start()
+
+    def restart_with_buffer_size(self, buffer_size: int):
+        """Shut down and restart with a new buffer size, keeping the current output device."""
+        self._buffer_size = buffer_size
+        self.restart_with_device(self._output_device_index)
 
     # ── Note events ───────────────────────────────────────────────
 

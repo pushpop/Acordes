@@ -25,7 +25,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.9.0
+**Latest Version**: 1.9.1 - Unshackle
 
 ---
 
@@ -427,12 +427,20 @@ ASIO drivers take **exclusive control** of the audio hardware. When Acordes hold
 2. **Use FlexASIO** (Recommended for shared audio): [FlexASIO](https://github.com/dechamps/FlexASIO) is a free virtual ASIO driver that wraps WASAPI shared mode underneath. It provides ASIO-style low latency while allowing other apps to use audio simultaneously.
    - Download and install from: [github.com/dechamps/FlexASIO](https://github.com/dechamps/FlexASIO)
    - After installation, "FlexASIO" will appear in Acordes' ASIO driver list
-   - No Acordes code changes needed — just install and select in config
+   - When you select FlexASIO in config, Acordes automatically generates an optimized `FlexASIO.toml` file with settings matched to the Acordes engine:
+     - 1024-sample buffer (≈21ms latency @ 48 kHz)
+     - Float32 sample type
+     - Minimal suggested latency (0.0 seconds)
+     - WASAPI exclusive mode for lowest CPU overhead
+   - The config file is created at: `C:\Users\<username>\AppData\Local\FlexASIO.toml`
+   - FlexASIO reads the config on next restart — no manual configuration needed
 
 3. **ASIO Driver Options**: Acordes supports all ASIO drivers installed on your system:
    - **Steinberg ASIO** (native hardware ASIO from Steinberg; requires hardware support): Lowest latency, exclusive access
    - **ASIO4ALL** (free wrapper for WDM drivers): Wraps Windows audio drivers as ASIO, still exclusive like standard ASIO
    - **FlexASIO** (free virtual ASIO over WASAPI shared): Allows simultaneous audio from other apps
+
+**FlexASIO Lag Fix**: If FlexASIO feels laggy before auto-configuration kicks in, the issue is likely a buffer size mismatch. Acordes runs at 48 kHz with a 1024-sample buffer. The auto-generated config ensures FlexASIO matches these settings. For advanced tuning, see [FlexASIO Configuration](https://github.com/dechamps/FlexASIO/blob/master/CONFIGURATION.md).
 
 ### No MIDI Devices Found
 

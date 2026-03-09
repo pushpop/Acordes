@@ -1,6 +1,6 @@
-# ABOUTME: Configuration screen for audio backend, audio device, MIDI input, and velocity curve.
+# ABOUTME: Configuration screen for audio backend, audio device, buffer size, MIDI input, and velocity curve.
 # ABOUTME: Appears on first launch or when user presses C from the main app.
-"""Audio backend, audio device, MIDI device, and velocity curve configuration screen."""
+"""Audio backend, audio device, buffer size, MIDI device, and velocity curve configuration screen."""
 from textual.screen import Screen
 from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Header, Footer, Static, ListView, ListItem, Label
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class ConfigMode(Screen):
-    """Screen for configuring audio backend, audio device, MIDI devices, and velocity curves."""
+    """Screen for configuring audio backend, audio device, buffer size, MIDI devices, and velocity curves."""
 
     BINDINGS = [
         Binding("escape", "dismiss", "Close", show=True),
@@ -29,14 +29,14 @@ class ConfigMode(Screen):
     }
 
     #config-container {
-        width: 130;
+        width: 140;
         height: auto;
         border: thick #ffd700;
         background: #1a1a1a;
         padding: 1 2;
     }
 
-    /* Top row: backend (left) + audio device (right) */
+    /* Top row: backend (left) + audio device (center) + buffer size (right) */
     #top-row {
         width: 100%;
         height: auto;
@@ -56,6 +56,13 @@ class ConfigMode(Screen):
     }
 
     #audio-section {
+        width: 1fr;
+        height: auto;
+        padding-left: 1;
+        padding-right: 1;
+    }
+
+    #buffer-section {
         width: 1fr;
         height: auto;
         padding-left: 1;
@@ -115,6 +122,27 @@ class ConfigMode(Screen):
         margin: 0;
     }
 
+    #buffer-label {
+        width: 100%;
+        color: #ffd700;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    #buffer-list {
+        width: 100%;
+        height: 8;
+        border: solid #ffd700;
+        margin: 0 0 0 0;
+    }
+
+    #selected-buffer {
+        width: 100%;
+        content-align: left middle;
+        color: #00ff00;
+        margin: 0;
+    }
+
     #device-label {
         width: 100%;
         color: #ffd700;
@@ -166,11 +194,16 @@ class ConfigMode(Screen):
     }
     """
 
+    # Buffer sizes offered in the UI with their sample counts.
+    # Each entry is (samples, latency_ms_at_48k) — latency shown as a hint.
+    BUFFER_SIZES = [128, 256, 480, 512, 1024, 2048]
+
     def __init__(
         self,
         device_manager: 'MIDIDeviceManager',
         config_manager: 'ConfigManager',
         on_audio_device_change: Optional[Callable[[int], None]] = None,
+        on_buffer_size_change: Optional[Callable[[int], None]] = None,
     ):
         super().__init__()
         self.device_manager = device_manager
@@ -178,12 +211,14 @@ class ConfigMode(Screen):
         # Callback invoked when user selects a new audio device (engine is running).
         # If None, audio selection is saved to config only (engine not yet running).
         self.on_audio_device_change = on_audio_device_change
+        # Callback invoked when user selects a new buffer size (engine is running).
+        # If None, buffer size is saved to config only (engine not yet running).
+        self.on_buffer_size_change = on_buffer_size_change
 
         # Audio backend state: list of (name, hostapi_index) tuples
         self.backends: List[Tuple[str, int]] = []
         # Use saved backend if available; otherwise pre-select the OS recommendation
         # so the user sees the best option highlighted on first launch.
-        # The user can still navigate and pick any backend they prefer.
         saved_backend = config_manager.get_audio_backend()
         if saved_backend is not None:
             self.pending_backend: Optional[str] = saved_backend
@@ -195,6 +230,9 @@ class ConfigMode(Screen):
         self.audio_devices: List[Tuple[int, str]] = []
         self.pending_audio_index: Optional[int] = config_manager.get_audio_device_index()
 
+        # Buffer size state
+        self.pending_buffer_size: int = config_manager.get_buffer_size()
+
         # MIDI device state
         self.devices: List[str] = []
         self.pending_device: Optional[str] = None
@@ -203,12 +241,12 @@ class ConfigMode(Screen):
         self.pending_curve = config_manager.get_velocity_curve()
 
     def compose(self):
-        """Compose the config mode layout as a 2x2 grid."""
+        """Compose the config mode layout as a 3x2 grid."""
         yield Header()
         with Vertical(id="config-container"):
-            yield HeaderWidget(title="CONFIGURATION", subtitle="Audio Backend, Device, MIDI & Velocity")
+            yield HeaderWidget(title="CONFIGURATION", subtitle="Audio Backend, Device, Buffer, MIDI & Velocity")
 
-            # Top row: Audio Backend (left) | Audio Output Device (right)
+            # Top row: Audio Backend (left) | Audio Output Device (center) | Buffer Size (right)
             with Horizontal(id="top-row"):
                 with Vertical(id="backend-section"):
                     yield Label("AUDIO BACKEND", id="backend-label")
@@ -219,6 +257,11 @@ class ConfigMode(Screen):
                     yield Label("AUDIO OUTPUT DEVICE", id="audio-label")
                     yield ListView(id="audio-list")
                     yield Label("", id="selected-audio")
+
+                with Vertical(id="buffer-section"):
+                    yield Label("BUFFER SIZE", id="buffer-label")
+                    yield ListView(id="buffer-list")
+                    yield Label("", id="selected-buffer")
 
             # Bottom row: MIDI Input Device (left) | Velocity Curve (right)
             with Horizontal(id="bottom-row"):
@@ -243,6 +286,7 @@ class ConfigMode(Screen):
         self.pending_device = self.device_manager.get_selected_device()
         self.refresh_backend_list()
         self.refresh_audio_list()
+        self.refresh_buffer_list()
         self.refresh_device_list()
         self.refresh_curve_list()
 
@@ -271,11 +315,7 @@ class ConfigMode(Screen):
         self._update_backend_label()
 
     def _select_audio_backend(self):
-        """Save the highlighted backend and refresh the device list to match.
-
-        If FlexASIO is selected, auto-generate an optimal TOML configuration file
-        matching Acordes engine settings (48 kHz, 1024 samples, Float32, minimal latency).
-        """
+        """Save the highlighted backend and refresh the device list to match."""
         list_view = self.query_one("#backend-list", ListView)
         if list_view.index is None or not self._all_backends:
             return
@@ -307,14 +347,12 @@ class ConfigMode(Screen):
 
             # Get engine settings from the synth engine (if available in app context)
             sample_rate = 48000  # default
-            buffer_size = 1024   # default
+            buffer_size = self.pending_buffer_size
             synth_engine = self.app.synth_engine if hasattr(self.app, 'synth_engine') else None
             if synth_engine:
                 # Read actual engine settings if synth engine is running
                 if hasattr(synth_engine, 'sample_rate'):
                     sample_rate = synth_engine.sample_rate
-                if hasattr(synth_engine, 'buffer_size'):
-                    buffer_size = synth_engine.buffer_size
 
             # Silently create the config file — FlexASIO reads it on next restart
             create_or_update_flexasio_config(sample_rate=sample_rate, buffer_samples=buffer_size)
@@ -392,6 +430,46 @@ class ConfigMode(Screen):
             label.update(f"Selected: {name}")
         else:
             label.update("No audio device selected")
+
+    # ── Buffer Size ───────────────────────────────────────────────────────────
+
+    def refresh_buffer_list(self):
+        """Populate the buffer size list with standard options and latency hints."""
+        list_view = self.query_one("#buffer-list", ListView)
+        list_view.clear()
+
+        sample_rate = 48000  # Display latency based on standard 48 kHz
+        for size in self.BUFFER_SIZES:
+            latency_ms = (size / sample_rate) * 1000
+            marker = "☑" if size == self.pending_buffer_size else "☐"
+            list_view.append(ListItem(Label(f"{marker}  {size:<6}  ({latency_ms:.1f} ms)")))
+
+        self._update_buffer_label()
+
+    def _select_buffer_size(self):
+        """Save the highlighted buffer size and optionally restart the engine."""
+        list_view = self.query_one("#buffer-list", ListView)
+        if list_view.index is None:
+            return
+        if not (0 <= list_view.index < len(self.BUFFER_SIZES)):
+            return
+
+        size = self.BUFFER_SIZES[list_view.index]
+        self.pending_buffer_size = size
+        self.config_manager.set_buffer_size(size)
+        self.refresh_buffer_list()
+
+        # If the engine is already running, trigger a restart with the new buffer size
+        if self.on_buffer_size_change is not None:
+            self.on_buffer_size_change(size)
+
+    def _update_buffer_label(self):
+        """Update the buffer size status label."""
+        label = self.query_one("#selected-buffer", Label)
+        size = self.pending_buffer_size
+        sample_rate = 48000
+        latency_ms = (size / sample_rate) * 1000
+        label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
 
     # ── MIDI Device ──────────────────────────────────────────────────────────
 
@@ -475,14 +553,14 @@ class ConfigMode(Screen):
 
     def _focused_list_id(self) -> str:
         """Return the ID of whichever list currently has focus."""
-        for list_id in ("#backend-list", "#audio-list", "#device-list", "#curve-list"):
+        for list_id in ("#backend-list", "#audio-list", "#buffer-list", "#device-list", "#curve-list"):
             lv = self.query_one(list_id, ListView)
             if self.focused is lv:
                 return list_id
         return "#backend-list"
 
     def action_toggle_list_focus(self):
-        """Tab — cycle focus: backend → audio → midi → curve → backend."""
+        """Tab — cycle focus: backend -> audio -> buffer -> midi -> curve -> backend."""
         current = self._focused_list_id()
 
         if current == "#backend-list":
@@ -493,6 +571,11 @@ class ConfigMode(Screen):
                 if self.pending_audio_index in indices:
                     self.query_one("#audio-list", ListView).index = indices.index(self.pending_audio_index)
         elif current == "#audio-list":
+            next_id = "#buffer-list"
+            # Auto-highlight current buffer size selection
+            if self.pending_buffer_size in self.BUFFER_SIZES:
+                self.query_one("#buffer-list", ListView).index = self.BUFFER_SIZES.index(self.pending_buffer_size)
+        elif current == "#buffer-list":
             next_id = "#device-list"
             # Auto-highlight current MIDI selection
             if self.pending_device is None:
@@ -520,6 +603,8 @@ class ConfigMode(Screen):
             self._select_audio_backend()
         elif current == "#audio-list":
             self._select_audio_device()
+        elif current == "#buffer-list":
+            self._select_buffer_size()
         elif current == "#device-list":
             self._select_device()
         else:

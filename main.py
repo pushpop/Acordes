@@ -452,10 +452,17 @@ class MainScreen(Screen):
             engine.all_notes_off()
             engine.restart_with_device(actual_index)
 
+        def on_buffer_size_change(new_buffer_size):
+            """Restart the audio subprocess with the newly selected buffer size."""
+            engine = self.app_context["synth_engine"]
+            engine.all_notes_off()
+            engine.restart_with_buffer_size(new_buffer_size)
+
         config = ConfigMode(
             self.app_context["device_manager"],
             self.app_context["config_manager"],
             on_audio_device_change=on_audio_device_change,
+            on_buffer_size_change=on_buffer_size_change,
         )
         self.app.push_screen(config, on_closed)
 
@@ -471,7 +478,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.9.0"
+    VERSION = "1.9.1 - Unshackle"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -525,7 +532,8 @@ class AcordesApp(App):
         # Translate -2 sentinel to None so PyAudio uses the system default.
         actual_index = None if device_index in (-2, None) else device_index
 
-        self.synth_engine = SynthEngineProxy(output_device_index=actual_index)
+        buffer_size = self.config_manager.get_buffer_size()
+        self.synth_engine = SynthEngineProxy(output_device_index=actual_index, buffer_size=buffer_size)
         self.app_context["synth_engine"] = self.synth_engine
 
         # Auto-open saved MIDI device now that we have an engine to pair with.
