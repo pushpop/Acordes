@@ -81,17 +81,32 @@ else {
     }
 }
 
-# ── Install ASIO-enabled PortAudio DLL if provided ────────────────────────────
-# If portaudio-asio\libportaudio64bit.dll exists in the project folder, copy it
-# into the sounddevice package so ASIO backends (Steinberg, ASIO4ALL, etc.) appear
-# in the config screen. Safe no-op if the file is absent.
+# ── Install ASIO-enabled PortAudio DLL (auto-download if needed) ──────────────
+# Downloads libportaudio64bit-asio.dll from spatialaudio/portaudio-binaries once
+# and caches it in portaudio-asio\. On every run, installs it into the sounddevice
+# package so ASIO backends (Steinberg, ASIO4ALL, etc.) appear in the config screen.
+# Gracefully skipped if the venv does not exist yet or if the network is unavailable.
+$AsioDllUrl = "https://raw.githubusercontent.com/spatialaudio/portaudio-binaries/master/libportaudio64bit-asio.dll"
 $AsioDll    = Join-Path $ScriptDir "portaudio-asio\libportaudio64bit.dll"
 $SdDataDir  = Join-Path $VenvDir "Lib\site-packages\_sounddevice_data\portaudio-binaries"
 $TargetDll  = Join-Path $SdDataDir "libportaudio64bit.dll"
 $BackupDll  = Join-Path $SdDataDir "libportaudio64bit.dll.bak"
 
-if (Test-Path $AsioDll) {
-    if (Test-Path $SdDataDir) {
+if (Test-Path $SdDataDir) {
+    # Download and cache the ASIO DLL on first run (skipped if already cached)
+    if (-not (Test-Path $AsioDll)) {
+        Write-Host " Downloading ASIO PortAudio DLL..." -ForegroundColor Cyan
+        try {
+            Invoke-WebRequest -Uri $AsioDllUrl -OutFile $AsioDll -UseBasicParsing -TimeoutSec 30
+            Write-Host " ASIO PortAudio DLL downloaded." -ForegroundColor Green
+        }
+        catch {
+            Write-Host " Warning: Could not download ASIO DLL (no internet?). Using default audio backend." -ForegroundColor Yellow
+        }
+    }
+
+    # Install from cache into the sounddevice package (in case venv was recreated)
+    if (Test-Path $AsioDll) {
         # Back up the original DLL once so the user can restore it if needed
         if ((Test-Path $TargetDll) -and -not (Test-Path $BackupDll)) {
             Copy-Item $TargetDll $BackupDll -Force

@@ -276,11 +276,10 @@ For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 - Backend selection persists across restarts in `config.json`
 
 **ASIO Support on Windows**:
-- Optional ASIO-enabled PortAudio DLL support for lower-latency audio and better hardware compatibility
-- Launcher (`run.ps1`) auto-installs ASIO DLL if present in `portaudio-asio/` folder
-- Seamless integration: place DLL once, runs on every launch
+- ASIO-enabled PortAudio DLL downloaded automatically on first launch from spatialaudio/portaudio-binaries
+- No manual steps: launcher handles download, caching, and installation into the venv
 - Supports Steinberg ASIO, ASIO4ALL, and all installed ASIO drivers
-- See [ASIO Support on Windows](#asio-support-on-windows) in Troubleshooting for setup
+- Graceful fallback to WASAPI if no internet on first launch
 
 **Config Mode UI Redesign**:
 - New 2×2 grid layout instead of vertical scroll
@@ -407,25 +406,15 @@ You can have multiple Python versions installed side-by-side. After installing 3
 
 ### ASIO Support on Windows
 
-By default, sounddevice on Windows uses WASAPI or DirectSound. To use ASIO drivers (for lower latency or better hardware compatibility with drivers like Steinberg, ASIO4ALL, or others):
+By default, sounddevice on Windows uses WASAPI or DirectSound. ASIO support (for lower latency and better hardware compatibility with drivers like Steinberg or ASIO4ALL) is enabled **automatically** on first launch:
 
-1. Download `libportaudio64bit-asio.dll` from:
-   [spatialaudio/portaudio-binaries](https://github.com/spatialaudio/portaudio-binaries)
+1. Run `.\run.ps1` as normal
+2. The launcher downloads the ASIO-enabled PortAudio DLL from [spatialaudio/portaudio-binaries](https://github.com/spatialaudio/portaudio-binaries) and installs it automatically (one-time download, cached locally)
+3. In the app, press **C** for config. "ASIO" will appear in the Audio Backend list alongside WASAPI and DirectSound. Select it, then pick your ASIO device.
 
-2. Rename the file to `libportaudio64bit.dll` (remove `-asio`)
+No manual steps required. If there is no internet connection on first launch, the launcher skips the download silently and the app runs with WASAPI as the default backend. ASIO will be set up automatically on the next launch when internet is available.
 
-3. Place it in the `portaudio-asio/` folder:
-   ```
-   acordes/
-   └── portaudio-asio/
-       └── libportaudio64bit.dll     ← Drop it here
-   ```
-
-4. Run `.\run.ps1` as normal. The launcher will automatically install the ASIO-enabled DLL.
-
-5. In the app, press **C** for config. "ASIO" will now appear in the Audio Backend list alongside WASAPI and DirectSound. Select it, then pick your ASIO device.
-
-The launcher backs up the original DLL as `libportaudio64bit.dll.bak` on first replacement, so you can restore the default sounddevice behavior if needed.
+The original sounddevice DLL is backed up as `libportaudio64bit.dll.bak` so you can restore the default if needed.
 
 ### No MIDI Devices Found
 
