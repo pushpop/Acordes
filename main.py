@@ -717,4 +717,24 @@ if __name__ == "__main__":
     # Explicit spawn on all platforms for consistent cross-platform behavior.
     # Windows uses spawn by default anyway; this makes Linux/macOS match.
     multiprocessing.set_start_method('spawn')
+
+    # macOS + Python 3.12 fix: pre-warm the multiprocessing resource tracker
+    # before Textual starts and captures sys.stderr.
+    #
+    # Python 3.12's resource_tracker.ensure_running() calls sys.stderr.fileno()
+    # to pass stderr to the tracker subprocess. Textual intercepts sys.stderr and
+    # its virtual stream returns fileno() = -1.  When multiprocessing.Queue() is
+    # first called inside a Textual callback (on_mount), the resource tracker gets
+    # -1 as a file descriptor, causing:
+    #   ValueError: bad value(s) in fds_to_keep
+    #
+    # By creating a throwaway Queue here — while real stderr is still intact —
+    # we force the resource tracker to start with a valid stderr fd before Textual
+    # takes over.  Subsequent Queue() calls inside the app reuse the already-running
+    # tracker and never hit the bad-fd path.
+    if sys.platform == "darwin":
+        _warmup_q = multiprocessing.Queue()
+        _warmup_q.close()
+        del _warmup_q
+
     main()
