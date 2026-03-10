@@ -55,7 +55,6 @@ imgs/
 
 # IDE and editor settings
 .claude/
-.gemini/
 
 # Development notes and planning docs (local only)
 *.TODO
