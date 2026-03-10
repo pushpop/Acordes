@@ -434,7 +434,13 @@ class ConfigMode(Screen):
     # ── Buffer Size ───────────────────────────────────────────────────────────
 
     def refresh_buffer_list(self):
-        """Populate the buffer size list with standard options and latency hints."""
+        """Populate the buffer size list with standard options and latency hints.
+
+        Note: ASIO4ALL may not support all buffer sizes. If the actual buffer size
+        differs from your selection, check the startup console output for diagnostics
+        (it will print the negotiated blocksize). Consider using a native ASIO driver
+        for full buffer size control, or adjust to a size your WDM driver supports.
+        """
         list_view = self.query_one("#buffer-list", ListView)
         list_view.clear()
 
@@ -469,7 +475,7 @@ class ConfigMode(Screen):
         size = self.pending_buffer_size
         sample_rate = 48000
         latency_ms = (size / sample_rate) * 1000
-        label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
+        label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [check console if ASIO4ALL shows different size]")
 
     # ── MIDI Device ──────────────────────────────────────────────────────────
 

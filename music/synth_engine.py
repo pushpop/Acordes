@@ -573,6 +573,18 @@ class SynthEngine:
                 self.stream.start()
                 self.running = True
                 self._elevate_audio_priority()
+
+                # ASIO4ALL buffer size diagnostic: check what blocksize was actually
+                # negotiated with the driver. ASIO4ALL silently negotiates buffer size
+                # if the requested size isn't supported by the underlying WDM driver.
+                actual_blocksize = self.stream.blocksize
+                if actual_blocksize != self.buffer_size:
+                    print(f"⚠ Buffer size mismatch (ASIO4ALL/driver constraint):")
+                    print(f"  Requested: {self.buffer_size} samples")
+                    print(f"  Actual: {actual_blocksize} samples")
+                    print(f"  Latency: {actual_blocksize / self.sample_rate * 1000:.2f}ms")
+                    print(f"  → ASIO4ALL or your WDM audio driver doesn't support {self.buffer_size}.")
+                    print(f"  → If using ASIO4ALL, check its control panel or use a native ASIO driver.")
             except Exception as e:
                 print(f"Audio initialization failed: {e}")
                 self.running = False
@@ -769,9 +781,12 @@ class SynthEngine:
         N = 31  # Tap count (odd for symmetry)
         n = np.arange(N) - N // 2  # Center at 0: [-15, -14, ..., 0, ..., 14, 15]
 
-        # Normalized cutoff frequency: 20 kHz / (192000 Hz / 2) = 0.208
-        # This ensures the filtered signal has no content above 20 kHz at 192 kHz sampling
-        normalized_cutoff = 20000.0 / (192000.0 / 2.0)
+        # Normalized cutoff frequency: 20 kHz relative to the oversampled Nyquist.
+        # OVERSAMPLE_FACTOR sets the internal rate (e.g., 2× → 96 kHz at 48 kHz output).
+        # Using the actual oversample rate avoids cutting audio above ~10 kHz when
+        # OVERSAMPLE_FACTOR=2 (a hardcoded 192 kHz denominator would be wrong there).
+        oversampled_nyquist = self.sample_rate * self.OVERSAMPLE_FACTOR / 2.0
+        normalized_cutoff = 20000.0 / oversampled_nyquist
 
         # Sinc function: sin(πx) / (πx), with special handling at x=0
         with np.errstate(divide='ignore', invalid='ignore'):
@@ -1027,7 +1042,10 @@ class SynthEngine:
         """
         sr = self.sample_rate
         fc = float(np.clip(cutoff, 20.0, sr * 0.45))
-        alpha = float(np.clip(2.0 * np.pi * fc / sr, 0.0, 0.95))
+        # Chamberlin/bilinear-adjacent coefficient: 2·sin(π·fc/sr) tracks the analog
+        # prototype more accurately than the forward-Euler 2π·fc/sr, especially above
+        # fc/sr ≈ 0.1 where the Euler form over-rotates and undershoots the true cutoff.
+        alpha = float(np.clip(2.0 * math.sin(math.pi * fc / sr), 0.0, 0.95))
         # k normalisation: resonance feedback scales down with alpha so the
         # filter remains unconditionally stable; k→1.0 approaches self-oscillation.
         # Scale by 1.2 for more aggressive resonance character
@@ -1070,13 +1088,14 @@ class SynthEngine:
         q=2 (no resonance) → q→0 (near self-oscillation); clamped to prevent blow-up.
         """
         sr = self.sample_rate
-        # Cap fc at sr/12 (~4kHz at 48kHz) to keep the f coefficient below ~0.5,
-        # well within the Chamberlin SVF's unconditional stability region (f < sqrt(q)).
-        # Higher cutoffs beyond this range are handled by the Ladder filter's character.
-        fc = float(np.clip(cutoff, 20.0, sr / 12.0))
-        f = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.5))
+        fc = float(np.clip(cutoff, 20.0, sr * 0.45))
+        f_raw = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.95))
         # More aggressive Q curve: higher resonance = higher Q (more pronounced peak)
         q = float(np.clip(0.5 + res * 10.0, 0.5, 10.5))
+        # Chamberlin stability condition: f < sqrt(2/q).  Clamp f to 95% of the limit
+        # to keep the filter stable at all resonance values without hard cutoff ceiling.
+        f_max = math.sqrt(2.0 / q) * 0.95
+        f = float(np.clip(f_raw, 0.0, f_max))
 
         N = len(samples)
         out = np.zeros(N, dtype=np.float32)
@@ -1113,10 +1132,14 @@ class SynthEngine:
           "lp_lp"   → LP output (dual LP — very smooth/dark character)
         """
         sr = self.sample_rate
-        fc = float(np.clip(cutoff, 20.0, sr / 12.0))
-        f = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.5))
+        fc = float(np.clip(cutoff, 20.0, sr * 0.45))
+        f_raw = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.95))
         # Narrower Q range for HPF: 0.5 (flat) → 4.0 (strong resonant peak)
         q = float(np.clip(0.5 + res * 3.5, 0.5, 4.0))
+        # Chamberlin stability condition: f < sqrt(2/q).  95% margin keeps filter stable
+        # at high resonance + high cutoff combinations without a hard frequency ceiling.
+        f_max = math.sqrt(2.0 / q) * 0.95
+        f = float(np.clip(f_raw, 0.0, f_max))
 
         N = len(samples)
         out = np.zeros(N, dtype=np.float32)
@@ -1869,7 +1892,17 @@ class SynthEngine:
             # UNISON mode also uses fixed gain=1.0: all 8 voices are always active
             # and already normalized by per-voice scaling (mix_scale = 1/num_voices).
             # Applying gain_ramp here would cause double attenuation (per-voice 1/8 × gain 0.354).
-            gain_count = 1 if self.voice_type in ("mono", "unison") else active_count
+            #
+            # For POLY, count only actively-playing (non-releasing) voices.
+            # Including releasing voices in the count causes a gain snap-down on every
+            # note onset in melodic play: the release tail of the previous note briefly
+            # overlaps the new note onset (active_count=2), instantly dropping gain to
+            # 1/sqrt(2), then the tail finishes and gain slowly recovers over ~220ms —
+            # producing a visible and audible volume bump on each note.
+            # Releasing voices are already decaying naturally via their envelope; they
+            # don't need additional gain compensation.
+            playing_count = sum(1 for v in self.voices if v.note_active)
+            gain_count = 1 if self.voice_type in ("mono", "unison") else max(playing_count, 1)
             self.master_gain_target = 1.0 / np.sqrt(gain_count) if gain_count > 1 else 1.0
             # Snapshot gain AFTER the target is known but BEFORE smoothing,
             # so gain_ramp interpolates from the previous buffer's settled value
@@ -2171,9 +2204,25 @@ class SynthEngine:
                 mixed_r *= ramp
                 self._mute_ramp_fadein = max(0, self._mute_ramp_fadein - frame_count)
 
-            # Square waves have high RMS relative to peak so they get slightly less drive.
-            # Sine is quieter by nature and gets a small boost. Saw/tri at unity.
-            comp = 0.9 if self.waveform in ["sine", "pure_sine"] else (0.75 if self.waveform == "square" else 1.0)
+            # Waveform saturation ceiling: controls how early the tanh soft-clips.
+            # Square has high RMS relative to peak so its ceiling is lower (less headroom
+            # = more compression at the same drive level, taming harshness).
+            # Sine/pure_sine get a ceiling of 0.95 — slightly below saw unity (1.0) to
+            # give sine a marginally softer saturation knee, while staying close enough
+            # in level that the difference is inaudible at normal drive settings.
+            # Saw and triangle are at unity (1.0); same RMS, same saturation character.
+            comp = 0.95 if self.waveform in ["sine", "pure_sine"] else (0.75 if self.waveform == "square" else 1.0)
+
+            # Perceptual loudness compensation for octave position.
+            # Low octaves (32', 16') lose perceived punch due to the ear's reduced
+            # sensitivity at low frequencies (equal-loudness / Fletcher-Munson effect).
+            # A small pre-tanh gain boost compensates. Applied before drive so the
+            # boost feeds naturally into the saturation curve at high drive values,
+            # adding warmth rather than just raw level. Higher octaves (4', 2') are
+            # already bright and perceived as louder — no compensation needed.
+            _OCTAVE_COMP = {-2: 1.25, -1: 1.12, 0: 1.0, 1: 1.0, 2: 1.0}
+            octave_comp = _OCTAVE_COMP.get(self.octave, 1.0)
+
             # Voice-count gain ramp normalises poly voice sum, then tanh soft-clips
             # at ±ceiling. filter_drive (applied post-ladder per voice) pushes the
             # mixed signal above the ceiling, causing progressive saturation.
@@ -2185,6 +2234,8 @@ class SynthEngine:
             ceiling = max(comp, 0.01)
             mixed_l *= gain_ramp
             mixed_r *= gain_ramp
+            mixed_l *= octave_comp
+            mixed_r *= octave_comp
             # Drive applied here — after _sanitize_signal has already guarded per-voice
             # filter output. Multiplying the summed mix by filter_drive pushes the signal
             # above ceiling into tanh saturation. drive=1.0 leaves the signal near the
