@@ -464,10 +464,17 @@ class SynthEngine:
         self.hpf_cutoff_smoothing = 0.85
         self.resonance_current   = 0.3
         self.resonance_target    = 0.3
-        self.resonance_smoothing = 0.94  # Slower convergence reduces transients when changing resonance with held notes in UNISON (8 simultaneous voices)
+        # Engine-level resonance snaps instantly: per-voice smooth_resonance (coeff 0.65,
+        # ~64ms) already handles UNISON artifact prevention on the ladder filter.
+        # A slow coefficient here made the parameter feel dead — changes took 300-400ms
+        # to audibly register because two smoothing stages were stacked in series.
+        self.resonance_smoothing = 0.0  # instant; artifact guard lives in per-voice smooth
         self.hpf_resonance_current   = 0.0
         self.hpf_resonance_target    = 0.0
-        self.hpf_resonance_smoothing = 0.90
+        # HPF resonance has no per-voice smooth (used directly in SVF call).
+        # Fast 3-buffer ramp (~32ms at 48kHz/512) softens SVF integrator shock on
+        # rapid changes without making the parameter feel sluggish.
+        self.hpf_resonance_smoothing = 0.50
         self.noise_level_current = 0.0
         self.noise_level_target  = 0.0
         self.noise_level_smoothing = 0.90
@@ -1134,8 +1141,11 @@ class SynthEngine:
         sr = self.sample_rate
         fc = float(np.clip(cutoff, 20.0, sr * 0.45))
         f_raw = float(np.clip(2.0 * np.sin(np.pi * fc / sr), 0.0, 0.95))
-        # Narrower Q range for HPF: 0.5 (flat) → 4.0 (strong resonant peak)
-        q = float(np.clip(0.5 + res * 3.5, 0.5, 4.0))
+        # Full Q range for HPF: 0.5 (flat) → 10.0 (harsh resonant peak).
+        # Previously capped at 4.0 which made the HP peak feel weak compared to the LP.
+        # Matching the LP filter's Q range (0.5-10.5) gives the MS-20 HP+LP routing
+        # its characteristic harshness when both peaks are pushed high simultaneously.
+        q = float(np.clip(0.5 + res * 9.5, 0.5, 10.0))
         # Chamberlin stability condition: f < sqrt(2/q).  95% margin keeps filter stable
         # at high resonance + high cutoff combinations without a hard frequency ceiling.
         f_max = math.sqrt(2.0 / q) * 0.95
@@ -1988,6 +1998,18 @@ class SynthEngine:
                     # Pass as a combined modulator: vcf_lfo handles LFO ratio, FEG adds Hz offset.
                     # _apply_filter receives cutoff_mod as a multiplier; we encode the offset by
                     # adjusting the target cutoff temporarily per-voice via a local variable.
+                    # Noise blend pre-filter: pink noise summed into the oscillator signal
+                    # before the VCF so the filter shapes the noise alongside the tone.
+                    # Real analog synths route the noise source into the VCF; this gives
+                    # the noise breath and musicality instead of harsh full-bandwidth hiss.
+                    # Pink noise (1/f spectrum) has rolled-off highs; much warmer than white.
+                    # Square-root curve on the mix keeps low values subtle (analog noise floor
+                    # character) while still allowing aggressive sweeps at higher settings.
+                    if self.noise_level_current > 0:
+                        noise_gain = math.sqrt(self.noise_level_current) * 0.25
+                        pink = self._generate_pink_noise(frame_count)
+                        s1 = s1 + pink * noise_gain
+
                     _base_cutoff = self.cutoff_current
                     self.cutoff_current = float(np.clip(_base_cutoff + feg_cutoff_offset, 20.0, 20000.0))
                     s1 = self._sanitize_signal(self._apply_filter(v, s1, rank=1, cutoff_mod=vcf_lfo))
@@ -2009,15 +2031,6 @@ class SynthEngine:
                     else:
                         v_samples = s1
 
-                    if self.noise_level_current > 0:
-                        # Blend full-spectrum white noise with the oscillator output.
-                        # Noise is intentionally mixed post-FIR at 48 kHz rather than
-                        # generated at 192 kHz and downsampled.  Full-bandwidth noise
-                        # has more grit and textural character (analog-like air), whereas
-                        # downsampling it through the FIR would over-smooth and sterilise
-                        # the noise floor.  This is a deliberate character choice.
-                        noise_sample = np.random.uniform(-1, 1, frame_count)
-                        v_samples = v_samples * (1.0 - self.noise_level_current) + noise_sample * self.noise_level_current
                     v_samples = self._apply_envelope(v, v_samples, frame_count) * vca_lfo
                     # Per-voice onset ramp: a frequency-adaptive linear fade-in applied
                     # to the post-envelope signal before the DC blocker.  The DC blocker

@@ -1,8 +1,10 @@
 """Synth mode - Polyphonic synthesizer interface with preset management."""
+import json
 import math
 import random
 import re
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 from textual.binding import Binding
@@ -262,6 +264,57 @@ class SynthMode(Widget):
         "mixer":      ["Voice Type", "Amp", "Master Vol"],
     }
 
+    # Parameter metadata for CC 75 in focus mode: param_label → metadata tuple
+    # Continuous: (attribute_name, min_val, max_val, is_logarithmic)
+    # Discrete range: ("DISCRETE_RANGE", min_int, max_int, attribute_name)
+    # Discrete list: ("DISCRETE_LIST", [values_list], attribute_name, None)
+    _PARAM_METADATA = {
+        "Wave": ("DISCRETE_LIST", ["pure_sine", "sine", "square", "sawtooth", "triangle"], "waveform", None),
+        "Noise": ("noise_level", 0.0, 1.0, False),
+        "Octave": ("DISCRETE_RANGE", -2, 2, "octave"),
+        "Drive": ("filter_drive", 0.5, 8.0, False),
+        "HPF Cut": ("hpf_cutoff", 20.0, 5000.0, True),
+        "HPF Pk": ("hpf_resonance", 0.0, 1.0, False),
+        "LPF Cut": ("cutoff", 20.0, 20000.0, True),
+        "LPF Pk": ("resonance", 0.0, 1.0, False),
+        "Route": ("DISCRETE_LIST", ["lp_hp", "bp_lp", "notch_lp", "lp_lp"], "filter_routing", None),
+        "Attack": ("attack", 0.001, 3.0, False),
+        "Decay": ("decay", 0.001, 3.0, False),
+        "Sustain": ("sustain", 0.0, 1.0, False),
+        "Release": ("release", 0.001, 3.0, False),
+        "KTrack": ("key_tracking", 0.0, 1.0, False),
+        "Atk": ("feg_attack", 0.001, 3.0, False),
+        "Dcy": ("feg_decay", 0.001, 3.0, False),
+        "Sus": ("feg_sustain", 0.0, 1.0, False),
+        "Rel": ("feg_release", 0.001, 3.0, False),
+        "Amount": ("feg_amount", 0.0, 1.0, False),
+        "Rate": ("lfo_freq", 0.1, 20.0, True),  # In lfo section
+        "Depth": ("lfo_depth", 0.0, 1.0, False),  # In lfo section
+        "Shape": ("DISCRETE_LIST", ["sine", "triangle", "square", "sample_hold"], "lfo_shape", None),
+        "Target": ("DISCRETE_LIST", ["all", "vco", "vcf", "vca"], "lfo_target", None),
+        "Delay Time": ("delay_time", 0.01, 2.0, False),
+        "Delay Fdbk": ("delay_feedback", 0.0, 0.9, False),
+        "Delay Mix": ("delay_mix", 0.0, 1.0, False),
+        "Rev Size": None,  # Unimplemented — skip
+        "Mode": ("DISCRETE_LIST", ["up", "down", "up_down", "random"], "arp_mode", None),
+        "BPM": ("arp_bpm", 50.0, 300.0, False),
+        "Gate": ("arp_gate", 0.05, 1.0, False),
+        "Range": ("DISCRETE_RANGE", 1, 4, "arp_range"),
+        "ON/OFF": ("DISCRETE_LIST", [True, False], "arp_enabled", None),
+        "Voice Type": ("DISCRETE_LIST", ["mono", "poly", "unison"], "voice_type", None),
+        "Amp": ("amp_level", 0.0, 0.95, False),
+        "Master Vol": ("master_volume", 0.0, 1.0, False),
+        # Chorus parameters
+        "Chorus Rate": ("chorus_rate", 0.1, 2.0, False),
+        "Chorus Depth": ("chorus_depth", 0.0, 1.0, False),
+        "Voices": ("DISCRETE_RANGE", 1, 4, "chorus_voices"),
+        # Section-specific parameter mappings (for parameters that appear in multiple sections)
+        ("lfo", "Rate"): ("lfo_freq", 0.1, 20.0, True),
+        ("lfo", "Depth"): ("lfo_depth", 0.0, 1.0, False),
+        ("chorus", "Rate"): ("chorus_rate", 0.1, 2.0, False),
+        ("chorus", "Depth"): ("chorus_depth", 0.0, 1.0, False),
+    }
+
     def __init__(
         self,
         midi_handler,
@@ -281,9 +334,13 @@ class SynthMode(Widget):
         self._randomized_just_now: bool = False  # Show "🎲 Randomized!" in preset bar temporarily
         self._last_notification_time: float = 0.0  # Debounce notifications: only show one per 150ms
 
+        # Load MIDI CC mappings: dict from CC number to (parameter_name, min, max)
+        self._cc_mappings = self._load_cc_mappings()
+
         params = self._load_initial_params()
         self.waveform   = params["waveform"]
         self.noise_level = params.get("noise_level", 0.0)
+        self.sine_mix   = params.get("sine_mix", 0.0)
         self.octave     = params["octave"]
         self.amp_level  = params["amp_level"]
         self.cutoff       = params["cutoff"]
@@ -429,6 +486,36 @@ class SynthMode(Widget):
                 self._dirty = True
 
         return out
+
+    def _load_cc_mappings(self) -> dict:
+        """Load MIDI CC to parameter mappings from midi/cc_mappings.json.
+
+        Returns a dict mapping CC number → (parameter_name, min_val, max_val).
+        If the file doesn't exist or fails to parse, returns empty dict.
+        """
+        cc_map = {}
+        try:
+            mappings_file = Path("midi/cc_mappings.json")
+            if not mappings_file.exists():
+                return cc_map
+
+            with open(mappings_file, "r") as f:
+                data = json.load(f)
+
+            param_ranges = data.get("parameter_ranges", {})
+            for mapping in data.get("mappings", []):
+                cc = mapping.get("cc")
+                param = mapping.get("parameter")
+                if cc is not None and param:
+                    range_info = param_ranges.get(param, {})
+                    min_val = range_info.get("min", 0.0)
+                    max_val = range_info.get("max", 1.0)
+                    cc_map[cc] = (param, min_val, max_val)
+
+            return cc_map
+        except Exception as e:
+            print(f"Warning: Failed to load cc_mappings.json: {e}")
+            return cc_map
 
     def compose(self):
         self.header = HeaderWidget(
@@ -713,6 +800,85 @@ class SynthMode(Widget):
         self.synth_engine.pitch_bend_change(value)
 
     def _on_control_change(self, controller: int, value: int):
+        """Handle MIDI CC messages via the cc_mappings configuration.
+
+        Special case: CC 75 in focus mode controls the focused parameter instead of sine_mix.
+        For other CC values: 0-127 is mapped to parameter ranges with log scaling for frequencies.
+        """
+        # Special case: CC 75 in focus mode controls the currently focused parameter
+        if controller == 75 and self._focused():
+            param_label = self._SECTION_PARAMS.get(self._focus_section, [])[self._focus_param] if self._focus_section else None
+            if param_label:
+                # Look up metadata with section context first (for parameters like "Depth" that appear in multiple sections)
+                # Fall back to parameter label alone if section-specific entry not found
+                metadata = self._PARAM_METADATA.get((self._focus_section, param_label)) or self._PARAM_METADATA.get(param_label)
+                if metadata is not None:  # Skip None metadata (unhandled discrete types)
+                    cc_normalized = value / 127.0
+                    param_name = None
+                    param_value = None
+
+                    # Handle discrete list: map CC 0-127 to list index
+                    if metadata[0] == "DISCRETE_LIST":
+                        values_list = metadata[1]
+                        param_name = metadata[2]
+                        index = min(len(values_list) - 1, int(cc_normalized * len(values_list)))
+                        param_value = values_list[index]
+
+                    # Handle discrete range: map CC 0-127 to min-max range
+                    elif metadata[0] == "DISCRETE_RANGE":
+                        min_val = metadata[1]
+                        max_val = metadata[2]
+                        param_name = metadata[3]
+                        param_value = int(round(min_val + cc_normalized * (max_val - min_val)))
+                        param_value = max(min_val, min(max_val, param_value))
+
+                    # Handle continuous parameters
+                    elif len(metadata) == 4 and isinstance(metadata[0], str):
+                        param_name, min_val, max_val, is_log = metadata
+                        # Logarithmic or linear scaling
+                        if is_log:
+                            log_min = math.log(min_val)
+                            log_max = math.log(max_val)
+                            param_value = math.exp(log_min + cc_normalized * (log_max - log_min))
+                        else:
+                            param_value = min_val + cc_normalized * (max_val - min_val)
+
+                    # Update and refresh
+                    if param_name is not None and param_value is not None:
+                        setattr(self, param_name, param_value)
+                        self._push_params_to_engine()
+                        self._refresh_all_displays()
+                        self._redraw_param_labels(self._focus_section)
+                        self._mark_dirty()
+                        self._autosave_state()
+            return  # Done with focus mode CC 75
+
+        # Normal CC mapping from cc_mappings.json
+        if controller not in self._cc_mappings:
+            return
+
+        param_name, min_val, max_val = self._cc_mappings[controller]
+        cc_normalized = value / 127.0  # Normalize CC value to 0-1 range
+
+        # Logarithmic scaling for frequency parameters (cutoff, hpf_cutoff, lfo_freq)
+        if param_name in ("cutoff", "hpf_cutoff", "lfo_freq"):
+            # Log scale: min_val and max_val are in Hz
+            log_min = math.log(min_val)
+            log_max = math.log(max_val)
+            param_value = math.exp(log_min + cc_normalized * (log_max - log_min))
+        else:
+            # Linear scale for all other parameters
+            param_value = min_val + cc_normalized * (max_val - min_val)
+
+        # Update the UI state, push to engine, and refresh all display widgets
+        setattr(self, param_name, param_value)
+        self._push_params_to_engine()
+        self._refresh_all_displays()
+        self._mark_dirty()
+        self._autosave_state()
+
+        # CC 1 (modulation) also historically updates the synth_engine directly
+        # Keep this for backward compatibility with existing modulation handling
         if controller == 1:
             self.synth_engine.modulation_change(value)
 
@@ -1100,8 +1266,8 @@ class SynthMode(Widget):
         self._autosave_state()
 
     def _do_adjust_resonance(self, direction: str = "up"):
-        step = 0.01 * self._focus_accel_mult  # Apply focus-mode acceleration to step (0.01 = 1% for ultra-fine control)
-        self.resonance = min(0.80, self.resonance + step) if direction == "up" else max(0.0, self.resonance - step)
+        step = 0.01 * self._focus_accel_mult  # 0.01 internal = 0.1 on 0-10 display scale
+        self.resonance = min(1.0, self.resonance + step) if direction == "up" else max(0.0, self.resonance - step)
         self.synth_engine.update_parameters(resonance=self.resonance)
         if self.resonance_display:
             self.resonance_display.update(self._fmt_resonance())
@@ -1118,8 +1284,8 @@ class SynthMode(Widget):
         self._autosave_state()
 
     def _do_adjust_hpf_resonance(self, direction: str = "up"):
-        step = 0.01 * self._focus_accel_mult  # Apply focus-mode acceleration to step (0.01 = 1% for ultra-fine control)
-        self.hpf_resonance = min(0.85, self.hpf_resonance + step) if direction == "up" else max(0.0, self.hpf_resonance - step)
+        step = 0.01 * self._focus_accel_mult  # 0.01 internal = 0.1 on 0-10 display scale
+        self.hpf_resonance = min(1.0, self.hpf_resonance + step) if direction == "up" else max(0.0, self.hpf_resonance - step)
         self.synth_engine.update_parameters(hpf_resonance=self.hpf_resonance)
         if self.hpf_resonance_display:
             self.hpf_resonance_display.update(self._fmt_hpf_resonance())
@@ -1498,8 +1664,8 @@ class SynthMode(Widget):
         self.amp_level  = params.get("amp_level", self.amp_level)
         self.cutoff        = params.get("cutoff",        self.cutoff)
         self.hpf_cutoff    = params.get("hpf_cutoff",    self.hpf_cutoff)
-        self.resonance     = min(0.80, params.get("resonance",     self.resonance))
-        self.hpf_resonance = min(0.85, params.get("hpf_resonance", self.hpf_resonance))
+        self.resonance     = min(1.0, params.get("resonance",     self.resonance))
+        self.hpf_resonance = min(1.0, params.get("hpf_resonance", self.hpf_resonance))
         self.key_tracking    = params.get("key_tracking",    self.key_tracking)
         self.filter_drive    = params.get("filter_drive",    self.filter_drive)
         self.filter_routing  = params.get("filter_routing",  self.filter_routing)
@@ -1546,6 +1712,7 @@ class SynthMode(Widget):
             waveform=self.waveform,
             octave=self.octave,
             noise_level=self.noise_level,
+            sine_mix=self.sine_mix,
             amp_level=self.amp_level,
             master_volume=self.master_volume,
             cutoff=self.cutoff,
@@ -1950,11 +2117,11 @@ class SynthMode(Widget):
         self.cutoff = round(10 ** random.uniform(math.log10(200), math.log10(18000)), 1)
         self.hpf_cutoff = round(10 ** random.uniform(math.log10(20), math.log10(800)), 1)
         self.resonance = round(random.choices(
-            [random.uniform(0.0, 0.3), random.uniform(0.3, 0.65), random.uniform(0.65, 0.9)],
+            [random.uniform(0.0, 0.3), random.uniform(0.3, 0.65), random.uniform(0.65, 1.0)],
             weights=[50, 35, 15]
         )[0], 2)
         self.hpf_resonance = round(random.choices(
-            [0.0, random.uniform(0.0, 0.4), random.uniform(0.4, 0.8)],
+            [0.0, random.uniform(0.0, 0.4), random.uniform(0.4, 1.0)],
             weights=[60, 30, 10]
         )[0], 2)
         self.voice_type = random.choice(["mono", "poly", "unison"])
@@ -2031,7 +2198,7 @@ class SynthMode(Widget):
                 self.synth_engine.update_parameters(hpf_cutoff=self.hpf_cutoff)
                 if self.hpf_cutoff_display: self.hpf_cutoff_display.update(self._fmt_hpf_cutoff())
             elif name == "HPF Pk":
-                self.hpf_resonance = round(random.uniform(0.0, 0.8), 2)
+                self.hpf_resonance = round(random.uniform(0.0, 1.0), 2)
                 self.synth_engine.update_parameters(hpf_resonance=self.hpf_resonance)
                 if self.hpf_resonance_display: self.hpf_resonance_display.update(self._fmt_hpf_resonance())
             elif name == "LPF Cut":
@@ -2320,7 +2487,7 @@ class SynthMode(Widget):
         return self._fmt_knob(norm, 0.0, 1.0, label)
 
     def _fmt_resonance(self) -> str:
-        return self._fmt_knob(self.resonance / 0.80, 0.0, 1.0, f"{int(self.resonance * 100)}%")
+        return self._fmt_knob(self.resonance, 0.0, 1.0, f"{self.resonance * 10:.1f}")
 
     def _fmt_hpf_cutoff(self) -> str:
         log_c = math.log10(max(20.0, self.hpf_cutoff))
@@ -2331,7 +2498,7 @@ class SynthMode(Widget):
         return self._fmt_knob(norm, 0.0, 1.0, label)
 
     def _fmt_hpf_resonance(self) -> str:
-        return self._fmt_knob(self.hpf_resonance / 0.85, 0.0, 1.0, f"{int(self.hpf_resonance * 100)}%")
+        return self._fmt_knob(self.hpf_resonance, 0.0, 1.0, f"{self.hpf_resonance * 10:.1f}")
 
     def _fmt_key_tracking(self) -> str:
         """Five-mode selector display for key tracking: 0%·25%·50%·75%·100%."""
