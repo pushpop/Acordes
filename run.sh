@@ -180,49 +180,69 @@ fi
 if [ ! -d "$VENV_DIR" ]; then
     echo " Installing dependencies (this may take a minute)..."
 
-    # On ARM, uv's resolver ignores piwheels wheels and always picks PyPI sdists.
-    # Strategy: create the venv with --seed (includes pip), then pre-install the
-    # heavy packages via pip directly from piwheels before uv sync runs.
-    # If piwheels has no matching wheel, uv sync falls back to building from source;
-    # gfortran and python3-dev (installed above) satisfy that build path too.
     if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
-        uv venv --seed --quiet
+        # ── ARM install path ───────────────────────────────────────────────────
+        # uv sync enforces the PyPI-based lockfile which has no armv7l wheels for
+        # numpy/scipy, forcing a multi-hour source compile every time.
+        # Solution: bypass uv sync entirely and use uv pip install with piwheels
+        # as the primary index. uv pip caches downloaded wheels in ~/.cache/uv so
+        # every venv rebuild after the first is near-instant (cache hit).
+        uv venv --quiet
+        echo " ARM: installing from piwheels + PyPI (first run may take ~5 min)..."
+        uv pip install \
+            --python "$VENV_DIR/bin/python" \
+            --index-url https://www.piwheels.org/simple \
+            --extra-index-url https://pypi.org/simple \
+            --no-build-isolation-package python-rtmidi \
+            --prefer-binary \
+            "textual>=0.75.0" \
+            "mido>=1.3.0" \
+            "python-rtmidi>=1.4.0" \
+            "mingus>=0.6.1" \
+            "numpy>=1.24.0" \
+            "sounddevice>=0.4.6" \
+            "scipy>=1.10.0" \
+            "meson-python" \
+            || {
+                echo ""
+                echo " ================================================================"
+                echo " ERROR: Dependency installation failed."
+                echo " ================================================================"
+                exit 1
+            }
+        # Install the app itself without re-resolving dependencies.
+        uv pip install --python "$VENV_DIR/bin/python" --no-deps -e . --quiet || true
+        echo ""
+    else
+        # ── Desktop install path (Windows / macOS / x86 Linux) ────────────────
         # meson-python must be in the venv before uv sync builds python-rtmidi.
         # python-rtmidi 1.5.8 uses it as a build backend but omits it from its
         # build-system.requires; no-build-isolation-package means we can't inject
-        # it via [tool.uv.extra-build-dependencies] — it must already be present.
-        echo " ARM: pre-installing meson-python and piwheels packages..."
-        "$VENV_DIR/bin/pip" install --quiet meson-python || true
-        "$VENV_DIR/bin/pip" install --quiet --prefer-binary \
-            --extra-index-url https://www.piwheels.org/simple \
-            "scipy>=1.10.0" "numpy>=1.24.0" || true
-        echo ""
-    else
-        # Non-ARM: still need meson-python pre-installed for the same reason.
+        # it via extra-build-dependencies — it must already be present.
         uv venv --seed --quiet
         "$VENV_DIR/bin/pip" install --quiet meson-python || true
-    fi
 
-    # Capture output; only show it on failure so the terminal stays clean.
-    SYNC_LOG="$(uv sync 2>&1)" || {
-        echo ""
-        echo " ================================================================"
-        echo " ERROR: Dependency installation failed."
-        echo " ================================================================"
-        echo ""
-        echo "$SYNC_LOG"
-        echo ""
-        echo " If sounddevice failed, install the PortAudio runtime library first:"
-        echo "   Fedora : sudo dnf install portaudio"
-        echo "   Ubuntu : sudo apt install libportaudio2"
-        echo "   Arch   : sudo pacman -S portaudio"
-        echo "   macOS  : brew install portaudio"
-        echo ""
-        echo " Then run ./run.sh again."
-        echo " ================================================================"
-        echo ""
-        exit 1
-    }
+        # Capture output; only show it on failure so the terminal stays clean.
+        SYNC_LOG="$(uv sync 2>&1)" || {
+            echo ""
+            echo " ================================================================"
+            echo " ERROR: Dependency installation failed."
+            echo " ================================================================"
+            echo ""
+            echo "$SYNC_LOG"
+            echo ""
+            echo " If sounddevice failed, install the PortAudio runtime library first:"
+            echo "   Fedora : sudo dnf install portaudio"
+            echo "   Ubuntu : sudo apt install libportaudio2"
+            echo "   Arch   : sudo pacman -S portaudio"
+            echo "   macOS  : brew install portaudio"
+            echo ""
+            echo " Then run ./run.sh again."
+            echo " ================================================================"
+            echo ""
+            exit 1
+        }
+    fi
 
     echo " Done."
     echo ""
