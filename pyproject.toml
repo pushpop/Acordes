@@ -20,13 +20,15 @@ dependencies = [
 ]
 
 [tool.uv]
+# python-rtmidi uses meson-python which needs system ninja. Disabling
+# build isolation lets the build process find /usr/bin/ninja on ARM.
+no-build-isolation-package = ["python-rtmidi"]
+
+[tool.uv.pip]
 # Prefer pre-built binary wheels over source distributions.
 # Critical on ARM (armv7l) where piwheels provides scipy/numpy wheels
 # that would otherwise require hours of compilation from source.
 prefer-binary = true
-# python-rtmidi uses meson-python which needs system ninja. Disabling
-# build isolation lets the build process find /usr/bin/ninja on ARM.
-no-build-isolation-package = ["python-rtmidi"]
 
 [[tool.uv.index]]
 name = "piwheels"
