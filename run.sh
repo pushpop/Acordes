@@ -87,15 +87,20 @@ if ! ldconfig -p 2>/dev/null | grep -q libportaudio && \
     echo ""
 fi
 
-# ── 3. ARM: install build deps for python-rtmidi ──────────────────────────────
+# ── 3. ARM: install build deps ────────────────────────────────────────────────
 # python-rtmidi has no pre-built wheel for ARM (armv7l/aarch64) and must compile
 # from source. libasound2-dev and libjack-jackd2-dev provide the ALSA/JACK headers.
+# scipy/numpy may also build from source if piwheels wheels are unavailable;
+# gfortran and python3-dev are required by their meson/numpy build systems.
 _ARCH="$(uname -m 2>/dev/null || echo unknown)"
 if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
     if command -v apt-get &>/dev/null; then
         if ! dpkg -l libasound2-dev &>/dev/null 2>&1 | grep -q "^ii"; then
-            echo " ARM device detected — installing build deps for python-rtmidi..."
-            sudo apt-get install -y libasound2-dev libjack-jackd2-dev ninja-build libffi-dev 2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
+            echo " ARM device detected — installing build deps..."
+            sudo apt-get install -y \
+                libasound2-dev libjack-jackd2-dev ninja-build libffi-dev \
+                gfortran python3-dev \
+                2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
             echo ""
         fi
     fi
@@ -140,12 +145,13 @@ fi
 if [ ! -d "$VENV_DIR" ]; then
     echo " Installing dependencies (this may take a minute)..."
 
-    # On ARM, uv's resolver ignores piwheels wheels and always picks PyPI sdists,
-    # which require gfortran and hours of compilation for scipy/numpy.
-    # Work around this by creating the venv first and pre-installing the heavy
-    # packages via pip directly from piwheels, then letting uv sync finish the rest.
+    # On ARM, uv's resolver ignores piwheels wheels and always picks PyPI sdists.
+    # Strategy: create the venv with --seed (includes pip), then pre-install the
+    # heavy packages via pip directly from piwheels before uv sync runs.
+    # If piwheels has no matching wheel, uv sync falls back to building from source;
+    # gfortran and python3-dev (installed above) satisfy that build path too.
     if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
-        uv venv --quiet
+        uv venv --seed --quiet
         echo " ARM: fetching scipy/numpy from piwheels (pre-built ARM wheels)..."
         "$VENV_DIR/bin/pip" install --quiet --prefer-binary \
             --extra-index-url https://www.piwheels.org/simple \
