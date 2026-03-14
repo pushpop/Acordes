@@ -478,7 +478,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.9.2 - MIDI CC Control System"
+    VERSION = "1.9.3 - Amora"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -533,7 +533,8 @@ class AcordesApp(App):
         actual_index = None if device_index in (-2, None) else device_index
 
         buffer_size = self.config_manager.get_buffer_size()
-        self.synth_engine = SynthEngineProxy(output_device_index=actual_index, buffer_size=buffer_size)
+        audio_backend = self.config_manager.get_audio_backend()
+        self.synth_engine = SynthEngineProxy(output_device_index=actual_index, buffer_size=buffer_size, audio_backend=audio_backend)
         self.app_context["synth_engine"] = self.synth_engine
 
         # Auto-open saved MIDI device now that we have an engine to pair with.
@@ -607,6 +608,9 @@ class AcordesApp(App):
         main_screen = MainScreen(self.app_context)
         self.push_screen(main_screen)
 
+        # Store current audio backend so we can detect if user changed it in config mode
+        original_backend = self.config_manager.get_audio_backend()
+
         # Show config only if MIDI device has not been configured yet.
         # Audio device is already configured at this point.
         if not self.config_manager.is_midi_device_configured():
@@ -614,6 +618,12 @@ class AcordesApp(App):
                 # If user closed config without selecting MIDI device, default to "No MIDI Device"
                 if not self.config_manager.is_midi_device_configured():
                     self.device_manager.select_device(None)
+
+                # Check if audio backend was changed and restart engine if needed
+                current_backend = self.config_manager.get_audio_backend()
+                if current_backend != original_backend:
+                    # Backend changed: restart engine with new backend
+                    self.synth_engine.restart_with_backend(current_backend)
 
                 self.update_sub_title()
                 selected = self.device_manager.get_selected_device()
@@ -687,7 +697,7 @@ class AcordesApp(App):
 
     def _create_metronome_mode(self):
         """Create metronome mode widget."""
-        return MetronomeMode(self.config_manager)
+        return MetronomeMode(self.config_manager, self.synth_engine)
 
     def _create_tambor_mode(self):
         """Create Tambor drum machine mode widget."""

@@ -2,8 +2,6 @@ from textual.widgets import Static, Label
 from textual.containers import Vertical
 from textual.binding import Binding
 from components.header_widget import HeaderWidget
-import pygame
-import numpy as np
 
 class MetronomeMode(Vertical):
     """A metronome mode for the application."""
@@ -125,38 +123,20 @@ class MetronomeMode(Vertical):
         
         return "\n".join(combined_lines)
 
-    def __init__(self, config_manager=None):
+    def __init__(self, config_manager=None, synth_engine=None):
         super().__init__()
         self.config_manager = config_manager
+        self.synth_engine = synth_engine
         self.tempo = config_manager.get_bpm() if config_manager else 120
         try:
             self.time_signature_index = self.COMMON_TIME_SIGNATURES.index((4, 4))
         except ValueError:
             self.time_signature_index = 2
-        
+
         self.time_signature = self.COMMON_TIME_SIGNATURES[self.time_signature_index]
         self._is_running = False
         self.beat_counter = 0
         self.timer = None
-
-        pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
-        sample_rate = pygame.mixer.get_init()[0]
-
-        def generate_click(freq, duration_ms):
-            duration_s = duration_ms / 1000.0
-            num_samples = int(sample_rate * duration_s)
-            t = np.linspace(0, duration_s, num_samples, False)
-            audio_data = np.sin(2 * np.pi * freq * t)
-            decay = np.exp(-t / 0.01)
-            audio_data *= decay
-            audio_data = (audio_data * 32767).astype(np.int16)
-            stereo_data = np.zeros((num_samples, 2), dtype=np.int16)
-            stereo_data[:, 0] = audio_data
-            stereo_data[:, 1] = audio_data
-            return pygame.sndarray.make_sound(stereo_data)
-
-        self.accent_beat_sound = generate_click(1200, 50)
-        self.beat_sound = generate_click(880, 50)
 
     def _generate_beat_bar_art(self, current_beat: int) -> str:
         total_beats = self.time_signature[0]
@@ -187,10 +167,8 @@ class MetronomeMode(Vertical):
         display.update(self._generate_beat_bar_art(current_beat_in_measure))
         pattern = self.ACCENT_PATTERNS.get(self.time_signature, [1] + [0] * (beats_in_measure - 1))
         is_accented_beat = pattern[current_beat_in_measure] == 1
-        if is_accented_beat:
-            self.accent_beat_sound.play()
-        else:
-            self.beat_sound.play()
+        if self.synth_engine:
+            self.synth_engine.play_metronome_click(accent=is_accented_beat)
         self.beat_counter += 1
 
     def action_toggle_metronome(self):

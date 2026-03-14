@@ -2355,6 +2355,7 @@ class SynthMode(Widget):
     def _refresh_all_displays(self):
         if self.waveform_display: self.waveform_display.update(self._fmt_waveform())
         if self.waveform_shape_display: self.waveform_shape_display.update(self._fmt_waveform_shape())
+        if self.noise_display: self.noise_display.update(self._fmt_knob(self.noise_level, 0.0, 1.0, f"{int(self.noise_level * 100)}%"))
         if self.octave_display: self.octave_display.update(self._fmt_octave())
         if self.hpf_cutoff_display: self.hpf_cutoff_display.update(self._fmt_hpf_cutoff())
         if self.hpf_resonance_display: self.hpf_resonance_display.update(self._fmt_hpf_resonance())

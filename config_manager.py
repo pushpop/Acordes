@@ -1,8 +1,14 @@
 """Configuration file management."""
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Optional
+
+# Audio backends that only exist on Windows. If a config.json saved on Windows
+# is loaded on Linux/macOS (e.g. after copying Acordes to a Raspberry Pi),
+# these values are treated as unconfigured so the platform picks a sane default.
+_WINDOWS_ONLY_BACKENDS = {"ASIO", "WASAPI", "DirectSound"}
 
 
 class ConfigManager:
@@ -109,8 +115,15 @@ class ConfigManager:
         return self.config.get("audio_device_name")
 
     def get_audio_backend(self) -> Optional[str]:
-        """Get the saved audio backend/host API name (None = not yet chosen)."""
-        return self.config.get("audio_backend")
+        """Get the saved audio backend/host API name (None = not yet chosen).
+
+        Windows-only backends are ignored on non-Windows platforms so a config
+        saved on Windows works cleanly when moved to a Raspberry Pi or Mac.
+        """
+        backend = self.config.get("audio_backend")
+        if sys.platform != "win32" and backend in _WINDOWS_ONLY_BACKENDS:
+            return None
+        return backend
 
     def set_audio_backend(self, backend_name: Optional[str]):
         """Save the selected audio backend/host API name."""

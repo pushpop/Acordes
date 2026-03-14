@@ -87,7 +87,21 @@ if ! ldconfig -p 2>/dev/null | grep -q libportaudio && \
     echo ""
 fi
 
-# ── 3. Pin Python version — install automatically if missing ──────────────────
+# ── 3. ARM: install build deps for python-rtmidi ──────────────────────────────
+# python-rtmidi has no pre-built wheel for ARM (armv7l/aarch64) and must compile
+# from source. libasound2-dev and libjack-jackd2-dev provide the ALSA/JACK headers.
+_ARCH="$(uname -m 2>/dev/null || echo unknown)"
+if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
+    if command -v apt-get &>/dev/null; then
+        if ! dpkg -l libasound2-dev &>/dev/null 2>&1 | grep -q "^ii"; then
+            echo " ARM device detected — installing build deps for python-rtmidi..."
+            sudo apt-get install -y libasound2-dev libjack-jackd2-dev 2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
+            echo ""
+        fi
+    fi
+fi
+
+# ── 4. Pin Python version — install automatically if missing ──────────────────
 if [ ! -f "$PIN_FILE" ]; then
     echo " First run — setting up Acordes..."
     echo ""
@@ -112,7 +126,7 @@ if [ ! -f "$PIN_FILE" ]; then
     fi
 fi
 
-# ── 4. Sync dependencies ───────────────────────────────────────────────────────
+# ── 5. Sync dependencies ───────────────────────────────────────────────────────
 if [ ! -d "$VENV_DIR" ]; then
     echo " Installing dependencies (this may take a minute)..."
 
@@ -150,7 +164,7 @@ else
     fi
 fi
 
-# ── 5. ASIO PortAudio DLL install (Windows/Cygwin only, no-op elsewhere) ───────
+# ── 6. ASIO PortAudio DLL install (Windows/Cygwin only, no-op elsewhere) ───────
 # On native Linux/macOS PortAudio is a system library — no DLL replacement needed.
 # This block only runs under Cygwin or Git Bash where a .dll path might exist.
 ASIO_DLL="$SCRIPT_DIR/portaudio-asio/libportaudio64bit.dll"
@@ -169,5 +183,5 @@ if [ -f "$ASIO_DLL" ]; then
     fi
 fi
 
-# ── 6. Launch ──────────────────────────────────────────────────────────────────
+# ── 7. Launch ──────────────────────────────────────────────────────────────────
 uv run python "$SCRIPT_DIR/main.py"

@@ -7,7 +7,7 @@ import threading
 from music.preset_manager import DEFAULT_PARAMS
 
 
-def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, output_device_index=None, buffer_size=1024):
+def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, output_device_index=None, buffer_size=1024, audio_backend=None):
     """Entry point for the audio subprocess.
 
     Constructs SynthEngine, signals the main process when ready, then
@@ -21,7 +21,7 @@ def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, outp
         # Import here so only the audio process loads PyAudio/numpy.
         from music.synth_engine import SynthEngine
 
-        engine = SynthEngine(output_device_index=output_device_index, buffer_size=buffer_size)
+        engine = SynthEngine(output_device_index=output_device_index, buffer_size=buffer_size, audio_backend=audio_backend)
         engine.warm_up()
         ready_event.set()
 
@@ -85,9 +85,10 @@ class SynthEngineProxy:
     implemented here.  No mode code needs to change.
     """
 
-    def __init__(self, output_device_index=None, buffer_size=1024):
+    def __init__(self, output_device_index=None, buffer_size=1024, audio_backend=None):
         self._output_device_index = output_device_index
         self._buffer_size = buffer_size
+        self._audio_backend = audio_backend
         self._cmd_queue = multiprocessing.Queue()
         self._ready_event = multiprocessing.Event()
         self._error_event = multiprocessing.Event()
@@ -114,6 +115,7 @@ class SynthEngineProxy:
                 self._error_msg_arr,
                 output_device_index,
                 buffer_size,
+                audio_backend,
             ),
             daemon=True,
             name="acordes-audio",
@@ -174,6 +176,7 @@ class SynthEngineProxy:
                 self._error_msg_arr,
                 output_device_index,
                 self._buffer_size,
+                self._audio_backend,
             ),
             daemon=True,
             name="acordes-audio",
@@ -183,6 +186,11 @@ class SynthEngineProxy:
     def restart_with_buffer_size(self, buffer_size: int):
         """Shut down and restart with a new buffer size, keeping the current output device."""
         self._buffer_size = buffer_size
+        self.restart_with_device(self._output_device_index)
+
+    def restart_with_backend(self, audio_backend: str):
+        """Shut down and restart with a new audio backend, keeping the current output device."""
+        self._audio_backend = audio_backend
         self.restart_with_device(self._output_device_index)
 
     # ── Note events ───────────────────────────────────────────────
@@ -230,6 +238,14 @@ class SynthEngineProxy:
             'velocity': velocity,
             'params': params,
         })
+
+    def play_metronome_click(self, accent: bool = False):
+        """Trigger a pre-generated click sound through the engine's audio stream.
+
+        Uses the engine's existing audio output so no secondary stream is opened —
+        required for ASIO exclusive-mode compatibility.
+        """
+        self._cmd_queue.put({'type': 'metronome_tick', 'accent': accent})
 
     def preload(self, midi_note: int, synth_params: dict):
         """Stub: preload is a drum_synth concern, not implemented on SynthEngine."""

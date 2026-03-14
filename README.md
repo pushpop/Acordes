@@ -1,4 +1,4 @@
-# Acordes: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.9.3 - Amora: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 

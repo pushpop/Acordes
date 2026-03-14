@@ -60,6 +60,8 @@ imgs/
 *.TODO
 *.NOTES
 *.PLANNING
+todo/
+arm/
 
 # Debug and test files (development only)
 debug*.py

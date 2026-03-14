@@ -295,6 +295,23 @@ def list_output_devices_for_backend(hostapi_name: str) -> list:
         return []
 
 
+def get_hostapi_index_for_backend(backend_name: str) -> Optional[int]:
+    """Convert a backend name (e.g., 'ASIO', 'WASAPI') to its host_api index.
+
+    Returns the numeric host_api index used by sounddevice, or None if not found.
+    """
+    if not AUDIO_AVAILABLE or sd is None or not backend_name:
+        return None
+    try:
+        backends = list_audio_backends()
+        for name, hid in backends:
+            if name == backend_name:
+                return hid
+        return None
+    except Exception:
+        return None
+
+
 def recommended_audio_backend() -> str:
     """Return the recommended audio backend name for the current OS and installed drivers.
 
@@ -328,7 +345,7 @@ def recommended_audio_backend() -> str:
 class SynthEngine:
     """8-voice polyphonic synthesizer engine with stabilized gain and master volume."""
 
-    def __init__(self, output_device_index=None, buffer_size=1024):
+    def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None):
         self.sample_rate = 48000
         self.buffer_size = buffer_size
         self.num_voices = 8
@@ -338,6 +355,7 @@ class SynthEngine:
         # None = system default (same as -2, legacy behavior)
         # >=0 = specific sounddevice device index
         self._output_device_index = output_device_index
+        self._audio_backend = audio_backend  # Host API name (e.g., "ASIO", "WASAPI")
         self.running = False
 
         self.waveform = "sine"
@@ -532,6 +550,14 @@ class SynthEngine:
         self._fx_tail_samples = 0        # samples remaining to drain after all voices silent
         self._FX_TAIL_MAX     = int(self.sample_rate * 10.0)   # 10s ceiling
 
+        # Pre-generated metronome click buffers (float32, stereo interleaved).
+        # Generated once at init; played back by mixing into the output when
+        # a 'metronome_tick' event is received. Avoids any secondary audio stream
+        # opening (which conflicts with ASIO exclusive-mode drivers).
+        self._metro_normal_buf, self._metro_accent_buf = self._generate_metro_clicks()
+        self._metro_click_buf: Optional[np.ndarray] = None  # currently playing click
+        self._metro_click_pos: int = 0                      # read position in click buf
+
         # Startup silence counter — outputs zero samples for first ~1s after stream starts.
         # Eliminates click artifacts from filter/DC blocker transients during warm-up.
         # 1 second allows all DSP state (filters, DC blockers, LFO, arpeggiator) to fully settle.
@@ -563,12 +589,25 @@ class SynthEngine:
 
         elif AUDIO_AVAILABLE and sd is not None:
             try:
-                # -2 or None = let sounddevice use the OS/PipeWire default output.
-                device_index = (
-                    self._output_device_index
-                    if self._output_device_index is not None and self._output_device_index >= 0
-                    else None
-                )
+                # Resolve the device index to use:
+                # - specific index (>=0): use as-is (already encodes the host API)
+                # - None or -2 (system default): if a backend is specified, find its
+                #   default output device so ASIO/WASAPI/etc. is honoured correctly.
+                #   Without this, sounddevice picks the OS default (WASAPI on Windows)
+                #   even when the user explicitly chose a different backend.
+                device_index = None
+                if self._output_device_index is not None and self._output_device_index >= 0:
+                    device_index = self._output_device_index
+                elif self._audio_backend:
+                    hid = get_hostapi_index_for_backend(self._audio_backend)
+                    if hid is not None:
+                        try:
+                            api_info = sd.query_hostapis(hid)
+                            default_dev = api_info.get('default_output_device', -1)
+                            if default_dev >= 0:
+                                device_index = default_dev
+                        except Exception:
+                            pass  # Fall through to OS default if lookup fails
                 self.stream = sd.OutputStream(
                     samplerate=self.sample_rate,
                     blocksize=self.buffer_size,
@@ -781,6 +820,28 @@ class SynthEngine:
         for v in self.voices:
             if v.base_frequency is not None and (v.note_active or v.is_releasing):
                 v.frequency = v.base_frequency * (2.0 ** (self.pitch_bend / 12.0))
+
+    def _generate_metro_clicks(self):
+        """Generate simple metronome clicks using white noise with decay.
+
+        Returns (normal_buf, accent_buf) as float32 numpy arrays.
+        Both clicks use white noise for a natural "tick" sound.
+        """
+        duration_s = 0.007  # 25 ms per click
+        n = int(self.sample_rate * duration_s)
+
+        # White noise with exponential decay
+        noise = np.random.randn(n).astype(np.float32)
+        t = np.linspace(0, duration_s, n, endpoint=False, dtype=np.float32)
+        decay = np.exp(-t / 0.009).astype(np.float32)
+
+        # Normal click: quieter (for off-beats)
+        normal_buf = (noise * decay * 0.3).astype(np.float32)
+
+        # Accent click: louder (for beat emphasis)
+        accent_buf = (noise * decay * 0.5).astype(np.float32)
+
+        return normal_buf, accent_buf
 
     def _create_polyphase_filter(self):
         """ABOUTME: Create 31-tap Hamming-windowed sinc FIR lowpass filter for 4× downsampling.
@@ -1473,6 +1534,11 @@ class SynthEngine:
                 # from the current ramp position so rapid randomize presses stay clean.
                 self._mute_ramp_remaining = self._MUTE_RAMP_LEN
                 self._mute_ramp_fadein    = 0
+            elif e['type'] == 'metronome_tick':
+                # Restart the pre-generated click playback from the beginning.
+                # Choosing accent vs. normal click is decided by the sender.
+                self._metro_click_buf = self._metro_accent_buf if e.get('accent') else self._metro_normal_buf
+                self._metro_click_pos = 0
             else:
                 # note_on / note_off — collect and process below with the cap.
                 pending_notes.append(e)
@@ -1547,6 +1613,10 @@ class SynthEngine:
                 setattr(self, k, v)
 
     def _trigger_note(self, note: int, vel: float):
+        # MONO and UNISON use gate behavior: velocity is ignored, amplitude is always full.
+        # The envelope acts as a pure on/off gate rather than a velocity-sensitive amplifier.
+        if self.voice_type in ("mono", "unison"):
+            vel = 1.0
         freq = self._midi_to_frequency(note)
         # Frequency-adaptive onset window: scale with the note period so the DC
         # blocker's startup transient is hidden under the onset ramp even for very
@@ -1888,7 +1958,7 @@ class SynthEngine:
                 # _fx_tail_samples is set to a generous ceiling whenever a voice is
                 # triggered (in _trigger_note) and decremented here while draining so
                 # the callback returns to silence naturally once the tail expires.
-                if self._fx_tail_samples <= 0:
+                if self._fx_tail_samples <= 0 and self._metro_click_buf is None:
                     outdata.fill(0)
                     return
                 self._fx_tail_samples = max(0, self._fx_tail_samples - frame_count)
@@ -2236,6 +2306,19 @@ class SynthEngine:
             _OCTAVE_COMP = {-2: 1.25, -1: 1.12, 0: 1.0, 1: 1.0, 2: 1.0}
             octave_comp = _OCTAVE_COMP.get(self.octave, 1.0)
 
+            # Mix metronome clicks into the synth signal BEFORE saturation.
+            # This ensures they go through the normal tanh curve and are never lost
+            # to clipping. The clicks are audible even with high synth levels.
+            if self._metro_click_buf is not None and self._metro_click_pos < len(self._metro_click_buf):
+                remaining = len(self._metro_click_buf) - self._metro_click_pos
+                n_click = min(frame_count, remaining)
+                chunk = self._metro_click_buf[self._metro_click_pos:self._metro_click_pos + n_click]
+                mixed_l[:n_click] += chunk
+                mixed_r[:n_click] += chunk
+                self._metro_click_pos += n_click
+                if self._metro_click_pos >= len(self._metro_click_buf):
+                    self._metro_click_buf = None
+
             # Voice-count gain ramp normalises poly voice sum, then tanh soft-clips
             # at ±ceiling. filter_drive (applied post-ladder per voice) pushes the
             # mixed signal above the ceiling, causing progressive saturation.
@@ -2277,6 +2360,19 @@ class SynthEngine:
             # above means these clips should rarely fire; kept as a safety net.
             clipped_l = np.clip(mixed_l, -1.0, 1.0)
             clipped_r = np.clip(mixed_r, -1.0, 1.0)
+
+            # Mix metronome click into the output after saturation/clipping so
+            # it always sounds clean and is not coloured by the synth signal chain.
+            if self._metro_click_buf is not None and self._metro_click_pos < len(self._metro_click_buf):
+                remaining = len(self._metro_click_buf) - self._metro_click_pos
+                n_click = min(frame_count, remaining)
+                chunk = self._metro_click_buf[self._metro_click_pos:self._metro_click_pos + n_click]
+                clipped_l[:n_click] = np.clip(clipped_l[:n_click] + chunk, -1.0, 1.0)
+                clipped_r[:n_click] = np.clip(clipped_r[:n_click] + chunk, -1.0, 1.0)
+                self._metro_click_pos += n_click
+                if self._metro_click_pos >= len(self._metro_click_buf):
+                    self._metro_click_buf = None
+
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
             outdata[:, 0] = clipped_l
