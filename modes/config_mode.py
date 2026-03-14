@@ -29,7 +29,8 @@ class ConfigMode(Screen):
     }
 
     #config-container {
-        width: 140;
+        width: 100%;
+        max-width: 140;
         height: auto;
         border: thick #ffd700;
         background: #1a1a1a;

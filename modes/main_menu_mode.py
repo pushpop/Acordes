@@ -20,13 +20,13 @@ class MainMenuMode(Vertical):
     }
 
     #main-menu-buttons {
-        width: auto;
+        width: 100%;
         height: auto;
         align: center middle;
     }
 
     #main-menu-buttons Button {
-        width: 24;
+        width: 1fr;
         height: 12;
         margin: 0 1;
         border: tall $primary;
