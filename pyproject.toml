@@ -29,11 +29,6 @@ index-strategy = "unsafe-best-match"
 # cffi needs libffi-dev headers visible during its C extension build.
 no-build-isolation-package = ["python-rtmidi", "cffi"]
 
-[tool.uv.extra-build-dependencies]
-# python-rtmidi 1.5.8 uses meson-python but doesn't declare it as a build
-# dependency. Provide it explicitly so uv can build it from source on ARM.
-python-rtmidi = ["meson-python"]
-
 [[tool.uv.index]]
 name = "piwheels"
 url = "https://www.piwheels.org/simple"

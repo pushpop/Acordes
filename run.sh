@@ -152,11 +152,20 @@ if [ ! -d "$VENV_DIR" ]; then
     # gfortran and python3-dev (installed above) satisfy that build path too.
     if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
         uv venv --seed --quiet
-        echo " ARM: fetching scipy/numpy from piwheels (pre-built ARM wheels)..."
+        # meson-python must be in the venv before uv sync builds python-rtmidi.
+        # python-rtmidi 1.5.8 uses it as a build backend but omits it from its
+        # build-system.requires; no-build-isolation-package means we can't inject
+        # it via [tool.uv.extra-build-dependencies] — it must already be present.
+        echo " ARM: pre-installing meson-python and piwheels packages..."
+        "$VENV_DIR/bin/pip" install --quiet meson-python || true
         "$VENV_DIR/bin/pip" install --quiet --prefer-binary \
             --extra-index-url https://www.piwheels.org/simple \
             "scipy>=1.10.0" "numpy>=1.24.0" || true
         echo ""
+    else
+        # Non-ARM: still need meson-python pre-installed for the same reason.
+        uv venv --seed --quiet
+        "$VENV_DIR/bin/pip" install --quiet meson-python || true
     fi
 
     # Capture output; only show it on failure so the terminal stays clean.
