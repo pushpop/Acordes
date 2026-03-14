@@ -105,10 +105,10 @@ if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
         fi
     fi
 
-    # Set a compact console font so the TFT framebuffer (790x600) gives at least
-    # 131 columns. The default 8x16 font only yields 98 cols, which clips the UI.
+    # Set a bold compact console font so the TFT framebuffer (790x600) gives
+    # ~112 cols at 7x14px. The default 8x16 font only yields 98 cols and is thin.
     # Only applies when running on a real framebuffer console (not over SSH/tmux).
-    _FONT="/usr/share/consolefonts/Lat15-Terminus12x6.psf.gz"
+    _FONT="/usr/share/consolefonts/Lat15-TerminusBold14.psf.gz"
     if [[ -f "$_FONT" && "$(tty)" == /dev/tty* ]]; then
         setfont "$_FONT" 2>/dev/null || true
     fi
