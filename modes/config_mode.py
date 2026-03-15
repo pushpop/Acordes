@@ -448,7 +448,9 @@ class ConfigMode(Screen):
         list_view = self.query_one("#buffer-list", ListView)
         list_view.clear()
 
-        sample_rate = 48000  # Display latency based on standard 48 kHz
+        # ARM uses 44100 Hz (bcm2835 native); desktop uses 48000 Hz.
+        import platform as _plat
+        sample_rate = 44100 if _plat.machine() in ("armv7l", "aarch64") else 48000
         for size in self.BUFFER_SIZES:
             latency_ms = (size / sample_rate) * 1000
             marker = "☑" if size == self.pending_buffer_size else "☐"

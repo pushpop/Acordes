@@ -351,7 +351,13 @@ class SynthEngine:
     _IS_ARM = platform.machine() in ("armv7l", "aarch64")
 
     def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None):
-        self.sample_rate = 48000
+        # ARM: use 44100 Hz — the bcm2835 headphone jack's native rate.
+        # At 48000 Hz ALSA runs a sample-rate converter on every callback
+        # on the ARM CPU itself, which adds significant load and jitter that
+        # causes output_underflow xruns even at low CPU utilisation.
+        # All DSP (filters, envelopes, LFO, arpeggiator) uses self.sample_rate
+        # throughout, so 44100 is applied consistently with no hardcoded paths.
+        self.sample_rate = 44100 if self._IS_ARM else 48000
         # ARM: floor at 4096 (~85ms at 48kHz). The Pi 4's single usable Python
         # core (GIL) must handle both Textual UI and the audio callback. 2048
         # (~43ms) leaves too little headroom and causes periodic underruns that
@@ -594,7 +600,7 @@ class SynthEngine:
         # Disabled on ARM: Pi 4 single-core cannot sustain 4 voices at 2× without xruns.
         self.OVERSAMPLE_FACTOR = 1 if self._IS_ARM else 2
         self.ENABLE_OVERSAMPLING = not self._IS_ARM
-        self.OVERSAMPLE_SAMPLE_RATE = 48000 * self.OVERSAMPLE_FACTOR
+        self.OVERSAMPLE_SAMPLE_RATE = self.sample_rate * self.OVERSAMPLE_FACTOR
         self._downsample_filter_taps = None     # Pre-computed FIR filter (initialized below)
 
         # ── ARM effect bypass flags ────────────────────────────────────────────
