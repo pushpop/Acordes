@@ -352,14 +352,19 @@ class SynthEngine:
 
     def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None):
         self.sample_rate = 48000
-        # ARM: enforce a minimum buffer of 2048 samples (~43ms at 48kHz) to give
-        # the bcm2835 headphone driver and Pi CPU enough headroom between callbacks.
-        # The user-configured value from config is respected if it is larger, so
-        # values like 4096 chosen in the config screen are honoured on ARM too.
+        # ARM: floor at 4096 (~85ms at 48kHz). The Pi 4's single usable Python
+        # core (GIL) must handle both Textual UI and the audio callback. 2048
+        # (~43ms) leaves too little headroom and causes periodic underruns that
+        # sound like a tremolo/LFO wobble on every note. 4096 gives the kernel
+        # scheduler enough slack to let the callback always finish in time.
+        # The user-configured value is respected if it is larger (e.g. 8192).
         # Desktop uses the config value directly (default 480 = 10ms).
-        self.buffer_size = max(2048, buffer_size) if self._IS_ARM else buffer_size
-        # ARM: 4 voices fit comfortably within Pi 4 single-core budget; 8 saturate it.
-        self.num_voices = 4 if self._IS_ARM else 8
+        self.buffer_size = max(4096, buffer_size) if self._IS_ARM else buffer_size
+        # ARM: 2 voices on armv7l (1GB Pi 4), 4 on aarch64 (64-bit Pi).
+        # Halving the voice count on the most constrained target cuts synthesis
+        # CPU roughly in half and makes the callback finish well within deadline.
+        import platform as _plat
+        self.num_voices = 2 if _plat.machine() == "armv7l" else (4 if self._IS_ARM else 8)
         # ARM: use int16 output (matches bcm2835 S16_LE native format). This moves
         # the float32->int16 conversion into numpy inside the callback instead of
         # leaving it to PortAudio/ALSA, which reduces DMA bandwidth and removes a
