@@ -182,31 +182,31 @@ if [ ! -d "$VENV_DIR" ]; then
 
     if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
         # ── ARM install path ───────────────────────────────────────────────────
-        # uv sync enforces the PyPI-based lockfile which has no armv7l wheels for
-        # numpy/scipy, forcing a multi-hour source compile every time.
-        # Solution: bypass uv sync entirely and use uv pip install with piwheels
-        # as the primary index. uv pip caches downloaded wheels in ~/.cache/uv so
-        # every venv rebuild after the first is near-instant (cache hit).
-        uv venv --quiet
-        echo " ARM: installing from piwheels + PyPI (first run may take ~5 min)..."
-        uv pip install \
-            --python "$VENV_DIR/bin/python" \
+        # uv pip resolves scipy/numpy from PyPI sdist (no armv7l wheels there),
+        # triggering a multi-hour source compile. pip handles piwheels correctly
+        # with --index-url, so we use pip for the heavy scientific packages and
+        # uv pip for everything else.
+        uv venv --seed --quiet   # --seed includes pip in the venv
+        echo " ARM: installing scipy/numpy from piwheels (pre-built wheels)..."
+        "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
+            "numpy>=1.24.0" "scipy>=1.10.0" || {
+                echo " ERROR: scipy/numpy install failed."
+                exit 1
+            }
+        echo " ARM: installing remaining dependencies..."
+        uv pip install \
+            --python "$VENV_DIR/bin/python" \
             --no-build-isolation-package python-rtmidi \
             "textual>=0.75.0" \
             "mido>=1.3.0" \
             "python-rtmidi>=1.4.0" \
             "mingus>=0.6.1" \
-            "numpy>=1.24.0" \
             "sounddevice>=0.4.6" \
-            "scipy>=1.10.0" \
             "meson-python" \
             || {
-                echo ""
-                echo " ================================================================"
                 echo " ERROR: Dependency installation failed."
-                echo " ================================================================"
                 exit 1
             }
         # Install the app itself without re-resolving dependencies.
@@ -248,22 +248,16 @@ if [ ! -d "$VENV_DIR" ]; then
 else
     # .venv exists — pick up any new dependencies added since last run.
     if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
-        # ARM: uv sync uses the PyPI lockfile which has no armv7l wheels for
-        # numpy/scipy. Use uv pip install with piwheels instead (cached after
-        # first install, so this is near-instant on subsequent runs).
-        uv pip install \
-            --python "$VENV_DIR/bin/python" \
+        # ARM: use pip for scipy/numpy (piwheels wheels), uv pip for the rest.
+        "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
+            "numpy>=1.24.0" "scipy>=1.10.0" || true
+        uv pip install \
+            --python "$VENV_DIR/bin/python" \
             --no-build-isolation-package python-rtmidi \
-            "textual>=0.75.0" \
-            "mido>=1.3.0" \
-            "python-rtmidi>=1.4.0" \
-            "mingus>=0.6.1" \
-            "numpy>=1.24.0" \
-            "sounddevice>=0.4.6" \
-            "scipy>=1.10.0" \
-            "meson-python" \
+            "textual>=0.75.0" "mido>=1.3.0" "python-rtmidi>=1.4.0" \
+            "mingus>=0.6.1" "sounddevice>=0.4.6" "meson-python" \
             --quiet || {
                 echo ""
                 echo " ERROR: Dependency update failed."
