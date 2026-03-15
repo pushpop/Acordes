@@ -365,11 +365,11 @@ class SynthEngine:
         # CPU roughly in half and makes the callback finish well within deadline.
         import platform as _plat
         self.num_voices = 2 if _plat.machine() == "armv7l" else (4 if self._IS_ARM else 8)
-        # ARM: use int16 output (matches bcm2835 S16_LE native format). This moves
-        # the float32->int16 conversion into numpy inside the callback instead of
-        # leaving it to PortAudio/ALSA, which reduces DMA bandwidth and removes a
-        # driver-side conversion pass. Desktop stays on float32 for full precision.
-        self._output_dtype = 'int16' if self._IS_ARM else 'float32'
+        # Always use float32 for the sounddevice stream. PortAudio's ALSA backend
+        # negotiates format with the driver internally and handles float32->S16_LE
+        # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
+        # on bcm2835 causes unreliable period negotiation and xruns on ARM.
+        self._output_dtype = 'float32'
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
         # -2 = System Default (None passed to sounddevice — OS chooses the output)
@@ -667,17 +667,27 @@ class SynthEngine:
                 self.running = True
                 self._elevate_audio_priority()
 
-                # ASIO4ALL buffer size diagnostic: check what blocksize was actually
-                # negotiated with the driver. ASIO4ALL silently negotiates buffer size
-                # if the requested size isn't supported by the underlying WDM driver.
                 actual_blocksize = self.stream.blocksize
-                if actual_blocksize != self.buffer_size:
-                    print(f"⚠ Buffer size mismatch (ASIO4ALL/driver constraint):")
-                    print(f"  Requested: {self.buffer_size} samples")
-                    print(f"  Actual: {actual_blocksize} samples")
+                if self._IS_ARM:
+                    # Print full diagnostics on ARM so xrun causes are visible.
+                    dev_name = "(default)"
+                    if device_index is not None:
+                        try:
+                            dev_name = sd.query_devices(device_index)['name']
+                        except Exception:
+                            pass
+                    print(f"[audio] device   : {dev_name} (index {device_index})", flush=True)
+                    print(f"[audio] requested: blocksize={self.buffer_size}  rate={self.sample_rate}  dtype={self._output_dtype}", flush=True)
+                    print(f"[audio] negotiated: blocksize={actual_blocksize}  latency={self.stream.latency:.4f}s", flush=True)
+                    print(f"[audio] voices={self.num_voices}  oversampling={self.ENABLE_OVERSAMPLING}  chorus={self.ENABLE_CHORUS}  delay={self.ENABLE_DELAY}", flush=True)
+                    if self._IS_ARM:
+                        print("[audio] Available devices:", flush=True)
+                        for i, d in enumerate(sd.query_devices()):
+                            if d['max_output_channels'] > 0:
+                                print(f"  [{i}] {d['name']}  out={d['max_output_channels']}  rate={d['default_samplerate']}", flush=True)
+                elif actual_blocksize != self.buffer_size:
+                    print(f"Buffer size mismatch: requested {self.buffer_size}, got {actual_blocksize} samples")
                     print(f"  Latency: {actual_blocksize / self.sample_rate * 1000:.2f}ms")
-                    print(f"  → ASIO4ALL or your WDM audio driver doesn't support {self.buffer_size}.")
-                    print(f"  → If using ASIO4ALL, check its control panel or use a native ASIO driver.")
             except Exception as e:
                 print(f"Audio initialization failed: {e}")
                 self.running = False
@@ -2448,15 +2458,8 @@ class SynthEngine:
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
-            if self._output_dtype == 'int16':
-                # Convert float32 [-1.0, 1.0] to int16 [-32767, 32767] directly
-                # in numpy. This is faster than letting PortAudio/ALSA do the
-                # same conversion inside the driver on every DMA transfer.
-                outdata[:, 0] = (clipped_l * 32767.0).astype(np.int16)
-                outdata[:, 1] = (clipped_r * 32767.0).astype(np.int16)
-            else:
-                outdata[:, 0] = clipped_l
-                outdata[:, 1] = clipped_r
+            outdata[:, 0] = clipped_l
+            outdata[:, 1] = clipped_r
         except Exception:
             import traceback; traceback.print_exc()
             outdata.fill(0)
