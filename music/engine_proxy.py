@@ -7,7 +7,7 @@ import threading
 from music.preset_manager import DEFAULT_PARAMS
 
 
-def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, output_device_index=None, buffer_size=1024, audio_backend=None):
+def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, startup_info_arr, output_device_index=None, buffer_size=1024, audio_backend=None):
     """Entry point for the audio subprocess.
 
     Constructs SynthEngine, signals the main process when ready, then
@@ -23,6 +23,17 @@ def _audio_process_main(cmd_queue, ready_event, error_event, error_msg_arr, outp
 
         engine = SynthEngine(output_device_index=output_device_index, buffer_size=buffer_size, audio_backend=audio_backend)
         engine.warm_up()
+
+        # Write startup diagnostics to the shared array so the LoadingScreen
+        # can display them without raw print() calls bleeding into the UI.
+        try:
+            info = getattr(engine, '_startup_info', '')
+            info_bytes = info.encode('utf-8')[:1023]
+            for i, b in enumerate(info_bytes):
+                startup_info_arr[i] = b
+        except Exception:
+            pass
+
         ready_event.set()
 
         # Command forwarding loop.  Runs on the subprocess main thread.
@@ -94,6 +105,8 @@ class SynthEngineProxy:
         self._error_event = multiprocessing.Event()
         # Shared byte array for error message from child process (256 bytes max).
         self._error_msg_arr = multiprocessing.Array('c', 256)
+        # Shared byte array for startup diagnostic info (device, rate, etc.).
+        self._startup_info_arr = multiprocessing.Array('c', 1024)
 
         # Local shadow of engine parameters — updated on every update_parameters()
         # call so get_current_params() can return accurate state without IPC.
@@ -113,6 +126,7 @@ class SynthEngineProxy:
                 self._ready_event,
                 self._error_event,
                 self._error_msg_arr,
+                self._startup_info_arr,
                 output_device_index,
                 buffer_size,
                 audio_backend,
@@ -134,6 +148,15 @@ class SynthEngineProxy:
             raw = bytes(self._error_msg_arr).split(b'\x00')[0]
             return raw.decode('utf-8', errors='replace')
         return ""
+
+    def get_startup_info(self) -> str:
+        """Return startup diagnostic string written by the child process.
+
+        Populated after is_available() returns True. Empty string on desktop
+        builds (diagnostics are only collected on ARM).
+        """
+        raw = bytes(self._startup_info_arr).split(b'\x00')[0]
+        return raw.decode('utf-8', errors='replace')
 
     def is_available(self) -> bool:
         return self._ready_event.is_set() and self._process.is_alive()
@@ -165,6 +188,7 @@ class SynthEngineProxy:
         self._ready_event = multiprocessing.Event()
         self._error_event = multiprocessing.Event()
         self._error_msg_arr = multiprocessing.Array('c', 256)
+        self._startup_info_arr = multiprocessing.Array('c', 1024)
         self.held_notes.clear()
 
         self._process = multiprocessing.Process(
@@ -174,6 +198,7 @@ class SynthEngineProxy:
                 self._ready_event,
                 self._error_event,
                 self._error_msg_arr,
+                self._startup_info_arr,
                 output_device_index,
                 self._buffer_size,
                 self._audio_backend,

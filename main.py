@@ -63,13 +63,15 @@ class LoadingScreen(Screen):
     """ABOUTME: Startup loading screen shown while the audio engine process initialises.
     ABOUTME: Polls the proxy ready event and transitions to the main screen when ready."""
 
+    _SPINNER = "|/-\\"
+
     CSS = """
     LoadingScreen {
         align: center middle;
         background: $background;
     }
     #loading-box {
-        width: 50;
+        width: 52;
         height: auto;
         border: solid $accent;
         padding: 1 2;
@@ -79,11 +81,15 @@ class LoadingScreen(Screen):
         text-align: center;
         color: $accent;
         text-style: bold;
+        margin-bottom: 1;
     }
-    #loading-status {
+    #loading-spinner {
         text-align: center;
-        color: $text-muted;
+        color: $text;
+    }
+    #loading-info {
         margin-top: 1;
+        color: $text-muted;
     }
     """
 
@@ -92,32 +98,56 @@ class LoadingScreen(Screen):
         self._proxy = proxy
         self._on_ready_callback = on_ready_callback
         self._poll_timer = None
+        self._spin_timer = None
+        self._spin_idx = 0
+        self._done = False
 
     def compose(self):
         from textual.containers import Vertical
         from textual.widgets import Static
         with Vertical(id="loading-box"):
             yield Static("A C O R D E S", id="loading-title")
-            yield Static("Initializing audio engine...", id="loading-status")
+            yield Static("|  Starting audio engine...", id="loading-spinner")
+            yield Static("", id="loading-info")
 
     def on_mount(self):
-        # Poll every 100ms for the audio process ready signal.
         self._poll_timer = self.set_interval(0.1, self._check_ready)
+        self._spin_timer = self.set_interval(0.1, self._tick_spinner)
+
+    def _tick_spinner(self):
+        if self._done:
+            return
+        char = self._SPINNER[self._spin_idx % len(self._SPINNER)]
+        self._spin_idx += 1
+        self.query_one("#loading-spinner").update(f"{char}  Starting audio engine...")
 
     def _check_ready(self):
         err = self._proxy.get_error()
         if err:
-            self.query_one("#loading-status").update(f"[red]Audio error: {err}[/]")
+            self._done = True
+            self.query_one("#loading-spinner").update(f"[red]Audio error: {err}[/]")
             if self._poll_timer:
                 self._poll_timer.stop()
+            if self._spin_timer:
+                self._spin_timer.stop()
             return
 
         if self._proxy.is_available():
+            self._done = True
             if self._poll_timer:
                 self._poll_timer.stop()
-            self.query_one("#loading-status").update("Ready.")
-            # Brief pause so the user sees "Ready." before transition.
-            self.set_timer(0.3, self._on_ready_callback)
+            if self._spin_timer:
+                self._spin_timer.stop()
+
+            self.query_one("#loading-spinner").update("[green]ready[/]")
+
+            # Show engine diagnostics if the subprocess populated them (ARM only).
+            info = self._proxy.get_startup_info()
+            if info:
+                self.query_one("#loading-info").update(info)
+
+            # Brief pause so the user can read the info before transitioning.
+            self.set_timer(1.2 if info else 0.3, self._on_ready_callback)
 
 
 class SynthHelpBar(Static):

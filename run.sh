@@ -93,15 +93,37 @@ fi
 # scipy/numpy may also build from source if piwheels wheels are unavailable;
 # gfortran and python3-dev are required by their meson/numpy build systems.
 _ARCH="$(uname -m 2>/dev/null || echo unknown)"
+
+# Spinner utility: runs in the foreground while a background job ($1) is alive.
+# Prints a rotating character beside a message, then a check mark when done.
+# Usage: _spin $PID "message"
+_spin() {
+    local _pid=$1 _msg=$2
+    local _chars='|/-\' _i=0
+    while kill -0 "$_pid" 2>/dev/null; do
+        printf "\r  %s  %s" "${_chars:$((_i % 4)):1}" "$_msg"
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    printf "\r  \u2714  %s\n" "$_msg"
+}
+
 if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
+    echo ""
+    echo "  +---------------------------+"
+    echo "  |   A C O R D E S  - ARM   |"
+    echo "  +---------------------------+"
+    echo ""
+
     if command -v apt-get &>/dev/null; then
         if ! dpkg -l libasound2-dev &>/dev/null 2>&1 | grep -q "^ii"; then
-            echo " ARM device detected — installing build deps..."
+            echo "  Installing system build dependencies..."
             sudo apt-get install -y \
                 libasound2-dev libjack-jackd2-dev ninja-build libffi-dev \
                 gfortran python3-dev \
                 libopenblas0 \
-                2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
+                >/dev/null 2>&1 || true
+            printf "  \u2714  System dependencies ready\n"
             echo ""
         fi
     fi
@@ -247,18 +269,18 @@ if [ ! -d "$VENV_DIR" ]; then
         # with --index-url, so we use pip for the heavy scientific packages and
         # uv pip for everything else.
         uv venv --seed --quiet   # --seed includes pip in the venv
-        echo " ARM: installing scipy/numpy from piwheels (pre-built wheels)..."
+
         # Pin numpy<2.0 and scipy<1.14: piwheels 2.x wheels require glibc 2.34
         # (Debian 12 Bookworm), but Raspbian 11 (Bullseye) only has glibc 2.31.
         # numpy 1.26.4 and scipy 1.13.x are the last releases built for glibc 2.31.
         "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
-            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" || {
-                echo " ERROR: scipy/numpy install failed."
-                exit 1
-            }
-        echo " ARM: installing remaining dependencies..."
+            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" &
+        _PIP_PID=$!
+        _spin $_PIP_PID "Installing numpy / scipy  (piwheels)"
+        wait $_PIP_PID || { echo "  ERROR: scipy/numpy install failed."; exit 1; }
+
         # Pass the same numpy/scipy upper bounds so uv accepts the piwheels
         # wheels already in the venv and does not re-resolve to a newer sdist.
         uv pip install \
@@ -272,10 +294,10 @@ if [ ! -d "$VENV_DIR" ]; then
             "meson-python" \
             "numpy>=1.24.0,<2.0" \
             "scipy>=1.10.0,<1.14.0" \
-            || {
-                echo " ERROR: Dependency installation failed."
-                exit 1
-            }
+            --quiet &
+        _UV_PID=$!
+        _spin $_UV_PID "Installing remaining dependencies"
+        wait $_UV_PID || { echo "  ERROR: Dependency installation failed."; exit 1; }
         echo ""
     else
         # ── Desktop install path (Windows / macOS / x86 Linux) ────────────────
@@ -321,10 +343,10 @@ else
         "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
-            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" || {
-                echo " ERROR: scipy/numpy install from piwheels failed."
-                exit 1
-            }
+            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" &
+        _PIP_PID=$!
+        _spin $_PIP_PID "Checking numpy / scipy  (piwheels)"
+        wait $_PIP_PID || { echo "  ERROR: scipy/numpy update failed."; exit 1; }
         # Install remaining deps via uv pip. Pass the same numpy/scipy upper
         # bounds so uv accepts the piwheels wheels already in the venv and
         # does not re-resolve to a newer sdist from PyPI.
@@ -334,10 +356,10 @@ else
             "textual>=0.75.0" "mido>=1.3.0" "python-rtmidi>=1.4.0" \
             "mingus>=0.6.1" "sounddevice>=0.4.6" "meson-python" \
             "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" \
-            --quiet || {
-                echo " ERROR: Dependency update failed."
-                exit 1
-            }
+            --quiet &
+        _UV_PID=$!
+        _spin $_UV_PID "Checking remaining dependencies"
+        wait $_UV_PID || { echo "  ERROR: Dependency update failed."; exit 1; }
     else
         if ! uv sync --quiet 2>/dev/null; then
             echo ""
@@ -398,4 +420,9 @@ fi
 # The audio callback promotes itself to SCHED_FIFO real-time scheduling
 # inside synth_engine._elevate_audio_priority() — no process-level nice
 # adjustment needed here (and negative nice requires root on Linux).
+if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
+    echo ""
+    printf "  \u25B6  Launching Acordes...\n"
+    echo ""
+fi
 uv run python "$SCRIPT_DIR/main.py"

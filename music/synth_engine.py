@@ -392,6 +392,9 @@ class SynthEngine:
         # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
         # on bcm2835 causes unreliable period negotiation and xruns on ARM.
         self._output_dtype = 'float32'
+        # Startup diagnostic string populated after stream init (ARM only).
+        # Read by engine_proxy._audio_process_main and forwarded to LoadingScreen.
+        self._startup_info = ""
         # ARM Lite: import scipy signal functions once at init time so the audio
         # callback never pays the import cost. Falls back gracefully if scipy is
         # missing (the Python loop filters are used instead).
@@ -703,25 +706,32 @@ class SynthEngine:
 
                 actual_blocksize = self.stream.blocksize
                 if self._IS_ARM:
-                    # Print full diagnostics on ARM so xrun causes are visible.
-                    dev_name = "(default)"
+                    # Collect startup diagnostics into _startup_info so the
+                    # LoadingScreen can display them cleanly instead of having
+                    # raw print() calls bleed through the Textual UI.
+                    dev_name = "default"
                     if device_index is not None:
                         try:
                             dev_name = sd.query_devices(device_index)['name']
+                            # Truncate long device names so they fit the UI box.
+                            if len(dev_name) > 28:
+                                dev_name = dev_name[:25] + "..."
                         except Exception:
                             pass
-                    print(f"[audio] device   : {dev_name} (index {device_index})", flush=True)
-                    print(f"[audio] requested: blocksize={self.buffer_size}  rate={self.sample_rate}  dtype={self._output_dtype}", flush=True)
-                    print(f"[audio] negotiated: blocksize={actual_blocksize}  latency={self.stream.latency:.4f}s", flush=True)
-                    print(f"[audio] voices={self.num_voices}  oversampling={self.ENABLE_OVERSAMPLING}  chorus={self.ENABLE_CHORUS}  delay={self.ENABLE_DELAY}", flush=True)
-                    if self._IS_ARM:
-                        print("[audio] Available devices:", flush=True)
-                        for i, d in enumerate(sd.query_devices()):
-                            if d['max_output_channels'] > 0:
-                                print(f"  [{i}] {d['name']}  out={d['max_output_channels']}  rate={d['default_samplerate']}", flush=True)
-                elif actual_blocksize != self.buffer_size:
-                    print(f"Buffer size mismatch: requested {self.buffer_size}, got {actual_blocksize} samples")
-                    print(f"  Latency: {actual_blocksize / self.sample_rate * 1000:.2f}ms")
+                    buf_ms  = actual_blocksize / self.sample_rate * 1000
+                    lat_ms  = self.stream.latency * 1000
+                    self._startup_info = (
+                        f"Device  : {dev_name}\n"
+                        f"Rate    : {self.sample_rate} Hz\n"
+                        f"Buffer  : {actual_blocksize} smp  ({buf_ms:.1f} ms)\n"
+                        f"Voices  : {self.num_voices}\n"
+                        f"Latency : {lat_ms:.1f} ms"
+                    )
+                else:
+                    self._startup_info = ""
+                    if actual_blocksize != self.buffer_size:
+                        print(f"Buffer size mismatch: requested {self.buffer_size}, got {actual_blocksize} samples")
+                        print(f"  Latency: {actual_blocksize / self.sample_rate * 1000:.2f}ms")
             except Exception as e:
                 print(f"Audio initialization failed: {e}")
                 self.running = False
