@@ -140,6 +140,57 @@ if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
     # 3. Reduce VM swappiness so the kernel prefers keeping audio buffers in RAM.
     #    Default is 60; Patchbox uses 10.
     sudo sysctl -q vm.swappiness=10 2>/dev/null || true
+
+    # 4. Allow the RT scheduler to run indefinitely (kernel default caps RT tasks
+    #    at 95% of wall-clock time to prevent lockups). Patchbox sets this to -1
+    #    (unlimited) so the audio callback is never throttled mid-buffer.
+    sudo sysctl -q kernel.sched_rt_runtime_us=-1 2>/dev/null || true
+
+    # 5. Silence PulseAudio for this session. PulseAudio inserts itself as the
+    #    ALSA default device and adds its own resampler + jitter buffer, causing
+    #    artifacts and preventing PortAudio from opening the hardware directly.
+    #    We suspend rather than kill so the user's desktop audio resumes after.
+    if command -v pactl &>/dev/null; then
+        pactl suspend-sink   0 2>/dev/null || true
+        pactl suspend-source 0 2>/dev/null || true
+    fi
+    # Some Bullseye images run PulseAudio as a user service; stop it for the
+    # duration so PortAudio gets direct ALSA hw: access.
+    systemctl --user stop pulseaudio.socket pulseaudio.service 2>/dev/null || true
+
+    # 6. Write an ALSA config that points the default PCM directly at the
+    #    bcm2835 headphone device (card 0, device 0) at 48000 Hz with S16_LE.
+    #    This prevents dmix/PulseAudio resampling and lets PortAudio negotiate
+    #    the buffer size directly with the driver.
+    #    Only written once; delete ~/.asoundrc to regenerate.
+    _ASOUNDRC="$HOME/.asoundrc"
+    if [[ ! -f "$_ASOUNDRC" ]]; then
+        cat > "$_ASOUNDRC" <<'ASOUNDRC'
+# Acordes ALSA config for Raspberry Pi bcm2835 headphone jack.
+# Routes the default PCM directly to the hardware device, bypassing
+# dmix and PulseAudio resampling.  Delete this file to regenerate.
+pcm.!default {
+    type plug
+    slave.pcm "hw:Headphones,0"
+}
+ctl.!default {
+    type hw
+    card Headphones
+}
+ASOUNDRC
+        echo " ALSA config written to ~/.asoundrc (bcm2835 headphone, direct hw access)."
+    fi
+
+    # 7. Move USB and Ethernet IRQs off CPU0 so they do not compete with the
+    #    audio DMA interrupt.  Pi 4 DWC2/xhci IRQs default to CPU0.
+    #    IRQ numbers vary per kernel; find them by subsystem name.
+    for _irq_name in xhci_hcd dwc2 smsc95xx eth0; do
+        _irq_num=$(grep -r "$_irq_name" /proc/irq/*/node 2>/dev/null | head -1 | cut -d/ -f4)
+        if [[ -n "$_irq_num" && -f "/proc/irq/$_irq_num/smp_affinity_list" ]]; then
+            echo 1 | sudo tee "/proc/irq/$_irq_num/smp_affinity_list" \
+                >/dev/null 2>&1 || true
+        fi
+    done
 fi
 
 # ── 4. Pin Python version — install automatically if missing ──────────────────
@@ -313,4 +364,13 @@ if [ -f "$ASIO_DLL" ]; then
 fi
 
 # ── 7. Launch ──────────────────────────────────────────────────────────────────
-uv run python "$SCRIPT_DIR/main.py"
+# On ARM: run with elevated priority so the Python process and its audio
+# thread compete less with kernel housekeeping tasks.
+# nice -n -10 requires no special privileges (user can lower by up to 20 on
+# Linux). The audio callback further promotes itself to SCHED_FIFO inside
+# synth_engine._elevate_audio_priority().
+if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
+    nice -n -10 uv run python "$SCRIPT_DIR/main.py"
+else
+    uv run python "$SCRIPT_DIR/main.py"
+fi
