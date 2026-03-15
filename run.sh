@@ -146,40 +146,45 @@ if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
     #    (unlimited) so the audio callback is never throttled mid-buffer.
     sudo sysctl -q kernel.sched_rt_runtime_us=-1 2>/dev/null || true
 
-    # 5. Silence PulseAudio for this session. PulseAudio inserts itself as the
-    #    ALSA default device and adds its own resampler + jitter buffer, causing
-    #    artifacts and preventing PortAudio from opening the hardware directly.
-    #    We suspend rather than kill so the user's desktop audio resumes after.
-    if command -v pactl &>/dev/null; then
-        pactl suspend-sink   0 2>/dev/null || true
-        pactl suspend-source 0 2>/dev/null || true
+    # 5. Kill PulseAudio completely for this session.
+    #    PulseAudio inserts itself as the ALSA default device and adds its own
+    #    resampler + jitter buffer; this causes severe audio artifacts and
+    #    prevents PortAudio from opening the bcm2835 hardware directly.
+    #    pactl suspend only pauses sinks but leaves PA running and able to
+    #    reclaim the device. pulseaudio --kill terminates it outright.
+    #    Masking the socket stops auto-respawn for the rest of this session.
+    if command -v pulseaudio &>/dev/null; then
+        pulseaudio --kill 2>/dev/null || true
+        systemctl --user stop  pulseaudio.socket pulseaudio.service 2>/dev/null || true
+        systemctl --user mask  pulseaudio.socket pulseaudio.service 2>/dev/null || true
+        # Wait briefly to ensure PA has released the ALSA device before we open it.
+        sleep 0.5
     fi
-    # Some Bullseye images run PulseAudio as a user service; stop it for the
-    # duration so PortAudio gets direct ALSA hw: access.
-    systemctl --user stop pulseaudio.socket pulseaudio.service 2>/dev/null || true
 
-    # 6. Write an ALSA config that points the default PCM directly at the
-    #    bcm2835 headphone device (card 0, device 0) at 48000 Hz with S16_LE.
-    #    This prevents dmix/PulseAudio resampling and lets PortAudio negotiate
-    #    the buffer size directly with the driver.
-    #    Only written once; delete ~/.asoundrc to regenerate.
+    # 6. Detect bcm2835 headphone card index and write ~/.asoundrc so that
+    #    the ALSA "default" PCM points directly at the hardware device.
+    #    This is rewritten on every launch so a stale file cannot cause problems.
+    _HEADPHONE_CARD=$(aplay -l 2>/dev/null \
+        | grep -i "bcm2835 Headphones" \
+        | head -1 \
+        | sed 's/card \([0-9]*\):.*/\1/')
+    # Fallback: if not found by name, use card 1 (typical Pi 4 layout).
+    _HEADPHONE_CARD="${_HEADPHONE_CARD:-1}"
     _ASOUNDRC="$HOME/.asoundrc"
-    if [[ ! -f "$_ASOUNDRC" ]]; then
-        cat > "$_ASOUNDRC" <<'ASOUNDRC'
-# Acordes ALSA config for Raspberry Pi bcm2835 headphone jack.
-# Routes the default PCM directly to the hardware device, bypassing
-# dmix and PulseAudio resampling.  Delete this file to regenerate.
+    cat > "$_ASOUNDRC" <<ASOUNDRC
+# Acordes ALSA config - auto-generated each launch by run.sh
+# Routes default PCM directly to the bcm2835 headphone jack (card ${_HEADPHONE_CARD})
+# bypassing dmix and PulseAudio.  Run run.sh again to regenerate.
 pcm.!default {
     type plug
-    slave.pcm "hw:Headphones,0"
+    slave.pcm "hw:${_HEADPHONE_CARD},0"
 }
 ctl.!default {
     type hw
-    card Headphones
+    card ${_HEADPHONE_CARD}
 }
 ASOUNDRC
-        echo " ALSA config written to ~/.asoundrc (bcm2835 headphone, direct hw access)."
-    fi
+    echo " ALSA default -> bcm2835 headphone jack (card ${_HEADPHONE_CARD})"
 
     # 7. Move USB and Ethernet IRQs off CPU0 so they do not compete with the
     #    audio DMA interrupt.  Pi 4 DWC2/xhci IRQs default to CPU0.

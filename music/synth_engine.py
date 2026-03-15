@@ -637,6 +637,23 @@ class SynthEngine:
                                 device_index = default_dev
                         except Exception:
                             pass  # Fall through to OS default if lookup fails
+                elif self._IS_ARM:
+                    # On ARM with no explicit device configured, scan for the
+                    # bcm2835 headphone device by name instead of using the ALSA
+                    # "default". The ALSA default can be PulseAudio or HDMI,
+                    # both of which add resampling and latency.  Going directly
+                    # to the hardware device avoids that entire routing layer.
+                    device_index = self._find_arm_headphone_device()
+                    if device_index is not None:
+                        print(f"[audio] ARM: selected device index {device_index} "
+                              f"({sd.query_devices(device_index)['name']})", flush=True)
+                    else:
+                        print("[audio] ARM: bcm2835 headphone device not found, using ALSA default", flush=True)
+
+                # ARM: use an explicit numeric latency that matches the buffer
+                # size so PortAudio doesn't add a second layer of buffering on
+                # top of our blocksize.  'high' is vague and driver-dependent.
+                _latency = (self.buffer_size / self.sample_rate) if self._IS_ARM else 'low'
                 self.stream = sd.OutputStream(
                     samplerate=self.sample_rate,
                     blocksize=self.buffer_size,
@@ -644,9 +661,7 @@ class SynthEngine:
                     channels=2,
                     dtype=self._output_dtype,
                     callback=self._audio_callback,
-                    # ARM: 'high' latency tells PortAudio to add extra buffering so
-                    # the bcm2835 headphone driver does not underrun on the Pi.
-                    latency='high' if self._IS_ARM else 'low',
+                    latency=_latency,
                 )
                 self.stream.start()
                 self.running = True
@@ -666,6 +681,26 @@ class SynthEngine:
             except Exception as e:
                 print(f"Audio initialization failed: {e}")
                 self.running = False
+
+    def _find_arm_headphone_device(self) -> Optional[int]:
+        """Scan the sounddevice device list for the bcm2835 headphone output.
+
+        Returns the device index of the first output device whose name contains
+        'Headphones' or 'bcm2835' (case-insensitive), or None if not found.
+        Used on ARM so we bypass the ALSA default which may route through
+        PulseAudio, adding resampling and latency artefacts.
+        """
+        try:
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if dev['max_output_channels'] < 1:
+                    continue
+                name = dev.get('name', '').lower()
+                if 'headphones' in name or ('bcm2835' in name and 'hdmi' not in name):
+                    return i
+        except Exception:
+            pass
+        return None
 
     def _elevate_audio_priority(self):
         """Raise process/thread scheduling priority so the PortAudio callback
@@ -1846,6 +1881,11 @@ class SynthEngine:
 
     def _audio_callback(self, outdata, frame_count, time, status):
         try:
+            # Log driver-level underruns/overruns on ARM so we can diagnose
+            # audio quality problems without needing external tools.
+            if status and self._IS_ARM:
+                print(f"[audio] xrun: {status}", flush=True)
+
             # Output initial silence for ~50ms after startup to avoid filter transients
             if self._startup_silence_samples > 0:
                 outdata.fill(0)
