@@ -360,6 +360,11 @@ class SynthEngine:
         self.buffer_size = max(2048, buffer_size) if self._IS_ARM else buffer_size
         # ARM: 4 voices fit comfortably within Pi 4 single-core budget; 8 saturate it.
         self.num_voices = 4 if self._IS_ARM else 8
+        # ARM: use int16 output (matches bcm2835 S16_LE native format). This moves
+        # the float32->int16 conversion into numpy inside the callback instead of
+        # leaving it to PortAudio/ALSA, which reduces DMA bandwidth and removes a
+        # driver-side conversion pass. Desktop stays on float32 for full precision.
+        self._output_dtype = 'int16' if self._IS_ARM else 'float32'
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
         # -2 = System Default (None passed to sounddevice — OS chooses the output)
@@ -632,7 +637,7 @@ class SynthEngine:
                     blocksize=self.buffer_size,
                     device=device_index,
                     channels=2,
-                    dtype='float32',
+                    dtype=self._output_dtype,
                     callback=self._audio_callback,
                     # ARM: 'high' latency tells PortAudio to add extra buffering so
                     # the bcm2835 headphone driver does not underrun on the Pi.
@@ -2398,8 +2403,15 @@ class SynthEngine:
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
-            outdata[:, 0] = clipped_l
-            outdata[:, 1] = clipped_r
+            if self._output_dtype == 'int16':
+                # Convert float32 [-1.0, 1.0] to int16 [-32767, 32767] directly
+                # in numpy. This is faster than letting PortAudio/ALSA do the
+                # same conversion inside the driver on every DMA transfer.
+                outdata[:, 0] = (clipped_l * 32767.0).astype(np.int16)
+                outdata[:, 1] = (clipped_r * 32767.0).astype(np.int16)
+            else:
+                outdata[:, 0] = clipped_l
+                outdata[:, 1] = clipped_r
         except Exception:
             import traceback; traceback.print_exc()
             outdata.fill(0)
