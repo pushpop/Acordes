@@ -189,10 +189,13 @@ if [ ! -d "$VENV_DIR" ]; then
         # uv pip for everything else.
         uv venv --seed --quiet   # --seed includes pip in the venv
         echo " ARM: installing scipy/numpy from piwheels (pre-built wheels)..."
+        # Pin numpy<2.0 and scipy<1.14: piwheels 2.x wheels require glibc 2.34
+        # (Debian 12 Bookworm), but Raspbian 11 (Bullseye) only has glibc 2.31.
+        # numpy 1.26.4 and scipy 1.13.x are the last releases built for glibc 2.31.
         "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
-            "numpy>=1.24.0" "scipy>=1.10.0" || {
+            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" || {
                 echo " ERROR: scipy/numpy install failed."
                 exit 1
             }
@@ -250,10 +253,12 @@ else
         # ARM: ensure pip is available (venv may have been created without --seed),
         # then use it for scipy/numpy so piwheels wheels are used, not PyPI sdists.
         uv pip install pip --python "$VENV_DIR/bin/python" --quiet || true
+        # Pin numpy<2.0 and scipy<1.14: piwheels 2.x wheels require glibc 2.34
+        # (Debian 12 Bookworm), but Raspbian 11 (Bullseye) only has glibc 2.31.
         "$VENV_DIR/bin/pip" install --quiet \
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
-            "numpy>=1.24.0" "scipy>=1.10.0" || {
+            "numpy>=1.24.0,<2.0" "scipy>=1.10.0,<1.14.0" || {
                 echo " ERROR: scipy/numpy install from piwheels failed."
                 exit 1
             }
