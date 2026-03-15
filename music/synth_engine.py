@@ -641,6 +641,17 @@ class SynthEngine:
         self.ENABLE_CHORUS = not self._IS_ARM
         self.ENABLE_DELAY  = not self._IS_ARM
 
+        # ── ARM diagnostic counters ────────────────────────────────────────────
+        # Accumulate xrun and slow-callback events instead of printing from the
+        # audio thread. print() grabs the GIL and can itself trigger more xruns.
+        # get_arm_diagnostics() exposes these for the UI to read safely.
+        if self._IS_ARM:
+            import time as _arm_time_mod
+            self._perf_counter     = _arm_time_mod.perf_counter
+            self._arm_xrun_count   = 0   # driver xrun events
+            self._arm_slow_cb_count = 0  # callbacks that used >50% of deadline
+            self._arm_cb_count     = 0   # total callbacks processed
+
         self.voices: List[Voice] = [Voice(self.sample_rate, i) for i in range(self.num_voices)]
         self.held_notes: set = set()
         self.midi_event_queue = queue.Queue()
@@ -2024,17 +2035,20 @@ class SynthEngine:
 
     def _audio_callback(self, outdata, frame_count, time, status):
         try:
-            # Log driver-level underruns/overruns on ARM so we can diagnose
-            # audio quality problems without needing external tools.
+            # Count driver-level underruns/overruns without printing. print()
+            # from the audio thread grabs the GIL and can itself cause more xruns.
             if status and self._IS_ARM:
-                print(f"[audio] xrun: {status}", flush=True)
+                self._arm_xrun_count += 1
 
-            # ARM timing probe: measure actual callback duration every 50 calls.
-            # Prints a warning when the callback takes more than half the deadline
-            # so we can identify which section is the bottleneck.
+            # ARM timing probe: sample every 500 callbacks (~23 s at 2048/44100).
+            # Probing every call adds measurable overhead; sparse sampling is enough
+            # to track whether the engine is staying within budget.
+            _arm_probe = False
             if self._IS_ARM:
-                import time as _t
-                _cb_t0 = _t.perf_counter()
+                self._arm_cb_count += 1
+                if self._arm_cb_count % 500 == 0:
+                    _arm_probe = True
+                    _cb_t0 = self._perf_counter()
 
             # Output initial silence for ~50ms after startup to avoid filter transients
             if self._startup_silence_samples > 0:
@@ -2601,12 +2615,11 @@ class SynthEngine:
             outdata[:, 0] = clipped_l
             outdata[:, 1] = clipped_r
 
-            if self._IS_ARM:
-                _cb_ms = (_t.perf_counter() - _cb_t0) * 1000.0
+            if _arm_probe:
+                _cb_ms = (self._perf_counter() - _cb_t0) * 1000.0
                 _deadline_ms = frame_count / self.sample_rate * 1000.0
-                # Print every slow callback so we know what is eating the budget.
                 if _cb_ms > _deadline_ms * 0.5:
-                    print(f"[audio] slow callback: {_cb_ms:.1f}ms / {_deadline_ms:.1f}ms deadline", flush=True)
+                    self._arm_slow_cb_count += 1
         except Exception:
             import traceback; traceback.print_exc()
             outdata.fill(0)
@@ -2738,6 +2751,15 @@ class SynthEngine:
             'params': params,
         })
 
+    def get_arm_diagnostics(self):
+        """Return ARM audio health counters as (xruns, slow_callbacks, total_callbacks).
+
+        All values are zero on non-ARM platforms. Safe to call from the UI thread.
+        """
+        if not self._IS_ARM:
+            return (0, 0, 0)
+        return (self._arm_xrun_count, self._arm_slow_cb_count, self._arm_cb_count)
+
     def close(self):
         self.running = False
         if self.stream:
@@ -2747,4 +2769,19 @@ class SynthEngine:
     def is_available(self) -> bool: return AUDIO_AVAILABLE and self.running
 
     def warm_up(self):
-        if self.is_available(): self.note_on(0, 1); self.note_off(0)
+        if not self.is_available():
+            return
+        if self._IS_ARM:
+            import time as _time
+            # Pre-heat all voice code paths so the user's first note plays
+            # without a stutter. On ARM, first-run numpy/scipy setup adds
+            # 50-100 ms per voice. Cycling through all voices at very low
+            # velocity here forces that work to happen before the UI loads.
+            for i in range(self.num_voices):
+                self.note_on(60 + i, 8)
+            _time.sleep(0.30)   # ~6 buffers at 2048/44100 = ~276 ms budget
+            self.all_notes_off()
+            _time.sleep(0.08)   # let release tails drain
+        else:
+            self.note_on(60, 1)
+            self.note_off(60)

@@ -64,10 +64,10 @@ class MainMenuMode(Vertical):
     def on_mode_resume(self) -> None:
         """Called by MainScreen when showing this cached mode again.
 
-        Re-focuses the first button so keyboard navigation works immediately
-        after returning from another mode.
+        Defers focus to after Textual re-renders the widget; calling focus()
+        synchronously while display is toggling can be silently dropped.
         """
-        self.query_one("#piano_button").focus()
+        self.set_timer(0.05, lambda: self.query_one("#piano_button").focus())
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events."""
