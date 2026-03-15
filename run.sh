@@ -390,23 +390,28 @@ if [ -f "$ASIO_DLL" ]; then
     fi
 fi
 
-# ── 7. Color system ────────────────────────────────────────────────────────────
+# ── 7. Color system + SSH responsiveness ──────────────────────────────────────
 # Textual detects terminal color depth from COLORTERM and terminfo. On ARM the
 # detection often falls back to 16-color mode (ANSI colors 0-15), which maps
 # our hex palette to the terminal's own theme colors — producing wrong hues.
 #
-# Fix per terminal type:
-#   SSH sessions   : force truecolor. Modern SSH clients (Windows Terminal,
-#                    PowerShell, iTerm2) support 24-bit color but do not always
-#                    forward COLORTERM to the remote session.
-#   Framebuffer TTY: force 256-color. Raw kernel/TFT framebuffer consoles cannot
+# Color fix per terminal type:
+#   SSH sessions   : 256-color mode. Truecolor escape codes are ~16 bytes per
+#                    color vs ~8 bytes for 256-color, doubling the render bytes
+#                    sent over the wire per frame. 256-color is visually
+#                    indistinguishable on the Pi palette and halves SSH traffic.
+#   Framebuffer TTY: 256-color. Raw kernel/TFT framebuffer consoles cannot
 #                    render 24-bit color but do honor xterm-256 escape codes.
-#                    256-color is far more consistent than 16-color.
+#
+# SSH responsiveness: cap Textual's frame rate to 30 fps over SSH. The default
+# 60 fps sends twice as many render frames per second over the network; 30 fps
+# is imperceptible on a TUI and halves the ongoing SSH bandwidth.
 #
 # Desktop builds leave these unset so Textual auto-detects normally.
 if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
     if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
-        export COLORTERM=truecolor
+        export TEXTUAL_COLOR_SYSTEM=256
+        export TEXTUAL_FPS=30
     elif [[ "$(tty 2>/dev/null)" == /dev/tty* ]]; then
         export TEXTUAL_COLOR_SYSTEM=256
     fi
