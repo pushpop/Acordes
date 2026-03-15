@@ -100,6 +100,7 @@ if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
             sudo apt-get install -y \
                 libasound2-dev libjack-jackd2-dev ninja-build libffi-dev \
                 gfortran python3-dev \
+                libopenblas0 \
                 2>&1 | grep -v "^Reading\|^Building\|^Hit" || true
             echo ""
         fi
@@ -209,8 +210,6 @@ if [ ! -d "$VENV_DIR" ]; then
                 echo " ERROR: Dependency installation failed."
                 exit 1
             }
-        # Install the app itself without re-resolving dependencies.
-        uv pip install --python "$VENV_DIR/bin/python" --no-deps -e . --quiet || true
         echo ""
     else
         # ── Desktop install path (Windows / macOS / x86 Linux) ────────────────
@@ -269,7 +268,6 @@ else
                 echo " ERROR: Dependency update failed."
                 exit 1
             }
-        uv pip install --python "$VENV_DIR/bin/python" --no-deps -e . --quiet || true
     else
         if ! uv sync --quiet 2>/dev/null; then
             echo ""

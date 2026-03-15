@@ -4,7 +4,7 @@ version = "1.8.0"
 description = "A professional polyphonic MIDI synthesizer and piano TUI application"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Jorge" }]
 keywords = ["midi", "synthesizer", "piano", "tui", "music"]
 
@@ -18,6 +18,12 @@ dependencies = [
     "sounddevice>=0.4.6",
     "scipy>=1.10.0",
 ]
+
+[tool.setuptools]
+# Acordes is a runnable script, not an installable library.
+# Explicitly set empty packages to prevent setuptools auto-discovery
+# from failing on our flat multi-directory layout.
+packages = []
 
 [tool.uv]
 # python-rtmidi uses meson-python which needs system ninja. Disabling
