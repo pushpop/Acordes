@@ -352,11 +352,12 @@ class SynthEngine:
 
     def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None):
         self.sample_rate = 48000
-        # ARM: use a larger buffer (2048 samples = ~43ms) to give the bcm2835
-        # headphone driver and Pi CPU enough headroom between callbacks.
-        # 960 (20ms) was too tight for the Pi's PWM audio and caused xruns.
-        # Desktop default stays at 480 (10ms).
-        self.buffer_size = 2048 if self._IS_ARM else buffer_size
+        # ARM: enforce a minimum buffer of 2048 samples (~43ms at 48kHz) to give
+        # the bcm2835 headphone driver and Pi CPU enough headroom between callbacks.
+        # The user-configured value from config is respected if it is larger, so
+        # values like 4096 chosen in the config screen are honoured on ARM too.
+        # Desktop uses the config value directly (default 480 = 10ms).
+        self.buffer_size = max(2048, buffer_size) if self._IS_ARM else buffer_size
         # ARM: 4 voices fit comfortably within Pi 4 single-core budget; 8 saturate it.
         self.num_voices = 4 if self._IS_ARM else 8
         self.stream = None

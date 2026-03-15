@@ -1,6 +1,7 @@
 """Configuration file management."""
 import json
 import os
+import platform
 import sys
 from pathlib import Path
 from typing import Optional
@@ -40,7 +41,7 @@ class ConfigManager:
             "audio_device_index": None,   # sounddevice output device index (None = not yet chosen)
             "audio_device_name": None,    # Human-readable name for display
             "audio_backend": None,        # Host API name filter (None = not yet chosen)
-            "buffer_size": 1024,          # Audio buffer size in samples
+            "buffer_size": 2048 if platform.machine() in ("armv7l", "aarch64") else 1024,  # Audio buffer size in samples
         }
 
     def save_config(self):

@@ -1,6 +1,7 @@
 # ABOUTME: Configuration screen for audio backend, audio device, buffer size, MIDI input, and velocity curve.
 # ABOUTME: Appears on first launch or when user presses C from the main app.
 """Audio backend, audio device, buffer size, MIDI device, and velocity curve configuration screen."""
+import platform
 from textual.screen import Screen
 from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Header, Footer, Static, ListView, ListItem, Label
@@ -194,9 +195,11 @@ class ConfigMode(Screen):
     }
     """
 
-    # Buffer sizes offered in the UI with their sample counts.
-    # Each entry is (samples, latency_ms_at_48k) — latency shown as a hint.
-    BUFFER_SIZES = [128, 256, 480, 512, 1024, 2048]
+    # Buffer sizes offered in the UI. ARM (bcm2835 headphone jack) needs at
+    # least 2048 to avoid xruns; the engine clamps any lower value to 2048.
+    # Desktop supports smaller buffers for lower latency.
+    _IS_ARM = platform.machine() in ("armv7l", "aarch64")
+    BUFFER_SIZES = [2048, 4096] if _IS_ARM else [128, 256, 480, 512, 1024, 2048]
 
     def __init__(
         self,
@@ -475,7 +478,16 @@ class ConfigMode(Screen):
         size = self.pending_buffer_size
         sample_rate = 48000
         latency_ms = (size / sample_rate) * 1000
-        label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [check console if ASIO4ALL shows different size]")
+        if self._IS_ARM:
+            # Show the effective size the engine will actually use (min 2048 on ARM).
+            effective = max(2048, size)
+            effective_ms = (effective / sample_rate) * 1000
+            if effective != size:
+                label.update(f"Selected: {size}  ->  effective: {effective} samples ({effective_ms:.1f} ms)  [ARM minimum]")
+            else:
+                label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
+        else:
+            label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [check console if ASIO4ALL shows different size]")
 
     # ── MIDI Device ──────────────────────────────────────────────────────────
 
