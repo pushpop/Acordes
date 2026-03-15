@@ -183,9 +183,6 @@ class MainScreen(Screen):
         align: center middle;
     }
 
-    #content-area > .mode-mounting {
-        display: none;
-    }
 
     #synth-help-bar {
         width: 100%;
@@ -348,17 +345,8 @@ class MainScreen(Screen):
         # DEFER all heavy widget operations to prevent audio thread blocking
         def mount_new_mode():
             """Mount new mode and update UI non-blockingly."""
-            # Create and mount the new mode widget
             mode_widget = create_fn()
-            # Hide mode during mounting to prevent cascading widget render artifacts
-            mode_widget.add_class("mode-mounting")
             content.mount(mode_widget)
-
-            # Reveal the mode after it's fully composed
-            def show_mode():
-                mode_widget.remove_class("mode-mounting")
-
-            self.call_later(show_mode)
 
             # Give focus to the mounted mode if it supports focus (for BINDINGS to work)
             if hasattr(mode_widget, 'can_focus') and mode_widget.can_focus:
