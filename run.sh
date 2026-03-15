@@ -247,13 +247,40 @@ if [ ! -d "$VENV_DIR" ]; then
     echo " Done."
     echo ""
 else
-    # .venv exists — sync silently to pick up any new dependencies
-    if ! uv sync --quiet 2>/dev/null; then
-        echo ""
-        echo " ERROR: Dependency sync failed."
-        echo " Run manually for details:  uv sync"
-        echo ""
-        exit 1
+    # .venv exists — pick up any new dependencies added since last run.
+    if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
+        # ARM: uv sync uses the PyPI lockfile which has no armv7l wheels for
+        # numpy/scipy. Use uv pip install with piwheels instead (cached after
+        # first install, so this is near-instant on subsequent runs).
+        uv pip install \
+            --python "$VENV_DIR/bin/python" \
+            --index-url https://www.piwheels.org/simple \
+            --extra-index-url https://pypi.org/simple \
+            --no-build-isolation-package python-rtmidi \
+            --prefer-binary \
+            "textual>=0.75.0" \
+            "mido>=1.3.0" \
+            "python-rtmidi>=1.4.0" \
+            "mingus>=0.6.1" \
+            "numpy>=1.24.0" \
+            "sounddevice>=0.4.6" \
+            "scipy>=1.10.0" \
+            "meson-python" \
+            --quiet || {
+                echo ""
+                echo " ERROR: Dependency update failed."
+                echo ""
+                exit 1
+            }
+        uv pip install --python "$VENV_DIR/bin/python" --no-deps -e . --quiet || true
+    else
+        if ! uv sync --quiet 2>/dev/null; then
+            echo ""
+            echo " ERROR: Dependency sync failed."
+            echo " Run manually for details:  uv sync"
+            echo ""
+            exit 1
+        fi
     fi
 fi
 
