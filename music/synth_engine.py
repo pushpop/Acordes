@@ -1610,7 +1610,7 @@ class SynthEngine:
             b_dc = np.array([1.0, -1.0])
             a_dc = np.array([1.0, -coeff])
             if voice._arm_dcblock_zi is None:
-                voice._arm_dcblock_zi = np.array([[-voice.dc_blocker_x + coeff * voice.dc_blocker_y]])
+                voice._arm_dcblock_zi = np.array([-voice.dc_blocker_x + coeff * voice.dc_blocker_y])
             filtered, zf = self._scipy_lfilter(b_dc, a_dc, samples.astype(np.float64),
                                                zi=voice._arm_dcblock_zi)
             voice._arm_dcblock_zi = zf
