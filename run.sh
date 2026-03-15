@@ -364,13 +364,7 @@ if [ -f "$ASIO_DLL" ]; then
 fi
 
 # ── 7. Launch ──────────────────────────────────────────────────────────────────
-# On ARM: run with elevated priority so the Python process and its audio
-# thread compete less with kernel housekeeping tasks.
-# nice -n -10 requires no special privileges (user can lower by up to 20 on
-# Linux). The audio callback further promotes itself to SCHED_FIFO inside
-# synth_engine._elevate_audio_priority().
-if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
-    nice -n -10 uv run python "$SCRIPT_DIR/main.py"
-else
-    uv run python "$SCRIPT_DIR/main.py"
-fi
+# The audio callback promotes itself to SCHED_FIFO real-time scheduling
+# inside synth_engine._elevate_audio_priority() — no process-level nice
+# adjustment needed here (and negative nice requires root on Linux).
+uv run python "$SCRIPT_DIR/main.py"
