@@ -194,7 +194,6 @@ if [ ! -d "$VENV_DIR" ]; then
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
             --no-build-isolation-package python-rtmidi \
-            --prefer-binary \
             "textual>=0.75.0" \
             "mido>=1.3.0" \
             "python-rtmidi>=1.4.0" \
@@ -257,7 +256,6 @@ else
             --index-url https://www.piwheels.org/simple \
             --extra-index-url https://pypi.org/simple \
             --no-build-isolation-package python-rtmidi \
-            --prefer-binary \
             "textual>=0.75.0" \
             "mido>=1.3.0" \
             "python-rtmidi>=1.4.0" \
