@@ -411,6 +411,15 @@ class SynthMode(Widget):
         self._noise_repeat_count = 0  # How many times adjusted in sequence
         self._NOISE_REPEAT_THRESHOLD = 0.15  # 150ms threshold for "held" detection
 
+        # CC UI refresh debounce: audio updates immediately on every CC message,
+        # but UI redraws and disk saves are batched to fire once after knob activity
+        # stops. On ARM, SD card writes and full widget redraws on every CC message
+        # cause severe lag (30-40 writes/redraws per poll tick at high knob speed).
+        import platform as _plat_cc
+        self._cc_refresh_interval = 0.06 if _plat_cc.machine() in ("armv7l", "aarch64") else 0.02
+        self._cc_refresh_timer = None     # pending deferred-refresh timer handle
+        self._cc_pending_section = None   # section that needs label redraw
+
         # Widget references for live updates
         self.waveform_display       = None
         self.waveform_shape_display = None
@@ -880,14 +889,14 @@ class SynthMode(Widget):
                         else:
                             param_value = min_val + cc_normalized * (max_val - min_val)
 
-                    # Update and refresh
+                    # Immediate: update audio engine state (no UI redraw yet).
+                    # The deferred refresh below will update all displays once
+                    # knob activity settles, avoiding repeated full redraws.
                     if param_name is not None and param_value is not None:
                         setattr(self, param_name, param_value)
                         self._push_params_to_engine()
-                        self._refresh_all_displays()
-                        self._redraw_param_labels(self._focus_section)
-                        self._mark_dirty()
-                        self._autosave_state()
+                        self._cc_pending_section = self._focus_section
+                        self._schedule_cc_ui_refresh()
             return  # Done with focus mode CC 75
 
         # Normal CC mapping from cc_mappings.json
@@ -907,17 +916,38 @@ class SynthMode(Widget):
             # Linear scale for all other parameters
             param_value = min_val + cc_normalized * (max_val - min_val)
 
-        # Update the UI state, push to engine, and refresh all display widgets
+        # Immediate: update audio engine state only; UI refresh is deferred.
         setattr(self, param_name, param_value)
         self._push_params_to_engine()
-        self._refresh_all_displays()
-        self._mark_dirty()
-        self._autosave_state()
+        self._schedule_cc_ui_refresh()
 
         # CC 1 (modulation) also historically updates the synth_engine directly
         # Keep this for backward compatibility with existing modulation handling
         if controller == 1:
             self.synth_engine.modulation_change(value)
+
+    def _schedule_cc_ui_refresh(self):
+        """Cancel any pending deferred CC refresh and schedule a new one.
+
+        This is the debounce mechanism: rapid CC messages (e.g. a fast knob
+        sweep) all update the audio engine immediately, but the expensive UI
+        redraw and disk save only fire once, after the knob stops moving.
+        """
+        if self._cc_refresh_timer is not None:
+            self._cc_refresh_timer.stop()
+        self._cc_refresh_timer = self.set_timer(
+            self._cc_refresh_interval, self._deferred_cc_ui_refresh
+        )
+
+    def _deferred_cc_ui_refresh(self):
+        """Perform the UI redraw and disk save that was deferred during CC input."""
+        self._cc_refresh_timer = None
+        self._refresh_all_displays()
+        if self._cc_pending_section is not None:
+            self._redraw_param_labels(self._cc_pending_section)
+            self._cc_pending_section = None
+        self._mark_dirty()
+        self._autosave_state()
 
     # ── Focus / navigation ────────────────────────────────────────
 
