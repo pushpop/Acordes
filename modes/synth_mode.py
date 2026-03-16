@@ -420,6 +420,14 @@ class SynthMode(Widget):
         self._cc_refresh_timer = None     # pending deferred-refresh timer handle
         self._cc_pending_section = None   # section that needs label redraw
 
+        # WASD navigation accumulator: rapid keypresses build up a delta then
+        # _apply_wasd_nav fires once per burst, calling _set_focus N times
+        # synchronously so Textual batches all label updates into one render.
+        self._wasd_hdelta: int = 0        # accumulated A/D column moves
+        self._wasd_vdelta: int = 0        # accumulated W/S row moves
+        self._wasd_timer = None           # pending navigation timer handle
+        self._wasd_interval: float = 0.040 if _plat_cc.machine() in ("armv7l", "aarch64") else 0.016
+
         # Dirty tracking for _refresh_all_displays: stores the last string value
         # sent to each display widget. _update_display skips the .update() call
         # when the formatted value has not changed, avoiding unnecessary Textual
@@ -1086,27 +1094,64 @@ class SynthMode(Widget):
                 # First entry: start at first section, first parameter
                 self._set_focus(_SECTION_GRID[0][0], 0)
 
-    # ── WASD — focus-only navigation (silently ignored when unfocused) ────
+    # ── WASD — focus-only navigation with input coalescing ────────────────
+    # Rapid keypresses accumulate into _wasd_hdelta/_wasd_vdelta.
+    # _apply_wasd_nav fires once per burst and calls the nav actions
+    # synchronously so Textual batches all _redraw_param_labels calls
+    # into a single render pass instead of one render per keypress.
 
     def action_focus_nav_up(self):
         """W — move highlight up within focused section (focus mode only)."""
         if self._focused():
-            self.action_nav_up()
+            self._wasd_vdelta -= 1
+            self._schedule_wasd_nav()
 
     def action_focus_nav_down(self):
         """S — move highlight down within focused section (focus mode only)."""
         if self._focused():
-            self.action_nav_down()
+            self._wasd_vdelta += 1
+            self._schedule_wasd_nav()
 
     def action_focus_nav_left(self):
         """A — move to section on the left (focus mode only)."""
         if self._focused():
-            self.action_nav_left()
+            self._wasd_hdelta -= 1
+            self._schedule_wasd_nav()
 
     def action_focus_nav_right(self):
         """D — move to section on the right (focus mode only)."""
         if self._focused():
-            self.action_nav_right()
+            self._wasd_hdelta += 1
+            self._schedule_wasd_nav()
+
+    def _schedule_wasd_nav(self) -> None:
+        """Cancel any pending WASD timer and reschedule it."""
+        if self._wasd_timer is not None:
+            self._wasd_timer.stop()
+        self._wasd_timer = self.set_timer(self._wasd_interval, self._apply_wasd_nav)
+
+    def _apply_wasd_nav(self) -> None:
+        """Apply all accumulated WASD moves as a single synchronous burst.
+
+        Because all calls to action_nav_* happen in the same event-loop tick
+        (this timer callback), Textual coalesces the resulting widget dirty marks
+        into one render frame instead of one render per keypress.
+        """
+        self._wasd_timer = None
+        h = self._wasd_hdelta
+        v = self._wasd_vdelta
+        self._wasd_hdelta = 0
+        self._wasd_vdelta = 0
+        for _ in range(abs(h)):
+            if h > 0:
+                self.action_nav_right()
+            else:
+                self.action_nav_left()
+        for _ in range(abs(v)):
+            if v > 0:
+                self.action_nav_down()
+            else:
+                self.action_nav_up()
 
     # ── Q / E  →  param_down / param_up (focus mode) ─────────────
     # Legacy unfocused fallback: Q = octave down, E = cutoff up.

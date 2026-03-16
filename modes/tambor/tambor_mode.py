@@ -742,12 +742,8 @@ class TamborMode(Vertical):
         # Pre-render all drum sounds in a background thread to avoid blocking UI
         threading.Thread(target=self._preload_drums, daemon=True).start()
 
-        # Start the update timer for sequencer playback
-        # Update 10x per second (100ms interval) to check for step advancement
-        self._update_timer_handle = self.set_interval(
-            0.05,  # 50ms interval for better precision and smoother playback
-            self._update_sequencer
-        )
+        # Update timer starts only when playback is active (stopped at mount time).
+        # _start_update_timer() is called by action_toggle_playback when play begins.
 
         # Start the auto-save timer (5-second interval)
         self._auto_save_timer_handle = self.set_interval(
@@ -821,9 +817,11 @@ class TamborMode(Vertical):
         if self.control_panel:
             self.control_panel.refresh_bpm_from_config()
 
-        # Restart the UI update and auto-save timers.
-        self._update_timer_handle = self.set_interval(0.05, self._update_sequencer)
+        # Restart auto-save timer. Update timer only restarts if playback is active
+        # to avoid idle event-loop wakeups when the sequencer is stopped.
         self._auto_save_timer_handle = self.set_interval(5.0, self._auto_save_periodic)
+        if self.playback_state == "PLAYING":
+            self._start_update_timer()
 
     def _preload_drums(self):
         """Pre-render all drum sounds (runs in background thread)."""
@@ -910,6 +908,17 @@ class TamborMode(Vertical):
             # Toggle solo for current drum
             self.action_toggle_solo()
 
+    def _start_update_timer(self) -> None:
+        """Start the sequencer update timer if not already running."""
+        if self._update_timer_handle is None:
+            self._update_timer_handle = self.set_interval(0.05, self._update_sequencer)
+
+    def _stop_update_timer(self) -> None:
+        """Stop the sequencer update timer to avoid idle event-loop wakeups."""
+        if self._update_timer_handle is not None:
+            self._update_timer_handle.stop()
+            self._update_timer_handle = None
+
     def action_toggle_playback(self):
         """Toggle play/stop (space bar).
 
@@ -924,10 +933,14 @@ class TamborMode(Vertical):
             self._trigger_active_drums_for_step(0)
             # Update playhead to show step 0 immediately
             self._update_playhead(0)
+            # Ensure update timer is running for playback polling
+            self._start_update_timer()
         else:
             self.playback_state = "STOPPED"
             self.sequencer.stop()  # Stop and reset to step 0
             self._clear_playhead()
+            # Stop update timer — no polling needed when sequencer is idle
+            self._stop_update_timer()
 
         if self.control_panel:
             self.control_panel.update_state(self.playback_state)
@@ -941,6 +954,8 @@ class TamborMode(Vertical):
         self.playback_state = "STOPPED"
         self.sequencer.stop()
         self._clear_playhead()
+        # Stop update timer — no polling needed when sequencer is idle
+        self._stop_update_timer()
         if self.control_panel:
             self.control_panel.update_state(self.playback_state)
             self.control_panel.update_step(0)
