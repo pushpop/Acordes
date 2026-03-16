@@ -1,4 +1,5 @@
-"""Main Menu Mode for Acordes."""
+# ABOUTME: Main menu mode - displays the five mode selection buttons.
+# ABOUTME: Input coalescing prevents CPU spikes from rapid key repeat on ARM.
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, Horizontal, Center
@@ -6,6 +7,15 @@ from textual.widgets import Button, Static, Label
 from textual.widget import Widget
 from textual import events
 from components.header_widget import HeaderWidget
+
+# Ordered list of button IDs matching left-to-right layout.
+_BUTTON_IDS = [
+    "piano_button",
+    "compendium_button",
+    "synth_button",
+    "metronome_button",
+    "tambor_button",
+]
 
 class MainMenuMode(Vertical):
     """A widget to display the main menu."""
@@ -44,6 +54,11 @@ class MainMenuMode(Vertical):
     def __init__(self, main_screen, **kwargs):
         super().__init__(**kwargs)
         self.main_screen = main_screen
+        # Accumulated navigation delta from rapid keypresses.
+        # Coalesced into a single .focus() call per frame to avoid
+        # queuing multiple CSS-state changes and renders on ARM.
+        self._nav_delta: int = 0
+        self._nav_timer = None
 
     def compose(self) -> ComposeResult:
         """Create the main menu layout."""
@@ -83,12 +98,39 @@ class MainMenuMode(Vertical):
             self.main_screen.action_show_tambor()
 
     def on_key(self, event: events.Key) -> None:
-        """Handle directional keys for focus navigation."""
-        if event.key == "left":
-            self.app.action_focus_previous()
-        elif event.key == "right":
-            self.app.action_focus_next()
-        elif event.key == "up":
-            self.app.action_focus_previous()
-        elif event.key == "down":
-            self.app.action_focus_next()
+        """Handle directional keys with input coalescing.
+
+        Rapid keypresses accumulate into _nav_delta. A short timer fires once
+        per burst and applies all movement as a single .focus() call, producing
+        one CSS state change and one render regardless of how many keys arrived.
+        """
+        if event.key in ("left", "up"):
+            self._nav_delta -= 1
+        elif event.key in ("right", "down"):
+            self._nav_delta += 1
+        else:
+            return
+
+        # Cancel any pending navigation and reschedule.
+        # One frame at 30fps is ~33ms; 40ms gives a small margin.
+        if self._nav_timer is not None:
+            self._nav_timer.stop()
+        self._nav_timer = self.set_timer(0.040, self._apply_nav)
+
+    def _apply_nav(self) -> None:
+        """Apply accumulated navigation delta as a single focus change."""
+        self._nav_timer = None
+        delta = self._nav_delta
+        self._nav_delta = 0
+        if delta == 0:
+            return
+
+        buttons = [self.query_one(f"#{bid}") for bid in _BUTTON_IDS]
+        focused = self.app.focused
+        try:
+            idx = buttons.index(focused)
+        except ValueError:
+            idx = 0
+
+        new_idx = max(0, min(len(buttons) - 1, idx + delta))
+        buttons[new_idx].focus()
