@@ -22,6 +22,8 @@ class MIDIInputHandler:
         self._disconnect_callback: Optional[Callable] = None
         # Optional config_manager reference for velocity curve lookup
         self._config_manager = config_manager
+        # Called on any NOTE_ON to signal user activity (idle detection hook).
+        self._activity_callback: Optional[Callable] = None
 
     def open_device(self, device_name: str) -> bool:
         """Open a MIDI input device.
@@ -115,6 +117,9 @@ class MIDIInputHandler:
         """
         with self.notes_lock:
             self.active_notes.add(note)
+
+        if self._activity_callback:
+            self._activity_callback()
 
         if self._note_on_callback:
             mapped_velocity = velocity

@@ -33,6 +33,10 @@ del _platform
 # Note: On Windows, mido will auto-detect available MIDI backends
 # We don't force a specific backend to avoid DLL issues
 
+import glob
+import platform
+import subprocess
+import time
 from typing import Optional
 
 from textual.app import App
@@ -194,6 +198,80 @@ class CompendiumHelpBar(Static):
         return line1 if not line2 else f"{line1}\n{line2}"
 
 
+class IdleManager:
+    """ABOUTME: Tracks user inactivity and blanks screen + lowers CPU when idle.
+    ABOUTME: ARM-only screen blank via /dev/fb0; CPU governor via cpufreq sysfs."""
+
+    # Default idle timeout in seconds before screen blanks.
+    DEFAULT_TIMEOUT = 300  # 5 minutes
+
+    def __init__(self, timeout: int = DEFAULT_TIMEOUT):
+        self._timeout = timeout
+        self._last_activity = time.monotonic()
+        self._is_idle = False
+        self._is_arm = platform.machine() in ("armv7l", "aarch64")
+
+    def reset(self):
+        """Record user activity and wake up from idle if currently idle."""
+        self._last_activity = time.monotonic()
+        if self._is_idle:
+            self._exit_idle()
+
+    def check(self):
+        """Check whether the idle threshold has been crossed; call periodically."""
+        if self._is_idle:
+            return
+        elapsed = time.monotonic() - self._last_activity
+        if elapsed >= self._timeout:
+            self._enter_idle()
+
+    def _enter_idle(self):
+        """Blank the screen and lower CPU governor."""
+        self._is_idle = True
+        self._blank_display()
+        self._set_governor("powersave")
+
+    def _exit_idle(self):
+        """Restore display and raise CPU governor."""
+        self._is_idle = False
+        self._set_governor("performance")
+        # Textual will re-render into the framebuffer on the next input event.
+
+    def _blank_display(self):
+        """Write zeros to /dev/fb0 to black out the TFT display (ARM only)."""
+        if not self._is_arm:
+            return
+        try:
+            fb_path = "/dev/fb0"
+            with open("/sys/class/graphics/fb0/virtual_size") as f:
+                w, h = map(int, f.read().strip().split(","))
+            with open("/sys/class/graphics/fb0/bits_per_pixel") as f:
+                bpp = int(f.read().strip())
+            with open("/sys/class/graphics/fb0/stride") as f:
+                stride = int(f.read().strip())
+            total_bytes = stride * h
+            with open(fb_path, "wb") as fb:
+                fb.write(b"\x00" * total_bytes)
+        except Exception:
+            # /dev/fb0 not available or permission denied - silently skip.
+            pass
+
+    def _set_governor(self, governor: str):
+        """Write CPU governor to all cores via cpufreq sysfs (best-effort, no sudo)."""
+        if not self._is_arm:
+            return
+        paths = glob.glob(
+            "/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
+        )
+        for path in paths:
+            try:
+                with open(path, "w") as f:
+                    f.write(governor)
+            except Exception:
+                # Permission denied without root - silently skip.
+                pass
+
+
 class MainScreen(Screen):
     """Main screen with split layout."""
 
@@ -285,6 +363,9 @@ class MainScreen(Screen):
         # On ARM, keeping widgets mounted (display toggled) avoids the ~300ms
         # re-creation cost of Textual widget trees on every mode switch.
         self._mode_cache: dict = {}
+        # Idle manager: blanks screen and lowers CPU after inactivity.
+        self._idle_manager = IdleManager()
+        self._idle_check_timer = None
 
     def compose(self):
         """Compose the main screen layout."""
@@ -308,6 +389,21 @@ class MainScreen(Screen):
         """Called when mounted."""
         # Show initial mode
         self.action_show_main_menu(save_history=False)
+        # Check for idle every 30 seconds.
+        self._idle_check_timer = self.set_interval(30, self._on_idle_check)
+        # Register activity hook so MIDI note-on events reset the idle timer.
+        # This is independent of mode callbacks so it survives mode switches.
+        midi_handler = self.app_context.get("midi_handler")
+        if midi_handler is not None:
+            midi_handler._activity_callback = self._idle_manager.reset
+
+    def _on_idle_check(self):
+        """Periodic callback to check idle state and blank screen if needed."""
+        self._idle_manager.check()
+
+    def on_key(self, event) -> None:
+        """Reset idle timer on any keypress."""
+        self._idle_manager.reset()
 
     def _record_history(self):
         """Record current mode to history if it's different from the last entry."""
