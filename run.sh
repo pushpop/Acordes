@@ -412,9 +412,10 @@ fi
 if [[ "$_ARCH" == "armv7l" || "$_ARCH" == "aarch64" ]]; then
     if [[ -n "$SSH_CONNECTION" || -n "$SSH_CLIENT" || -n "$SSH_TTY" ]]; then
         export TEXTUAL_COLOR_SYSTEM=256
-        export TEXTUAL_FPS=30
+        export TEXTUAL_FPS=60
     elif [[ "$(tty 2>/dev/null)" == /dev/tty* ]]; then
         export TEXTUAL_COLOR_SYSTEM=256
+        export TEXTUAL_FPS=60
     fi
     # Disable all Textual internal animations (scrolling, focus transitions, etc.)
     # on ARM. Each animation frame drives a timer wakeup that competes with the

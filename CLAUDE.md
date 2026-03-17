@@ -147,5 +147,6 @@ Patterns are JSON files stored in `presets/tambor/` (separate from synth presets
 - **Thread safety:** UI thread ↔ audio thread communicate exclusively through `synth_engine.midi_event_queue`. The `param_update` event type is the only safe way to change synth parameters mid-playback.
 - **Textual key bindings:** Textual 0.75+ maps Shift+Minus to the key name `"underscore"` (not `"shift+minus"`). Special characters follow Textual's `_character_to_key()` translation.
 - **Textual CSS selectors:** ID selectors (`#help-bar`) and element selectors (`TamborMode > HelpBar`) behave differently in widget layout. Yielding a widget in `compose()` places it in the parent's children list in order; re-mounting widgets via `mount()` appends them to the end. Use ID selectors for styling that should be independent of parent type.
+- **Textual rendering performance:** Set `TEXTUAL_FPS=60` for responsive focus/navigation updates. Lower values (30 FPS) cause laggy button highlighting and menu interaction. See [PERFORMANCE.md](PERFORMANCE.md) for optimization strategies on ARM and other platforms.
 - **`requirements-windows.txt`** is an outdated stub; `requirements.txt` is the authoritative file for all platforms.
 - **`venv/`** is gitignored. The launcher scripts recreate it automatically.

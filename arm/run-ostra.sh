@@ -10,8 +10,9 @@ VENV_DIR="$SCRIPT_DIR/.venv"
 # Terminal font for correct Textual UI rendering on TFT-LCD console
 setfont Lat15-TerminusBold14.psf.gz 2>/dev/null || true
 
-# Cap Textual render rate to reduce ARM CPU load
-export TEXTUAL_FPS=30
+# Textual render rate: Pi 4B can handle 60 FPS for TUI without audio impact.
+# Higher FPS = more responsive UI updates when navigating and changing focus.
+export TEXTUAL_FPS=60
 
 # 256-color terminal for Textual
 export TERM=xterm-256color
