@@ -153,6 +153,7 @@ class MetronomeMode(Vertical):
         
     def on_mount(self):
         self.focus()
+        self._register_gamepad_callbacks()
 
     def compose(self):
         yield HeaderWidget(title="METRONOME", subtitle="Keep the rhythm")

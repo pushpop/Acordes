@@ -1133,7 +1133,7 @@ class SynthMode(Widget):
         if self._focused():
             self._set_focus(None)
         else:
-            self.screen.action_quit_app()
+            self.screen.action_go_back()
 
     def action_nav_enter(self):
         """Enter focus, restoring last accessed parameter, or exit focus if already in it."""

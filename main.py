@@ -467,11 +467,13 @@ class MainScreen(Screen):
                 self.mode_history.append(current)
 
     def action_go_back(self):
-        """Go back to the previous mode."""
+        """Go back to the previous mode, or show quit dialog if already at main menu."""
         if not self.mode_history:
-            # If no history, just show main menu
             if self.app_context.get("current_mode") != "main_menu":
                 self.action_show_main_menu(save_history=False)
+            else:
+                # Already at main menu with no history: offer to quit
+                self.action_quit_app()
             return
 
         previous_mode = self.mode_history.pop()
