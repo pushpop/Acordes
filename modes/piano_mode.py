@@ -10,6 +10,7 @@ from components.piano_widget import PianoWidget
 from components.chord_display import ChordDisplay
 from components.staff_widget import StaffWidget
 from components.header_widget import HeaderWidget
+from gamepad.actions import GP
 
 if TYPE_CHECKING:
     from midi.input_handler import MIDIInputHandler
@@ -142,11 +143,13 @@ class PianoMode(Widget):
 
     def __init__(self, midi_handler: 'MIDIInputHandler',
                  chord_detector: 'ChordDetector',
-                 synth_engine: 'SynthEngine'):
+                 synth_engine: 'SynthEngine',
+                 gamepad_handler=None):
         super().__init__()
         self.midi_handler = midi_handler
         self.chord_detector = chord_detector
         self.synth_engine = synth_engine
+        self.gamepad_handler = gamepad_handler
         self.piano_widget = None
         self.chord_display_widget = None
         self.staff_widget = None
@@ -211,6 +214,7 @@ class PianoMode(Widget):
         # 10ms poll on all platforms. uvloop makes the asyncio wake cheap enough
         # that the original ARM slowdown (GIL contention, xruns) no longer applies.
         self._poll_timer = self.set_interval(0.01, self._poll_midi)
+        self._register_gamepad_callbacks()
 
     def on_unmount(self):
         """Restore previous synth state when leaving Piano mode."""
@@ -237,6 +241,9 @@ class PianoMode(Widget):
         if self._poll_timer is not None:
             self._poll_timer.stop()
             self._poll_timer = None
+        gp = self.gamepad_handler
+        if gp is not None:
+            gp.clear_callbacks()
 
     def on_mode_resume(self):
         """Called by MainScreen when showing this cached mode again.
@@ -248,6 +255,16 @@ class PianoMode(Widget):
         self.synth_engine.update_parameters(**_PIANO_PARAMS)
         self._register_midi_callbacks()
         self._poll_timer = self.set_interval(0.01, self._poll_midi)
+        self._register_gamepad_callbacks()
+
+    def _register_gamepad_callbacks(self):
+        """Register gamepad callbacks for piano mode (navigation only)."""
+        gp = self.gamepad_handler
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        # Piano mode is MIDI-driven; gamepad only provides back navigation.
+        # Global Start/Back_btn bindings (main menu / go back) are always active.
 
     def _poll_midi(self):
         """Poll for MIDI messages."""

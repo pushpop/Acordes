@@ -7,6 +7,7 @@ from textual.widgets import Button, Static, Label
 from textual.widget import Widget
 from textual import events
 from components.header_widget import HeaderWidget
+from gamepad.actions import GP
 
 # Ordered list of button IDs matching left-to-right layout.
 _BUTTON_IDS = [
@@ -75,6 +76,7 @@ class MainMenuMode(Vertical):
     def on_mount(self) -> None:
         """Focus the first button when the menu is mounted."""
         self.query_one("#piano_button").focus()
+        self._register_gamepad_callbacks()
 
     def on_mode_resume(self) -> None:
         """Called by MainScreen when showing this cached mode again.
@@ -83,6 +85,41 @@ class MainMenuMode(Vertical):
         synchronously while display is toggling can be silently dropped.
         """
         self.set_timer(0.05, lambda: self.query_one("#piano_button").focus())
+        self._register_gamepad_callbacks()
+
+    def on_mode_pause(self) -> None:
+        """Called by MainScreen when hiding this mode."""
+        gp = self.main_screen.app_context.get("gamepad_handler")
+        if gp is not None:
+            gp.clear_callbacks()
+
+    def _register_gamepad_callbacks(self) -> None:
+        """Register per-mode gamepad callbacks for main menu navigation."""
+        gp = self.main_screen.app_context.get("gamepad_handler")
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        gp.set_button_callback(GP.DPAD_LEFT,  lambda: self._gp_nav(-1))
+        gp.set_button_callback(GP.DPAD_RIGHT, lambda: self._gp_nav(1))
+        gp.set_button_callback(GP.CONFIRM,    self._gp_confirm)
+        gp.set_button_callback(GP.BACK,       self.main_screen.action_quit_app)
+
+    def _gp_nav(self, delta: int) -> None:
+        """Move menu selection left (delta=-1) or right (delta=1)."""
+        buttons = [self.query_one(f"#{bid}") for bid in _BUTTON_IDS]
+        focused = self.app.focused
+        try:
+            idx = buttons.index(focused)
+        except ValueError:
+            idx = 0
+        new_idx = max(0, min(len(buttons) - 1, idx + delta))
+        buttons[new_idx].focus()
+
+    def _gp_confirm(self) -> None:
+        """Activate the currently focused menu button."""
+        focused = self.app.focused
+        if focused is not None and hasattr(focused, "press"):
+            focused.press()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         """Handle button press events."""

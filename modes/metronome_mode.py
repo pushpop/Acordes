@@ -2,6 +2,7 @@ from textual.widgets import Static, Label
 from textual.containers import Vertical
 from textual.binding import Binding
 from components.header_widget import HeaderWidget
+from gamepad.actions import GP
 
 class MetronomeMode(Vertical):
     """A metronome mode for the application."""
@@ -123,10 +124,11 @@ class MetronomeMode(Vertical):
         
         return "\n".join(combined_lines)
 
-    def __init__(self, config_manager=None, synth_engine=None):
+    def __init__(self, config_manager=None, synth_engine=None, gamepad_handler=None):
         super().__init__()
         self.config_manager = config_manager
         self.synth_engine = synth_engine
+        self.gamepad_handler = gamepad_handler
         self.tempo = config_manager.get_bpm() if config_manager else 120
         try:
             self.time_signature_index = self.COMMON_TIME_SIGNATURES.index((4, 4))
@@ -233,6 +235,9 @@ class MetronomeMode(Vertical):
         if self.timer:
             self.timer.stop()
             self.timer = None
+        gp = self.gamepad_handler
+        if gp is not None:
+            gp.clear_callbacks()
 
     def on_mode_resume(self):
         """Called by MainScreen when showing this cached mode again.
@@ -243,3 +248,29 @@ class MetronomeMode(Vertical):
         if self._is_running:
             interval = 60.0 / self.tempo
             self.timer = self.set_interval(interval, self._update_metronome)
+        self._register_gamepad_callbacks()
+
+    def _register_gamepad_callbacks(self):
+        """Register per-mode gamepad callbacks for metronome control."""
+        gp = self.gamepad_handler
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        gp.set_button_callback(GP.CONFIRM,    self.action_toggle_metronome)
+        gp.set_button_callback(GP.ACTION_1,   self.action_toggle_metronome)
+        gp.set_button_callback(GP.DPAD_UP,    self.action_increase_tempo)
+        gp.set_button_callback(GP.DPAD_DOWN,  self.action_decrease_tempo)
+        gp.set_button_callback(GP.DPAD_LEFT,  self.action_decrease_time_signature)
+        gp.set_button_callback(GP.DPAD_RIGHT, self.action_increase_time_signature)
+        gp.set_button_callback(GP.RB,         self._gp_tempo_up_10)
+        gp.set_button_callback(GP.LB,         self._gp_tempo_down_10)
+
+    def _gp_tempo_up_10(self):
+        """Increase BPM by 10 steps (RB fast-jump)."""
+        for _ in range(10):
+            self.action_increase_tempo()
+
+    def _gp_tempo_down_10(self):
+        """Decrease BPM by 10 steps (LB fast-jump)."""
+        for _ in range(10):
+            self.action_decrease_tempo()

@@ -70,6 +70,7 @@ from modes.metronome_mode import MetronomeMode
 from modes.main_menu_mode import MainMenuMode
 from modes.tambor.tambor_mode import TamborMode
 from components.confirmation_dialog import ConfirmationDialog
+from gamepad import GamepadHandler, GP
 
 
 class LoadingScreen(Screen):
@@ -405,14 +406,58 @@ class MainScreen(Screen):
         midi_handler = self.app_context.get("midi_handler")
         if midi_handler is not None:
             midi_handler._activity_callback = self._idle_manager.reset
+        # Start gamepad polling and wire global bindings.
+        gp = self.app_context.get("gamepad_handler")
+        if gp is not None:
+            self._setup_gamepad_globals(gp)
+            self.set_interval(0.016, gp.poll)
+
+    def _setup_gamepad_globals(self, gp):
+        """Wire global gamepad bindings that persist across all mode switches.
+
+        Start + Back held together opens config regardless of press order.
+        Each button checks if its partner is already held; if so it routes to
+        config instead of its individual action.  This avoids the double-fire
+        problem that occurs when using a registered combo (the first button
+        always fires its individual callback before the combo can complete).
+        """
+        def _gp_start():
+            if GP.BACK_BTN in gp._held:
+                self.action_show_config()
+            else:
+                self.action_show_main_menu()
+
+        def _gp_back_btn():
+            if GP.START in gp._held:
+                self.action_show_config()
+            else:
+                self.action_go_back()
+
+        gp.set_global_button_callback(GP.START, _gp_start)
+        gp.set_global_button_callback(GP.BACK_BTN, _gp_back_btn)
+        # LB + RB simultaneously = panic (all notes off)
+        gp.set_global_combo_callback(
+            (GP.LB, GP.RB),
+            lambda: self.app_context["synth_engine"].all_notes_off()
+        )
 
     def _on_idle_check(self):
         """Periodic callback to check idle state and blank screen if needed."""
         self._idle_manager.check()
 
     def on_key(self, event) -> None:
-        """Reset idle timer on any keypress."""
+        """Reset idle timer on any keypress and stop arrow keys from escaping.
+
+        On Windows, Xbox controller D-pad presses inject real keyboard arrow
+        events into the terminal alongside the SDL gamepad events we poll.
+        If those injected events bubble past all mode widgets they reach
+        Windows Terminal's own UI (tab bar), which crashes the session.
+        Calling event.stop() here absorbs them after all mode BINDINGS and
+        on_key handlers have already had a chance to act on the event.
+        """
         self._idle_manager.reset()
+        if event.key in ("up", "down", "left", "right"):
+            event.stop()
 
     def _record_history(self):
         """Record current mode to history if it's different from the last entry."""
@@ -568,6 +613,10 @@ class MainScreen(Screen):
 
     def action_show_config(self):
         """Show config modal."""
+        # Prevent opening a second config if one is already on the screen stack.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, ConfigMode):
+                return
         # Remember current mode
         self.app_context["mode_before_config"] = self.app_context["current_mode"]
 
@@ -620,22 +669,29 @@ class MainScreen(Screen):
             self.app_context["config_manager"],
             on_audio_device_change=on_audio_device_change,
             on_buffer_size_change=on_buffer_size_change,
+            gamepad_handler=self.app_context.get("gamepad_handler"),
         )
         self.app.push_screen(config, on_closed)
 
     def action_quit_app(self):
         """Quit with confirmation."""
+        # Prevent stacking a second dialog if one is already open.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, ConfirmationDialog):
+                return
+
         def check_quit(result):
             if result:
                 self.app.exit()
 
-        self.app.push_screen(ConfirmationDialog("Quit Acordes?"), check_quit)
+        gp = self.app_context.get("gamepad_handler")
+        self.app.push_screen(ConfirmationDialog("Quit Acordes?", gamepad_handler=gp), check_quit)
 
 
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.9.4 - Amora"
+    VERSION = "1.10.0 - Grasp"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -658,6 +714,13 @@ class AcordesApp(App):
         # Register disconnect handler.
         self.midi_handler._disconnect_callback = self._on_midi_disconnect
 
+        # Gamepad handler: detect and connect on startup; gracefully absent if no
+        # controller is plugged in.  Polling is started in MainScreen.on_mount().
+        self.gamepad_handler = GamepadHandler()
+        if not self.gamepad_handler.connect():
+            print("[gamepad] no controller detected — gamepad input unavailable",
+                  file=sys.stderr)
+
         # App context shared with MainScreen and all modes.
         # synth_engine is None until _start_audio_engine() is called.
         self.app_context = {
@@ -667,6 +730,7 @@ class AcordesApp(App):
             "chord_library": self.chord_library,
             "synth_engine": self.synth_engine,
             "config_manager": self.config_manager,
+            "gamepad_handler": self.gamepad_handler,
             "create_main_menu": self._create_main_menu_mode,
             "create_piano": self._create_piano_mode,
             "create_compendium": self._create_compendium_mode,
@@ -838,11 +902,13 @@ class AcordesApp(App):
         if selected and not self.midi_handler.is_device_open():
             self.midi_handler.open_device(selected)
 
-        return PianoMode(self.midi_handler, self.chord_detector, self.synth_engine)
+        return PianoMode(self.midi_handler, self.chord_detector, self.synth_engine,
+                         gamepad_handler=self.gamepad_handler)
 
     def _create_compendium_mode(self):
         """Create compendium mode widget."""
-        return CompendiumMode(self.chord_library, self.synth_engine)
+        return CompendiumMode(self.chord_library, self.synth_engine,
+                              gamepad_handler=self.gamepad_handler)
 
     def _create_synth_mode(self):
         """Create synth mode widget."""
@@ -850,18 +916,21 @@ class AcordesApp(App):
         if selected and not self.midi_handler.is_device_open():
             self.midi_handler.open_device(selected)
 
-        return SynthMode(self.midi_handler, self.synth_engine, self.config_manager)
+        return SynthMode(self.midi_handler, self.synth_engine, self.config_manager,
+                         gamepad_handler=self.gamepad_handler)
 
     def _create_metronome_mode(self):
         """Create metronome mode widget."""
-        return MetronomeMode(self.config_manager, self.synth_engine)
+        return MetronomeMode(self.config_manager, self.synth_engine,
+                             gamepad_handler=self.gamepad_handler)
 
     def _create_tambor_mode(self):
         """Create Tambor drum machine mode widget."""
         return TamborMode(
             config_manager=self.config_manager,
             synth_engine=self.synth_engine,
-            midi_handler=self.midi_handler
+            midi_handler=self.midi_handler,
+            gamepad_handler=self.gamepad_handler,
         )
 
     def on_unmount(self):

@@ -60,6 +60,48 @@ MIDI hardware
 
 `MIDIInputHandler` (`midi/input_handler.py`) is a thin wrapper around `mido`. It maintains an `active_notes` set (protected by `notes_lock`) and dispatches to registered callbacks. Polling is non-blocking (`iter_pending()`).
 
+### Gamepad controller flow (`gamepad/`)
+
+Xbox-style gamepad support is platform-agnostic via a three-tier architecture:
+
+```
+Hardware (Xbox controller, PS4, generic XInput)
+  ↓
+Platform Backend (XInput/evdev/Pygame)
+  → xinput_backend.py    [Windows: native XInput API via ctypes]
+  → evdev_backend.py     [Linux ARM/x86: direct /dev/input/event* polling]
+  → pygame_backend.py    [macOS/Linux x86: SDL2 controller system]
+  ↓
+GamepadHandler (gamepad/input_handler.py)
+  → Button callback dispatch (global + per-mode)
+  → Combo detection (sorted by specificity, largest first)
+  → D-pad auto-repeat (400ms initial, 100ms interval)
+  → Axis normalization (triggers 0.0-1.0, sticks -1.0..1.0)
+  → _held set tracking (for combo detection, button-up cleanup)
+  ↓
+Mode callbacks
+  → Global: set_global_button_callback() [Start, Back_btn, combos]
+  → Per-mode: set_button_callback() [DPAD, triggers, action buttons]
+  → Cleared on mode pause via clear_callbacks()
+```
+
+**Key files**:
+- `gamepad/input_handler.py`: Main polling loop (called via `set_interval(0.016, gp.poll)` in MainScreen)
+- `gamepad/xinput_backend.py`: Windows XInput via ctypes (no SDL, no keyboard injection)
+- `gamepad/evdev_backend.py`: Linux direct event file polling
+- `gamepad/pygame_backend.py`: Pygame-based (macOS/x86 Linux fallback)
+- `gamepad/actions.py`: String constants (GP.CONFIRM, GP.BACK, GP.DPAD_UP, etc.)
+- `gamepad/button_maps.py`: Backend-specific button-to-action mappings
+
+**Critical design decisions**:
+1. **No event loop dependency**: Backends poll synchronously; GamepadHandler calls _safe_call() to wrap callbacks and catch exceptions
+2. **Button-up detection**: All backends fire `_fire_button_up_callback` on release to clear `_held` set and stop D-pad repeat
+3. **Combo priority**: Iterate combos sorted by size (largest first) so LB+RB+Start fires config before LB+RB panic
+4. **Multi-screen guards**: Check `self.app.screen_stack` in `push_screen` calls to prevent stacking duplicate dialogs
+5. **Per-mode registration**: Modes register callbacks in `on_mount` → `_register_gamepad_callbacks()`, clear in `on_mode_pause()`
+
+**For new mode development**: Add a `gamepad_handler=None` parameter to `__init__`, then implement `_register_gamepad_callbacks()` to call `gp.set_button_callback()` for each action. The gamepad handler is always available via `self.app.gamepad_handler` as a fallback.
+
 ### Audio engine (`music/synth_engine.py`)
 
 All parameter changes from the UI thread are enqueued via `synth_engine.update_parameters(**kwargs)` and applied at the top of `_audio_callback()` by `_process_midi_events()`. **Never write directly to engine attributes from the UI thread**;this causes data races.

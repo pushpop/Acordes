@@ -320,11 +320,13 @@ class SynthMode(Widget):
         midi_handler,
         synth_engine,
         config_manager,
+        gamepad_handler=None,
     ):
         super().__init__()
         self.midi_handler = midi_handler
         self.synth_engine = synth_engine
         self.config_manager = config_manager
+        self.gamepad_handler = gamepad_handler
 
         self.preset_manager = PresetManager()
         self._current_preset: Optional[Preset] = None
@@ -778,6 +780,7 @@ class SynthMode(Widget):
         self._poll_timer = self.set_interval(_poll_interval, self._poll_midi)
         self._push_params_to_engine()
         self._update_preset_ui()
+        self._register_gamepad_callbacks()
 
     def on_unmount(self):
         """Save state when switching away — do NOT close the shared engine."""
@@ -805,6 +808,9 @@ class SynthMode(Widget):
         if self._poll_timer is not None:
             self._poll_timer.stop()
             self._poll_timer = None
+        gp = self.gamepad_handler
+        if gp is not None:
+            gp.clear_callbacks()
 
     def on_mode_resume(self):
         """Called by MainScreen when showing this cached mode again.
@@ -817,6 +823,49 @@ class SynthMode(Widget):
         self._poll_timer = self.set_interval(0.01, self._poll_midi)
         self._push_params_to_engine()
         self._update_preset_ui()
+        self._register_gamepad_callbacks()
+
+    # ── Gamepad callbacks ───────────────────────────────────────────
+
+    def _register_gamepad_callbacks(self):
+        """Register per-mode gamepad callbacks for synth control."""
+        from gamepad.actions import GP
+        gp = self.gamepad_handler
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        # D-pad navigation: nav_left/right/up/down already handle both focus
+        # and non-focus modes internally (preset switch vs param nav).
+        gp.set_button_callback(GP.DPAD_UP,    self.action_nav_up)
+        gp.set_button_callback(GP.DPAD_DOWN,  self.action_nav_down)
+        gp.set_button_callback(GP.DPAD_LEFT,  self.action_nav_left)
+        gp.set_button_callback(GP.DPAD_RIGHT, self.action_nav_right)
+        # LB/RB: explicit preset prev/next (always, regardless of focus state)
+        gp.set_button_callback(GP.LB,         self.action_preset_prev)
+        gp.set_button_callback(GP.RB,         self.action_preset_next)
+        # A = enter/exit focus mode; B = escape (unfocus)
+        gp.set_button_callback(GP.CONFIRM,    self.action_nav_enter)
+        gp.set_button_callback(GP.BACK,       self.action_nav_escape)
+        # X = panic all notes off; Y = randomize focused param
+        gp.set_button_callback(GP.ACTION_1,   self.action_panic)
+        gp.set_button_callback(GP.ACTION_2,   self.action_randomize_focused)
+        # LT/RT: decrease/increase the focused parameter (analog triggers)
+        gp.set_axis_callback(GP.LT, self._gp_lt)
+        gp.set_axis_callback(GP.RT, self._gp_rt)
+        # RB+A combo: open preset browser
+        gp.set_combo_callback((GP.RB, GP.CONFIRM), self.action_open_preset_browser)
+        # LB+Y combo: randomize all parameters
+        gp.set_combo_callback((GP.LB, GP.ACTION_2), self.action_randomize)
+
+    def _gp_lt(self, value: float):
+        """LT trigger: decrease focused parameter when pushed past dead zone."""
+        if value > 0.3:
+            self.action_param_down()
+
+    def _gp_rt(self, value: float):
+        """RT trigger: increase focused parameter when pushed past dead zone."""
+        if value > 0.3:
+            self.action_param_up()
 
     # ── Notifications (debounced to prevent stacking) ──────────────
 
@@ -1724,6 +1773,10 @@ class SynthMode(Widget):
 
     def action_open_preset_browser(self):
         """Open the factory preset browser screen."""
+        # Prevent stacking a second browser if one is already open.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, PresetBrowserScreen):
+                return
         presets_data = get_factory_presets()
         screen = PresetBrowserScreen(
             presets_data,
@@ -1731,7 +1784,6 @@ class SynthMode(Widget):
             on_preset_selected=self._on_factory_preset_selected,
             on_cancel=self._on_preset_browser_cancel,
         )
-        # Push screen onto the stack
         self.app.push_screen(screen)
 
     def _on_factory_preset_selected(self, category_id: str, preset_name: str, preset_data: dict):

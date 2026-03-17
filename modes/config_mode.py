@@ -202,16 +202,21 @@ class ConfigMode(Screen):
     _IS_ARM = platform.machine() in ("armv7l", "aarch64")
     BUFFER_SIZES = [2048, 4096, 8192] if _IS_ARM else [128, 256, 480, 512, 1024, 2048]
 
+    # Ordered list of list IDs for LB/RB cycling.
+    _LIST_IDS = ["#backend-list", "#audio-list", "#buffer-list", "#device-list", "#curve-list"]
+
     def __init__(
         self,
         device_manager: 'MIDIDeviceManager',
         config_manager: 'ConfigManager',
         on_audio_device_change: Optional[Callable[[int], None]] = None,
         on_buffer_size_change: Optional[Callable[[int], None]] = None,
+        gamepad_handler=None,
     ):
         super().__init__()
         self.device_manager = device_manager
         self.config_manager = config_manager
+        self._gamepad_handler = gamepad_handler
         # Callback invoked when user selects a new audio device (engine is running).
         # If None, audio selection is saved to config only (engine not yet running).
         self.on_audio_device_change = on_audio_device_change
@@ -285,6 +290,13 @@ class ConfigMode(Screen):
             )
         yield Footer()
 
+    def _get_gamepad_handler(self):
+        """Return the gamepad handler from the app or the constructor parameter."""
+        gp = getattr(self.app, "gamepad_handler", None)
+        if gp is None:
+            gp = self._gamepad_handler
+        return gp
+
     def on_mount(self):
         """Called when screen is mounted."""
         self.pending_device = self.device_manager.get_selected_device()
@@ -296,6 +308,59 @@ class ConfigMode(Screen):
 
         # Start focus on backend list so user picks driver first
         self.query_one("#backend-list", ListView).focus()
+        self._register_gamepad_callbacks()
+
+    def on_unmount(self):
+        """Called when config screen is dismissed.
+        Gamepad callbacks are NOT cleared here because on_closed fires before
+        on_unmount in Textual — the returning mode's on_mode_resume already
+        re-registers callbacks via _register_gamepad_callbacks(), and that
+        method calls gp.clear_callbacks() itself before re-registering.
+        Clearing here would wipe the freshly registered mode callbacks.
+        """
+
+    def _register_gamepad_callbacks(self):
+        """Register gamepad callbacks for config screen navigation."""
+        gp = self._get_gamepad_handler()
+        if gp is None:
+            return
+        from gamepad.actions import GP
+        gp.clear_callbacks()
+        gp.set_button_callback(GP.DPAD_UP,    self._gp_nav_up)
+        gp.set_button_callback(GP.DPAD_DOWN,  self._gp_nav_down)
+        gp.set_button_callback(GP.LB,         self._gp_prev_list)
+        gp.set_button_callback(GP.RB,         self._gp_next_list)
+        gp.set_button_callback(GP.CONFIRM,    self.action_select_item)
+        gp.set_button_callback(GP.BACK,       self._gp_close)
+        gp.set_button_callback(GP.BACK_BTN,   self._gp_close)
+
+    def _gp_nav_up(self):
+        """Move cursor up in the focused list."""
+        lv = self.query_one(self._focused_list_id(), ListView)
+        lv.action_cursor_up()
+
+    def _gp_nav_down(self):
+        """Move cursor down in the focused list."""
+        lv = self.query_one(self._focused_list_id(), ListView)
+        lv.action_cursor_down()
+
+    def _gp_prev_list(self):
+        """Move focus to the previous list (LB)."""
+        current = self._focused_list_id()
+        try:
+            idx = self._LIST_IDS.index(current)
+        except ValueError:
+            idx = 0
+        prev_id = self._LIST_IDS[(idx - 1) % len(self._LIST_IDS)]
+        self.query_one(prev_id, ListView).focus()
+
+    def _gp_next_list(self):
+        """Move focus to the next list (RB), same as Tab."""
+        self.action_toggle_list_focus()
+
+    def _gp_close(self):
+        """Close the config screen via B button."""
+        self.dismiss()
 
     # ── Backend ──────────────────────────────────────────────────────────────
 

@@ -24,6 +24,9 @@ dependencies = [
     # uvloop: faster asyncio event loop (libuv-based). ARM Linux only - not available
     # on Windows, and not needed on desktop where the default loop is fast enough.
     "uvloop>=0.17.0; sys_platform == 'linux' and (platform_machine == 'armv7l' or platform_machine == 'aarch64')",
+    # evdev: gamepad input on Linux ARM via /dev/input. Desktop platforms use
+    # the pygame.joystick backend (pygame is already in the non-ARM dep list).
+    "evdev>=1.6.0; sys_platform == 'linux' and (platform_machine == 'armv7l' or platform_machine == 'aarch64')",
 ]
 
 [tool.setuptools]

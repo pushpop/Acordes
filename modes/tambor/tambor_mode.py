@@ -567,7 +567,7 @@ class TamborMode(Vertical):
         "Tom Low",
     ]
 
-    def __init__(self, config_manager: Optional[Any] = None, synth_engine: Optional[Any] = None, midi_handler: Optional[Any] = None):
+    def __init__(self, config_manager: Optional[Any] = None, synth_engine: Optional[Any] = None, midi_handler: Optional[Any] = None, gamepad_handler=None):
         """
         Initialize TamborMode with Acordes integration.
 
@@ -575,8 +575,10 @@ class TamborMode(Vertical):
             config_manager: Acordes ConfigManager for shared BPM (required)
             synth_engine: Acordes SynthEngine for audio synthesis (required)
             midi_handler: Optional Acordes MIDIInputHandler for future MIDI integration
+            gamepad_handler: Optional GamepadHandler for controller input
         """
         super().__init__()
+        self.gamepad_handler = gamepad_handler
         self.drum_rows: list[DrumRow] = []
         self.control_panel: ControlPanel = None
         self.cursor_drum = 0
@@ -751,6 +753,8 @@ class TamborMode(Vertical):
             self._auto_save_periodic
         )
 
+        self._register_gamepad_callbacks()
+
     def on_unmount(self):
         """Clean up when leaving Tambor mode."""
         # Stop playback if playing
@@ -798,6 +802,9 @@ class TamborMode(Vertical):
 
         self._auto_save_periodic()
         self.drum_voice_manager.all_notes_off()
+        gp = self.gamepad_handler
+        if gp is not None:
+            gp.clear_callbacks()
 
     def on_mode_resume(self):
         """Called by MainScreen when showing this cached mode again.
@@ -820,6 +827,48 @@ class TamborMode(Vertical):
         # Restart both timers on resume.
         self._auto_save_timer_handle = self.set_interval(5.0, self._auto_save_periodic)
         self._start_update_timer()
+        self._register_gamepad_callbacks()
+
+    def _register_gamepad_callbacks(self):
+        """Register per-mode gamepad callbacks for Tambor drum sequencer control."""
+        from gamepad.actions import GP
+        gp = self.gamepad_handler
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        gp.set_button_callback(GP.DPAD_UP,    self.action_move_drum_up)
+        gp.set_button_callback(GP.DPAD_DOWN,  self.action_move_drum_down)
+        gp.set_button_callback(GP.DPAD_LEFT,  self.action_move_step_left)
+        gp.set_button_callback(GP.DPAD_RIGHT, self.action_move_step_right)
+        gp.set_button_callback(GP.CONFIRM,    self.action_toggle_step)
+        gp.set_button_callback(GP.ACTION_1,   self.action_toggle_playback)
+        gp.set_button_callback(GP.LB,         self._gp_prev_pattern)
+        gp.set_button_callback(GP.RB,         self._gp_next_pattern)
+        gp.set_button_callback(GP.ACTION_2,   self.action_randomize_drum)
+        gp.set_axis_callback(GP.LT, self._gp_lt_mute)
+        gp.set_axis_callback(GP.RT, self._gp_rt_solo)
+        gp.set_button_callback(GP.L3,         self.action_open_pattern_selector)
+        gp.set_button_callback(GP.R3,         self.action_edit_drum)
+
+    def _gp_prev_pattern(self):
+        """LB: switch to the previous pattern (wraps around)."""
+        prev = (self.current_pattern - 2) % 64 + 1
+        self._select_pattern(prev)
+
+    def _gp_next_pattern(self):
+        """RB: switch to the next pattern (wraps around)."""
+        next_p = self.current_pattern % 64 + 1
+        self._select_pattern(next_p)
+
+    def _gp_lt_mute(self, value: float):
+        """LT trigger: mute the selected drum track when pushed past dead zone."""
+        if value > 0.5:
+            self.action_toggle_mute()
+
+    def _gp_rt_solo(self, value: float):
+        """RT trigger: solo the selected drum track when pushed past dead zone."""
+        if value > 0.5:
+            self.action_toggle_solo()
 
     def _preload_drums(self):
         """Pre-render all drum sounds (runs in background thread)."""
@@ -991,6 +1040,10 @@ class TamborMode(Vertical):
 
     def action_open_pattern_selector(self):
         """Open pattern selector as modal screen (N key)."""
+        # Prevent stacking a second selector if one is already open.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, PatternSelectorScreen):
+                return
         # Get saved patterns (only those with actual data, not cleared patterns)
         saved_patterns = set()
         for pnum in range(1, 65):
@@ -1134,6 +1187,10 @@ class TamborMode(Vertical):
 
     def action_edit_drum(self):
         """Open drum editor for currently selected drum (E key)."""
+        # Prevent stacking a second editor if one is already open.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, DrumEditorScreen):
+                return
         drum_idx = self.cursor_drum
         if drum_idx < 0 or drum_idx >= len(self.DRUM_SOUNDS):
             return
@@ -1413,6 +1470,10 @@ class TamborMode(Vertical):
 
     def action_open_fill_selector(self):
         """Open fill pattern selector (F key)."""
+        # Prevent stacking a second selector if one is already open.
+        for screen in self.app.screen_stack:
+            if isinstance(screen, FillSelectorScreen):
+                return
         pattern_num = self.current_pattern
         current_fill_id = self.pattern_fill_patterns.get(pattern_num)
 

@@ -482,10 +482,12 @@ class CompendiumMode(Widget):
     }
     """
 
-    def __init__(self, chord_library: 'ChordLibrary', synth_engine: 'SynthEngine'):
+    def __init__(self, chord_library: 'ChordLibrary', synth_engine: 'SynthEngine',
+                 gamepad_handler=None):
         super().__init__()
         self.chord_library = chord_library
         self.synth_engine = synth_engine
+        self.gamepad_handler = gamepad_handler
         self.selected_notes: List[int] = []
         # Snapshot of synth params captured on mount; restored when leaving compendium mode
         self._saved_synth_params: dict = {}
@@ -542,6 +544,7 @@ class CompendiumMode(Widget):
         # Initialize detail panel with empty state
         detail_panel = self.query_one("#detail-panel", CompendiumDetailPanel)
         detail_panel.clear_display()
+        self._register_gamepad_callbacks()
 
     def on_unmount(self):
         """Cancel timers and restore synth state when leaving compendium mode."""
@@ -565,6 +568,9 @@ class CompendiumMode(Widget):
         self._cancel_play_timers()
         if self._saved_synth_params:
             self.synth_engine.update_parameters(**self._saved_synth_params)
+        gp = self.gamepad_handler
+        if gp is not None:
+            gp.clear_callbacks()
 
     def on_mode_resume(self):
         """Called by MainScreen when showing this cached mode again.
@@ -577,26 +583,101 @@ class CompendiumMode(Widget):
         self.synth_engine.update_parameters(attack=0.06, release=0.55)
         tree = self.query_one("#chord-tree", Tree)
         tree.focus()
+        self._register_gamepad_callbacks()
+
+    def _gp_tree_up(self):
+        """Move the tree cursor up one item (gamepad D-pad up)."""
+        try:
+            tree = self.query_one("#chord-tree", Tree)
+            tree.focus()
+            tree.action_cursor_up()
+        except Exception:
+            pass
+
+    def _gp_tree_down(self):
+        """Move the tree cursor down one item (gamepad D-pad down)."""
+        try:
+            tree = self.query_one("#chord-tree", Tree)
+            tree.focus()
+            tree.action_cursor_down()
+        except Exception:
+            pass
+
+    def _gp_tree_select(self):
+        """Expand/collapse a category or select a leaf node (A button).
+
+        Uses the tree's own action_select_cursor so behaviour matches the
+        Enter key: category nodes toggle open/closed, leaf nodes fire
+        NodeSelected.  Does NOT play notes directly — the auto-play timer
+        already handles sound on cursor movement.
+        """
+        try:
+            tree = self.query_one("#chord-tree", Tree)
+            tree.focus()
+            tree.action_select_cursor()
+        except Exception:
+            pass
+
+    def _gp_play_item(self):
+        """Explicitly play the currently highlighted chord (X button)."""
+        try:
+            self.action_play_item()
+        except Exception:
+            pass
+
+    def _register_gamepad_callbacks(self):
+        """Register per-mode gamepad callbacks for compendium navigation."""
+        from gamepad.actions import GP
+        gp = self.gamepad_handler
+        if gp is None:
+            return
+        gp.clear_callbacks()
+        # D-pad up/down: navigate the tree directly; never touch the search bar.
+        gp.set_button_callback(GP.DPAD_UP,    self._gp_tree_up)
+        gp.set_button_callback(GP.DPAD_DOWN,  self._gp_tree_down)
+        gp.set_button_callback(GP.DPAD_LEFT,  self.action_previous_category)
+        gp.set_button_callback(GP.DPAD_RIGHT, self.action_next_category)
+        # A: expand/collapse tree nodes (natural tree behaviour, no sound).
+        # X: explicitly play the highlighted chord.
+        # Auto-play already fires on cursor movement so A playing redundantly
+        # caused a race between the gamepad callback and the 150ms auto-play
+        # timer, which led to crashes.
+        gp.set_button_callback(GP.CONFIRM,    self._gp_tree_select)
+        gp.set_button_callback(GP.ACTION_1,   self._gp_play_item)
+        gp.set_button_callback(GP.ACTION_2,   self.action_expand_all)
 
     def on_key(self, event) -> None:
-        """Intercept key presses to handle navigation and playback."""
-        tree = self.query_one("#chord-tree", Tree)
+        """Intercept key presses to handle navigation and playback.
 
-        # Only handle these keys if tree is focused
-        if self.app.focused == tree:
-            if event.key == "left":
-                event.prevent_default()
-                self.action_previous_category()
-                return
-            elif event.key == "right":
-                event.prevent_default()
-                self.action_next_category()
-                return
-            elif event.key == "space":
-                # Play highlighted chord when space is pressed in chord category
-                event.prevent_default()
-                self.action_play_item()
-                return
+        Up/Down/Left/Right are all intercepted unconditionally when this mode
+        is active and the tree exists.  On Windows, Xbox controller D-pad
+        presses inject real keyboard arrow events into the terminal alongside
+        the SDL gamepad events we poll.  If those arrow events are not absorbed
+        here they bubble through Textual's focus system and can shift focus to
+        Windows Terminal's own UI (tab bar), which crashes the session.
+        """
+        try:
+            tree = self.query_one("#chord-tree", Tree)
+        except Exception:
+            return
+
+        nav_keys = ("up", "down", "left", "right", "space")
+        if event.key in nav_keys:
+            event.prevent_default()
+            event.stop()
+
+        if event.key == "up":
+            tree.focus()
+            tree.action_cursor_up()
+        elif event.key == "down":
+            tree.focus()
+            tree.action_cursor_down()
+        elif event.key == "left":
+            self.action_previous_category()
+        elif event.key == "right":
+            self.action_next_category()
+        elif event.key == "space":
+            self.action_play_item()
 
     def _build_tree(self):
         """Build the full hierarchical tree."""
@@ -631,7 +712,7 @@ class CompendiumMode(Widget):
                 # Prevents ghost notes and voice exhaustion when scrolling quickly.
                 if self._auto_play_timer is not None:
                     self._auto_play_timer.stop()
-                self._auto_play_timer = self.set_timer(0.15, self.action_play_item)
+                self._auto_play_timer = self.set_timer(0.15, self._safe_auto_play)
 
     def on_tree_node_selected(self, event: Tree.NodeSelected):
         """Handle tree node selection (Enter key)."""
@@ -726,6 +807,18 @@ class CompendiumMode(Widget):
         for t in self._play_timers:
             t.stop()
         self._play_timers.clear()
+
+    def _safe_auto_play(self):
+        """Timer target for debounced auto-play — wraps action_play_item in try/except.
+
+        Textual timer callbacks that raise propagate to the event loop and can
+        crash the app.  This wrapper ensures any exception is silenced so a
+        stale or racing timer cannot take down the Textual event loop.
+        """
+        try:
+            self.action_play_item()
+        except Exception:
+            pass
 
     def action_play_item(self):
         """Play the currently selected chord using the synth engine.

@@ -1,4 +1,4 @@
-# Acordes v1.9.4 - Amora: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.10.0 - Grasp: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -25,7 +25,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.9.4 - Amora (ARM support)
+**Latest Version**: 1.10.0 - Grasp (Full Gamepad Controller Support)
 
 ---
 
@@ -259,7 +259,7 @@ Your configuration and user presets are stored in `config.json` and `presets/` a
 
 ### Checking Your Version
 
-In the app, look at the window title which displays the current version (e.g. `Acordes v1.9.0`).
+In the app, look at the window title which displays the current version (e.g. `Acordes v1.10.0 - Grasp`).
 
 ---
 
@@ -273,6 +273,25 @@ In the app, look at the window title which displays the current version (e.g. `A
 6. **Browse Presets**: Press **N** → scroll through 128 factory presets
 
 For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
+For Xbox-style gamepad controller support, see **[GAMEPAD.md](GAMEPAD.md)**.
+
+### What's New (v1.10.0 - Grasp)
+
+**Full Xbox-Style Gamepad Controller Support**:
+- **Platform Coverage**: Windows (XInput API), Linux x86_64/ARM (evdev), macOS (Pygame controller)
+- **All Modes Playable**: Every mode (Main Menu, Piano, Synth, Compendium, Metronome, Tambor) fully navigable with controller
+- **Smart Input Routing**:
+  - Windows: Native XInput via ctypes (no SDL overhead, eliminates Windows Terminal keyboard injection crashes)
+  - Linux/ARM: Evdev direct input (/dev/input/event*) with hot-plug support
+  - macOS: SDL2 controller system
+- **Combo System**: Global keyboard-style combos (START + BACK opens config, LB + RB panic, RB + A = preset browser)
+- **Multi-Screen Guards**: Prevents accidentally stacking multiple config/dialog screens when button is held
+- **Per-Mode Callbacks**: Each mode registers its own gamepad bindings on enter, clears on exit
+- **Full Feature Parity**: All synth parameters adjustable via LT/RT trigger axes, all modes have complete controller navigation
+- **Configuration**: Config mode has full gamepad support (DPAD navigate, A select, B close, LB/RB cycle sections)
+- **Dynamic Combo Priority**: Most specific combo fires first (LB+RB+Start route priority over LB+RB panic)
+
+See **[GAMEPAD.md](GAMEPAD.md)** for complete controller reference and keybindings.
 
 ### What's New (v1.9.4 - Amora)
 
@@ -519,6 +538,14 @@ acordes/
 │   ├── header_widget.py
 │   └── confirmation_dialog.py
 │
+├── gamepad/                         # Xbox-style gamepad controller support
+│   ├── input_handler.py             # Main gamepad polling & callback system
+│   ├── xinput_backend.py            # Windows XInput API (pure ctypes)
+│   ├── pygame_backend.py            # macOS/Linux x86 Pygame controller
+│   ├── evdev_backend.py             # Linux ARM evdev direct input
+│   ├── actions.py                   # Gamepad action constants (GP class)
+│   └── button_maps.py               # Button to action mappings per backend
+│
 ├── modes/                           # Screen modes (all inherit from Textual Widget)
 │   ├── config_mode.py               # MIDI device + velocity curve selection
 │   ├── piano_mode.py                # Real-time piano visualization + chord detection
@@ -602,3 +629,5 @@ For complete version history, release notes, and technical details about each up
 ---
 
 *For detailed keyboard shortcuts and navigation, see **[KEYBINDS.md](KEYBINDS.md)**.*
+
+*For Xbox-style gamepad controller support and full button reference, see **[GAMEPAD.md](GAMEPAD.md)**.*
