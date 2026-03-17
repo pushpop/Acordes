@@ -245,9 +245,7 @@ class PianoMode(Widget):
         self._saved_synth_params = self.synth_engine.get_current_params()
         self.synth_engine.update_parameters(**_PIANO_PARAMS)
         self._register_midi_callbacks()
-        import platform as _plat
-        _poll_interval = 0.03 if _plat.machine() in ("armv7l", "aarch64") else 0.01
-        self._poll_timer = self.set_interval(_poll_interval, self._poll_midi)
+        self._poll_timer = self.set_interval(0.01, self._poll_midi)
 
     def _poll_midi(self):
         """Poll for MIDI messages."""
