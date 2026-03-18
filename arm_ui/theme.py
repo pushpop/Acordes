@@ -58,7 +58,7 @@ CAROUSEL_ITEM_GAP  = 6
 
 # ── Font loading ──────────────────────────────────────────────────────────────
 
-def _find_bundled_font() -> str | None:
+def _find_bundled_font():
     """Return path to a TTF in arm_ui/fonts/, or None if not found.
 
     To install Silkscreen (recommended pixel font) on the Pi:
