@@ -70,19 +70,51 @@ class ArmApp:
         pygame.quit()
 
     def _init_pygame(self) -> None:
-        # Set SDL framebuffer env vars before pygame.init() so they take effect
-        # even when the app is launched via run.sh rather than run-ostra.sh.
-        # SDL_VIDEODRIVER=fbcon: render directly to /dev/fb0 (no X11 needed).
-        # SDL_FBDEV=/dev/fb0: target the bcm2708_fb framebuffer explicitly.
-        # SDL_FBACCEL=0: disable hw acceleration (not available on bcm2708_fb).
-        os.environ.setdefault("SDL_VIDEODRIVER", "fbcon")
-        os.environ.setdefault("SDL_FBDEV",       "/dev/fb0")
-        os.environ.setdefault("SDL_FBACCEL",     "0")
-        pygame.init()
-        flags = pygame.NOFRAME
-        self._surface = pygame.display.set_mode(
-            (theme.SCREEN_W, theme.SCREEN_H), flags
+        """Initialize Pygame display with a driver fallback chain.
+
+        Driver priority:
+          1. Respect SDL_VIDEODRIVER if already set in the environment.
+          2. fbcon  - direct framebuffer, works on tty1 (run-ostra.sh boot).
+          3. kmsdrm - KMS/DRM, fallback for systems with vc4 DRM driver.
+          4. offscreen - headless, used over SSH or for testing; no display output.
+
+        fbcon requires:
+          - Running on an actual VT (tty1), NOT over SSH.
+          - The user in the 'video' group for /dev/fb0 r/w access.
+        """
+        os.environ.setdefault("SDL_FBDEV",   "/dev/fb0")
+        os.environ.setdefault("SDL_FBACCEL", "0")
+
+        # If caller already set SDL_VIDEODRIVER, respect it.
+        forced_driver = os.environ.get("SDL_VIDEODRIVER")
+        drivers_to_try = (
+            [forced_driver] if forced_driver
+            else ["fbcon", "kmsdrm", "offscreen"]
         )
+
+        flags = pygame.NOFRAME
+        last_error = None
+        for driver in drivers_to_try:
+            os.environ["SDL_VIDEODRIVER"] = driver
+            try:
+                pygame.init()
+                self._surface = pygame.display.set_mode(
+                    (theme.SCREEN_W, theme.SCREEN_H), flags
+                )
+                print(f"[arm_ui] display init OK (driver: {driver})", file=sys.stderr)
+                break
+            except pygame.error as exc:
+                last_error = exc
+                print(f"[arm_ui] driver {driver!r} unavailable: {exc}", file=sys.stderr)
+                pygame.quit()
+        else:
+            raise RuntimeError(
+                f"Could not init any SDL video driver. Last error: {last_error}\n"
+                "On tty1: ensure 'push' user is in the 'video' group "
+                "(sudo usermod -aG video push).\n"
+                "Over SSH: set SDL_VIDEODRIVER=offscreen for headless testing."
+            )
+
         pygame.display.set_caption("Acordes")
         self._clock = pygame.time.Clock()
         pygame.mouse.set_visible(False)
