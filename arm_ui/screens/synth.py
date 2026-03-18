@@ -96,8 +96,12 @@ class SynthScreen(BaseScreen):
         if self._note_active:
             self.app.synth_engine.note_off(_TEST_NOTE, 0)
             self._note_active = False
-        # Clear MIDI callbacks so notes don't fire on other screens
-        self.app.midi_handler.set_callbacks(note_on=None, note_off=None)
+        # Clear MIDI callbacks so notes don't fire on other screens.
+        # set_callbacks() skips None args by design, so pass no-ops explicitly.
+        self.app.midi_handler.set_callbacks(
+            note_on=lambda n, v: None,
+            note_off=lambda n, v=0: None,
+        )
 
     # ── MIDI callbacks ───────────────────────────────────────────────────────
 
@@ -105,7 +109,7 @@ class SynthScreen(BaseScreen):
         if self.app.synth_engine:
             self.app.synth_engine.note_on(note, velocity)
 
-    def _on_note_off(self, note: int) -> None:
+    def _on_note_off(self, note: int, velocity: int = 0) -> None:
         if self.app.synth_engine:
             self.app.synth_engine.note_off(note, 0)
 
