@@ -1,50 +1,49 @@
-# ABOUTME: Stub placeholder screen used for modes not yet implemented in the ARM UI.
-# ABOUTME: Displays the mode name and a "coming soon" message; B/Esc returns to main menu.
+# ABOUTME: Stub placeholder screen for modes not yet implemented in the ARM UI.
+# ABOUTME: Uses PixelCode box widget; B/Esc returns to main menu.
 
 import pygame
 
 from arm_ui.screens.base import BaseScreen
-from arm_ui import theme
+from arm_ui import theme, widgets
 from gamepad.actions import GP
 
 
 class StubScreen(BaseScreen):
     """Placeholder shown for modes not yet fully implemented. Coords: 240x160."""
 
-    def __init__(self, app, title: str = "Mode") -> None:
+    def __init__(self, app, title="Mode") -> None:
         super().__init__(app)
-        self._title = title
+        self._title = title.upper()
 
     def on_enter(self, **kwargs) -> None:
         gp = self.app.gamepad_handler
         gp.set_button_callback(GP.BACK, lambda: self.app.goto("main_menu"))
 
-    def handle_event(self, event: pygame.event.Event) -> None:
+    def handle_event(self, event) -> None:
         if event.type == pygame.KEYDOWN:
             if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE, pygame.K_b):
                 self.app.goto("main_menu")
 
-    def draw(self, surface: pygame.Surface) -> None:
+    def draw(self, surface) -> None:
         surface.fill(theme.BG_COLOR)
-        cx = theme.SCREEN_W // 2
-        cy = theme.SCREEN_H // 2
 
-        # Consistent panel: white border box (active style)
-        box_w, box_h = 130, 50
-        box_x = cx - box_w // 2
-        box_y = cy - box_h // 2
+        # Title bar
+        widgets.title_bar(surface, self._title, "ACORDES")
 
-        theme.draw_box(surface, (box_x, box_y, box_w, box_h), active=True)
+        # Centered info box using PixelCode box-drawing characters
+        box_w = theme.CELL_W * 20   # 20 columns wide
+        box_h = theme.CELL_H * 5    # 5 rows tall
+        bx = (theme.SCREEN_W - box_w) // 2
+        by = (theme.SCREEN_H - box_h) // 2
 
-        # Screen label in green at top of panel
-        lbl = theme.txt(theme.FONT_TINY, self._title.upper(), theme.ACCENT)
-        surface.blit(lbl, lbl.get_rect(centerx=cx, y=box_y + 5))
+        widgets.box(surface, bx, by, box_w, box_h,
+                    theme.BORDER_ACTIVE, fill=theme.BG_PANEL)
 
-        pygame.draw.line(surface, theme.SEPARATOR,
-                         (box_x + 4, box_y + 14), (box_x + box_w - 4, box_y + 14))
+        # "COMING SOON" centered inside the box
+        inner = widgets.box_inner(bx, by, box_w, box_h)
+        label_s = theme.FONTS_M[theme.FONT_SMALL].render(
+            "COMING SOON", False, theme.TEXT_PRIMARY)
+        surface.blit(label_s, label_s.get_rect(
+            centerx=inner.centerx, centery=inner.centery))
 
-        soon = theme.txt(theme.FONT_SMALL, "COMING SOON", theme.TEXT_PRIMARY)
-        surface.blit(soon, soon.get_rect(centerx=cx, y=box_y + 18))
-
-        back = theme.txt(theme.FONT_TINY, "Esc: back", theme.TEXT_DIM)
-        surface.blit(back, back.get_rect(centerx=cx, y=theme.SCREEN_H - 9))
+        widgets.hint_bar(surface, [("Esc", "back")])

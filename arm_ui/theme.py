@@ -4,7 +4,7 @@
 import os
 import pygame
 
-# ── Render dimensions ────────────────────────────────────────────────────────
+# -- Render dimensions --------------------------------------------------------
 # Screens render to SCREEN_W x SCREEN_H (240x160). The app scales 2x to
 # DISPLAY_W x DISPLAY_H (480x320) using nearest-neighbor before writing to fb0.
 SCREEN_W     = 240
@@ -13,14 +13,14 @@ DISPLAY_W    = 480
 DISPLAY_H    = 320
 RENDER_SCALE = 2
 
-# ── Colors ──────────────────────────────────────────────────────────────────
-# Elektron/OP-1 inspired: black bg, white body text, green accent only.
+# -- Colors -------------------------------------------------------------------
+# Elektron/OP-1 inspired: black bg, white body text, green/orange accents only.
 BG_COLOR        = (  0,   0,   0)   # Pure black background
 BG_DARK         = (  0,   0,   0)   # Same black for inner panels
 BG_PANEL        = (  8,   8,   8)   # Very slightly lighter panel
 ACCENT          = (  0, 210,  70)   # Green (active, enabled, playing)
-ACCENT_DIM      = (  0,  70,  25)   # Dim green for bar borders
-HIGHLIGHT       = (255, 140,   0)   # Orange (status indicators only)
+ACCENT_DIM      = (  0,  70,  25)   # Dim green for inactive accent elements
+HIGHLIGHT       = (255, 140,   0)   # Orange (status indicators, warnings)
 HIGHLIGHT_DIM   = ( 90,  50,   0)   # Dim orange
 TEXT_PRIMARY    = (255, 255, 255)   # Pure white - all body text
 TEXT_SECONDARY  = (160, 160, 160)   # Mid grey for secondary info
@@ -35,16 +35,25 @@ SEPARATOR       = ( 35,  35,  35)   # Horizontal rule lines
 
 MIN_TOUCH = 30
 
-# ── Font sizes (at 240x160 internal; appear 2x larger on the 480x320 display) ─
+# -- Font sizes (at 240x160 internal; appear 2x larger on 480x320 display) ----
+# PixelCode is designed on a 6x12 grid; at size 12 each char is ~6x12px.
+# All three variants (Regular, Italic, Medium) share these size constants.
 FONT_GIANT  = 32
 FONT_LARGE  = 20
 FONT_MEDIUM = 14
 FONT_SMALL  = 11
 FONT_TINY   =  8
 
-# ── Carousel layout ───────────────────────────────────────────────────────────
+# -- Character grid dimensions (pixels per cell at FONT_SMALL) ----------------
+# Computed at runtime by init_fonts() from actual pygame font metrics.
+# widgets.py uses these to snap widget dimensions to the character grid so
+# box-drawing borders tile perfectly with no gaps or overruns.
+CELL_W = 6    # updated by init_fonts()
+CELL_H = 11   # updated by init_fonts()
+
+# -- Carousel layout ----------------------------------------------------------
 # All items share the same 3:2 (1.5:1) aspect ratio matching the display.
-# Center item: 90x60. Side: 60x40. Far: 36x24.
+# Dimensions are snapped to the character grid in init_fonts().
 CAROUSEL_CENTER_W  = 90
 CAROUSEL_CENTER_H  = 60
 CAROUSEL_SIDE_W    = 60
@@ -52,74 +61,121 @@ CAROUSEL_SIDE_H    = 40
 CAROUSEL_FAR_W     = 36
 CAROUSEL_FAR_H     = 24
 CAROUSEL_CENTER_X  = (SCREEN_W - CAROUSEL_CENTER_W) // 2
-CAROUSEL_CENTER_Y  = 32
+CAROUSEL_CENTER_Y  = 28
 CAROUSEL_ITEM_GAP  = 6
 
 
-# ── Font loading ──────────────────────────────────────────────────────────────
+# -- Font loading -------------------------------------------------------------
+# Three PixelCode variants loaded from arm_ui/fonts/:
+#   PixelCode.ttf         -> Regular: body text, box chrome, parameter labels
+#   PixelCode-Italic.ttf  -> Italic:  hints, secondary info, dim text
+#   PixelCode-Medium.ttf  -> Medium:  section headers, selected item names
+#
+# To download on Pi (fonts are committed to the repo; use git pull):
+#   BASE="https://github.com/qwerasd205/PixelCode/raw/main/dist/ttf"
+#   wget "$BASE/PixelCode.ttf"         -O arm_ui/fonts/PixelCode.ttf
+#   wget "$BASE/PixelCode-Italic.ttf"  -O arm_ui/fonts/PixelCode-Italic.ttf
+#   wget "$BASE/PixelCode-Medium.ttf"  -O arm_ui/fonts/PixelCode-Medium.ttf
 
-def _find_bundled_font():
-    """Return path to a TTF in arm_ui/fonts/, or None if not found.
+# Font dicts - populated by init_fonts(), keyed by font size int.
+FONTS_R = {}   # Regular: body text, box chrome, labels
+FONTS_I = {}   # Italic:  hints, secondary info, status messages
+FONTS_M = {}   # Medium:  headers, selected names, emphasis
+FONTS   = {}   # Backward-compat alias pointing to FONTS_R
 
-    To install Silkscreen (recommended pixel font) on the Pi:
-      wget "https://github.com/google/fonts/raw/main/ofl/silkscreen/Silkscreen-Regular.ttf" \\
-           -O arm_ui/fonts/Silkscreen.ttf
-    Any .ttf file placed in arm_ui/fonts/ is used automatically.
-    """
+
+def _load_font_file(filename, size):
+    """Load a TTF from arm_ui/fonts/. Returns None if the file is missing."""
     fonts_dir = os.path.join(os.path.dirname(__file__), "fonts")
-    if os.path.isdir(fonts_dir):
-        for fname in sorted(os.listdir(fonts_dir)):
-            if fname.lower().endswith(".ttf"):
-                return os.path.join(fonts_dir, fname)
+    path = os.path.join(fonts_dir, filename)
+    if os.path.isfile(path):
+        try:
+            return pygame.font.Font(path, size)
+        except Exception:
+            pass
     return None
 
 
-def _try_pixel_font(size: int) -> pygame.font.Font:
-    """Load a pixel-art font at the given size.
-
-    Priority:
-    1. Bundled TTF in arm_ui/fonts/ (place Silkscreen.ttf there)
-    2. System monospace fonts (Terminus on OStra, Courier on desktop)
-    3. pygame built-in font as last resort
-    """
-    bundled = _find_bundled_font()
-    if bundled:
-        try:
-            return pygame.font.Font(bundled, size)
-        except Exception:
-            pass
-
+def _fallback_font(size):
+    """Return the best available monospace system font as a fallback."""
     for name in ("terminus", "Terminus", "terminusfont",
                  "dejavusansmono", "couriernew", "courier", "monospace"):
         try:
-            font = pygame.font.SysFont(name, size)
-            if font:
-                return font
+            f = pygame.font.SysFont(name, size)
+            if f:
+                return f
         except Exception:
             pass
-
     return pygame.font.Font(None, size)
 
 
-FONTS: dict = {}
+def _snap(value, cell):
+    """Round value up to the nearest multiple of cell size."""
+    if cell <= 0:
+        return value
+    return ((value + cell - 1) // cell) * cell
 
 
-def init_fonts() -> None:
-    """Populate FONTS dict. Must be called after pygame.init()."""
-    global FONTS
+def init_fonts():
+    """Populate font dicts and compute grid cell size. Must be called after pygame.init()."""
+    global FONTS_R, FONTS_I, FONTS_M, FONTS, CELL_W, CELL_H
+    global CAROUSEL_CENTER_W, CAROUSEL_CENTER_H
+    global CAROUSEL_SIDE_W,   CAROUSEL_SIDE_H
+    global CAROUSEL_FAR_W,    CAROUSEL_FAR_H
+    global CAROUSEL_CENTER_X
+
     sizes = [FONT_TINY, FONT_SMALL, FONT_MEDIUM, FONT_LARGE, FONT_GIANT]
-    FONTS = {s: _try_pixel_font(s) for s in sizes}
+
+    for s in sizes:
+        r = _load_font_file("PixelCode.ttf", s) or _fallback_font(s)
+        i = _load_font_file("PixelCode-Italic.ttf", s) or r
+        m = _load_font_file("PixelCode-Medium.ttf", s) or r
+        FONTS_R[s] = r
+        FONTS_I[s] = i
+        FONTS_M[s] = m
+
+    FONTS = FONTS_R   # backward compat
+
+    # Compute cell dimensions from actual rendered metrics at FONT_SMALL.
+    # Block character (U+2588) is guaranteed full-advance-width in PixelCode.
+    cell = FONTS_R[FONT_SMALL].size("\u2588")
+    CELL_W = max(1, cell[0])
+    CELL_H = max(1, cell[1])
+
+    # Snap carousel tile sizes to the character grid so box borders tile cleanly.
+    # All tiles maintain the 3:2 (1.5:1) aspect ratio of the physical display.
+    CAROUSEL_CENTER_W = _snap(90, CELL_W)
+    CAROUSEL_CENTER_H = _snap(60, CELL_H)
+    CAROUSEL_SIDE_W   = _snap(60, CELL_W)
+    CAROUSEL_SIDE_H   = _snap(40, CELL_H)
+    CAROUSEL_FAR_W    = _snap(36, CELL_W)
+    CAROUSEL_FAR_H    = _snap(24, CELL_H)
+    CAROUSEL_CENTER_X = (SCREEN_W - CAROUSEL_CENTER_W) // 2
 
 
-def txt(font_size: int, text: str, color: tuple) -> pygame.Surface:
-    """Render text with antialias=False for crisp pixel art look."""
-    return FONTS[font_size].render(text, False, color)
+# -- Text rendering helpers ---------------------------------------------------
+
+def txt(font_size, text, color):
+    """Render with Regular variant, antialias=False (body text, labels, box chrome)."""
+    return FONTS_R[font_size].render(text, False, color)
 
 
-def draw_box(surface: pygame.Surface, rect, active: bool = False) -> None:
-    """Draw a solid-border box. White border when active, dark grey when inactive.
+def txt_italic(font_size, text, color):
+    """Render with Italic variant (hints, secondary info, dim text)."""
+    return FONTS_I[font_size].render(text, False, color)
 
-    All UI panels use this single border style for visual consistency.
+
+def txt_medium(font_size, text, color):
+    """Render with Medium variant (section headers, selected item names)."""
+    return FONTS_M[font_size].render(text, False, color)
+
+
+# -- Legacy drawing helpers ---------------------------------------------------
+
+def draw_box(surface, rect, active=False):
+    """Draw a solid-border filled box. White border when active, dark grey when not.
+
+    Kept for backward compatibility; new code should use widgets.Box instead.
     rect can be a pygame.Rect or (x, y, w, h) tuple.
     """
     color = BORDER_ACTIVE if active else BORDER_INACTIVE
@@ -127,9 +183,8 @@ def draw_box(surface: pygame.Surface, rect, active: bool = False) -> None:
     pygame.draw.rect(surface, color, rect, 1)
 
 
-def draw_dotted_rect(surface: pygame.Surface, color: tuple,
-                     rect, step: int = 3) -> None:
-    """Draw a dotted border - used for parameter bar tracks."""
+def draw_dotted_rect(surface, color, rect, step=3):
+    """Draw a dotted border (used for parameter bar tracks)."""
     if isinstance(rect, (tuple, list)):
         x, y, w, h = rect
     else:
