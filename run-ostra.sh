@@ -100,12 +100,12 @@ _xbox_power_cycle
 # future per-thread affinity pinning if needed.
 
 # Pygame display settings for the ARM Pygame UI.
-# SDL_VIDEODRIVER=offscreen: pygame renders to an offscreen surface; frames
-#   are written directly to /dev/fb0 by Fb0Writer (scales 480x320 -> 790x600).
-#   This works on tty, over SSH, and without X11 or a KMS/DRM driver.
-# SDL_FBDEV/SDL_FBACCEL: retained for compatibility; unused by offscreen driver.
+# SDL_VIDEODRIVER=dummy: pygame renders to a plain Surface; frames are written
+#   directly to /dev/fb0 by Fb0Writer (scales 480x320 -> 790x600). dummy is
+#   always compiled into pygame so it works on tty, SSH, and without X11.
+# SDL_FBDEV/SDL_FBACCEL: retained for compatibility; unused by dummy driver.
 # PYGAME_HIDE_SUPPORT_PROMPT: suppress pygame startup banner in console output.
-export SDL_VIDEODRIVER=offscreen
+export SDL_VIDEODRIVER=dummy
 export SDL_FBDEV=/dev/fb0
 export SDL_FBACCEL=0
 export PYGAME_HIDE_SUPPORT_PROMPT=1

@@ -87,17 +87,17 @@ class ArmApp:
         If /dev/fb0 is not writable (SSH, dev machine) Fb0Writer silently
         degrades to a no-op, allowing headless testing without changes.
         """
-        # Force offscreen: works on tty, over SSH, and in CI without X11.
-        os.environ["SDL_VIDEODRIVER"] = "offscreen"
+        # Use dummy video driver: we never call pygame.display.flip() so SDL's
+        # display backend is irrelevant. Frames go directly to /dev/fb0 via
+        # Fb0Writer. dummy is always compiled into pygame so this never fails.
+        os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
         os.environ.setdefault("SDL_FBDEV",   "/dev/fb0")
         os.environ.setdefault("SDL_FBACCEL", "0")
 
         pygame.init()
-        # Offscreen surface - rendered frames go to fb0 via Fb0Writer, not SDL.
-        self._surface = pygame.display.set_mode(
-            (theme.SCREEN_W, theme.SCREEN_H), pygame.NOFRAME
-        )
-        print("[arm_ui] pygame init OK (driver: offscreen + fb0_writer)", file=sys.stderr)
+        # Plain surface - no display window needed; Fb0Writer handles output.
+        self._surface = pygame.Surface((theme.SCREEN_W, theme.SCREEN_H))
+        print("[arm_ui] pygame init OK (surface: dummy + fb0_writer)", file=sys.stderr)
 
         self._fb0_writer = Fb0Writer(theme.SCREEN_W, theme.SCREEN_H)
 
