@@ -989,13 +989,24 @@ class AcordesApp(App):
 
 
 def _detect_small_display() -> bool:
-    """Return True if the active framebuffer is 800x480 or smaller (e.g. 480x320 TFT-LCD)."""
-    try:
-        with open("/sys/class/graphics/fb0/virtual_size") as f:
-            w, h = map(int, f.read().strip().split(","))
-            return w <= 800 and h <= 480
-    except Exception:
+    """Return True when running on ARM Linux (OStra / Raspberry Pi).
+
+    The Pi's /dev/fb0 virtual size is 790x600 (bcm2708_fb internal resolution)
+    even though the physical TFT-LCD is 480x320 — fbcp scales it on the way out.
+    Checking the virtual framebuffer size therefore does not reliably identify
+    the small display. ARM platform detection is the correct signal here:
+    OStra only ever runs on ARM, and desktop always runs on x86/x64.
+
+    Override with ACORDES_UI=simple (force Pygame) or ACORDES_UI=advanced
+    (force Textual) regardless of platform.
+    """
+    override = os.environ.get("ACORDES_UI", "")
+    if override == "advanced":
         return False
+    if override == "simple":
+        return True
+    import platform as _p
+    return _p.machine() in ("armv7l", "aarch64")
 
 
 def _run_arm_ui() -> None:
