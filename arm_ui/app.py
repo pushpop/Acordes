@@ -20,7 +20,7 @@ class ArmApp:
     are created externally and passed in - this class only owns the UI layer.
     """
 
-    FPS = 60
+    FPS = 30   # 30fps frees CPU headroom for the SCHED_FIFO audio callback
 
     def __init__(
         self,

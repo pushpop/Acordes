@@ -110,4 +110,13 @@ export SDL_FBDEV=/dev/fb0
 export SDL_FBACCEL=0
 export PYGAME_HIDE_SUPPORT_PROMPT=1
 
-exec flock -n /tmp/acordes.lock "$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py"
+# Hide terminal cursor and clear screen so console text doesn't bleed onto
+# the TFT-LCD display through the framebuffer. The pygame app owns fb0 entirely.
+tput civis 2>/dev/null || true   # hide cursor
+tput clear 2>/dev/null || true   # clear terminal screen
+
+# Redirect all output to a logfile. Console writes go to the terminal which
+# shares fb0 with pygame and would corrupt the display.
+LOG_FILE="/tmp/acordes.log"
+exec flock -n /tmp/acordes.lock "$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py" \
+    >> "$LOG_FILE" 2>&1

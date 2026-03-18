@@ -33,6 +33,11 @@ class LoadingScreen(BaseScreen):
         self._is_done      = False
         self._transitioned = False
 
+    def handle_event(self, event) -> None:
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                self.app.quit()
+
     def update(self, dt: float) -> None:
         self._elapsed += dt
 

@@ -34,6 +34,7 @@ class Fb0Writer:
         self._bpp    = 32
         self._available = False
         self._fb_file   = None
+        self._buf: bytearray | None = None   # Pre-allocated frame buffer
 
         self._open()
 
@@ -50,6 +51,8 @@ class Fb0Writer:
                 self._stride = int(f.read().strip())
 
             self._fb_file = open(self._FB0_PATH, "wb")  # noqa: SIM115
+            stride = self._stride if self._stride else self._fb_w * 4
+            self._buf = bytearray(stride * self._fb_h)
             self._available = True
             print(
                 f"[fb0_writer] /dev/fb0 open: {self._fb_w}x{self._fb_h} "
@@ -99,7 +102,8 @@ class Fb0Writer:
             if stride == row_bytes:
                 self._fb_file.write(raw)
             else:
-                buf = bytearray(stride * self._fb_h)
+                # Reuse pre-allocated buffer to avoid per-frame allocation.
+                buf = self._buf
                 for y in range(self._fb_h):
                     src = y * row_bytes
                     dst = y * stride

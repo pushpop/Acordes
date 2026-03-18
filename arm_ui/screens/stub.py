@@ -19,6 +19,11 @@ class StubScreen(BaseScreen):
         gp = self.app.gamepad_handler
         gp.set_button_callback(GP.BACK, lambda: self.app.goto("main_menu"))
 
+    def handle_event(self, event: pygame.event.Event) -> None:
+        if event.type == pygame.KEYDOWN:
+            if event.key in (pygame.K_ESCAPE, pygame.K_BACKSPACE, pygame.K_b):
+                self.app.goto("main_menu")
+
     def draw(self, surface: pygame.Surface) -> None:
         surface.fill(theme.BG_COLOR)
         font_large  = theme.FONTS[theme.FONT_LARGE]
