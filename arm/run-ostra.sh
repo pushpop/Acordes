@@ -98,4 +98,15 @@ _xbox_power_cycle
 # which gives it preemption over the UI thread without needing CPU isolation.
 # CPUs 0-2 handle everything; isolcpus=3 in cmdline.txt is available for
 # future per-thread affinity pinning if needed.
+
+# Pygame framebuffer display settings for the ARM Pygame UI.
+# SDL_VIDEODRIVER=fbcon: render directly to /dev/fb0 (no X11 required).
+# SDL_FBDEV=/dev/fb0: explicit framebuffer device (TFT-LCD via fbcp).
+# SDL_FBACCEL=0: disable hardware acceleration (not available on bcm2708_fb).
+# PYGAME_HIDE_SUPPORT_PROMPT: suppress pygame startup banner in console output.
+export SDL_VIDEODRIVER=fbcon
+export SDL_FBDEV=/dev/fb0
+export SDL_FBACCEL=0
+export PYGAME_HIDE_SUPPORT_PROMPT=1
+
 exec flock -n /tmp/acordes.lock "$VENV_DIR/bin/python" "$SCRIPT_DIR/main.py"

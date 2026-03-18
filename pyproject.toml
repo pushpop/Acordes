@@ -12,7 +12,7 @@ dependencies = [
     "textual>=0.75.0",
     "mido>=1.3.0",
     "python-rtmidi>=1.4.0",
-    "pygame>=2.0.0; sys_platform != 'linux' or (platform_machine != 'armv7l' and platform_machine != 'aarch64')",
+    "pygame>=2.0.0",
     "mingus>=0.6.1",
     # On Raspbian 11 (Bullseye, glibc 2.31) piwheels only has 1.x wheels.
     # numpy 2.x and scipy 1.14+ require glibc 2.34 (Debian 12 Bookworm).

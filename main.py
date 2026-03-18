@@ -988,10 +988,47 @@ class AcordesApp(App):
         os.system('cls' if os.name == 'nt' else 'clear')
 
 
+def _detect_small_display() -> bool:
+    """Return True if the active framebuffer is 800x480 or smaller (e.g. 480x320 TFT-LCD)."""
+    try:
+        with open("/sys/class/graphics/fb0/virtual_size") as f:
+            w, h = map(int, f.read().strip().split(","))
+            return w <= 800 and h <= 480
+    except Exception:
+        return False
+
+
+def _run_arm_ui() -> None:
+    """Initialize shared components and launch the ARM Pygame UI."""
+    from arm_ui.app import ArmApp
+    from music.preset_manager import PresetManager
+
+    config_manager = ConfigManager()
+    device_manager = MIDIDeviceManager(config_manager)
+    midi_handler = MIDIInputHandler(config_manager=config_manager)
+    chord_library = ChordLibrary()
+    chord_detector = ChordDetector(chord_library=chord_library)
+    gamepad_handler = GamepadHandler()
+    gamepad_handler.connect()
+    preset_manager = PresetManager()
+
+    ArmApp(
+        config_manager=config_manager,
+        device_manager=device_manager,
+        midi_handler=midi_handler,
+        chord_detector=chord_detector,
+        gamepad_handler=gamepad_handler,
+        preset_manager=preset_manager,
+    ).run()
+
+
 def main():
     """Main entry point."""
-    app = AcordesApp()
-    app.run()
+    use_arm_ui = _detect_small_display() or os.environ.get("ACORDES_UI") == "simple"
+    if use_arm_ui:
+        _run_arm_ui()
+    else:
+        AcordesApp().run()
 
 
 if __name__ == "__main__":
