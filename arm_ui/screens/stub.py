@@ -1,5 +1,5 @@
 # ABOUTME: Stub placeholder screen used for modes not yet implemented in the ARM UI.
-# ABOUTME: Displays the mode name and a "coming soon" message; B returns to main menu.
+# ABOUTME: Displays the mode name and a "coming soon" message; B/Esc returns to main menu.
 
 import pygame
 
@@ -9,7 +9,7 @@ from gamepad.actions import GP
 
 
 class StubScreen(BaseScreen):
-    """Placeholder shown for modes that are not yet fully implemented in the ARM UI."""
+    """Placeholder shown for modes not yet fully implemented in the ARM UI."""
 
     def __init__(self, app, title: str = "Mode") -> None:
         super().__init__(app)
@@ -26,17 +26,25 @@ class StubScreen(BaseScreen):
 
     def draw(self, surface: pygame.Surface) -> None:
         surface.fill(theme.BG_COLOR)
-        font_large  = theme.FONTS[theme.FONT_LARGE]
-        font_medium = theme.FONTS[theme.FONT_MEDIUM]
-        font_small  = theme.FONTS[theme.FONT_SMALL]
         cx = theme.SCREEN_W // 2
         cy = theme.SCREEN_H // 2
 
-        title_surf = font_large.render(self._title, True, theme.ACCENT)
-        surface.blit(title_surf, title_surf.get_rect(centerx=cx, centery=cy - 30))
+        # Pixel-art style box
+        box_w, box_h = 280, 100
+        box_x = cx - box_w // 2
+        box_y = cy - box_h // 2
+        pygame.draw.rect(surface, theme.BG_PANEL, (box_x, box_y, box_w, box_h))
+        pygame.draw.rect(surface, theme.ACCENT_DIM, (box_x, box_y, box_w, box_h), 1)
+        # Corner dots
+        for px, py in [(box_x, box_y), (box_x+box_w-2, box_y),
+                       (box_x, box_y+box_h-2), (box_x+box_w-2, box_y+box_h-2)]:
+            pygame.draw.rect(surface, theme.ACCENT, (px, py, 2, 2))
 
-        soon_surf = font_medium.render("Coming soon", True, theme.TEXT_SECONDARY)
-        surface.blit(soon_surf, soon_surf.get_rect(centerx=cx, centery=cy + 20))
+        title = theme.txt(theme.FONT_LARGE, self._title.upper(), theme.ACCENT)
+        surface.blit(title, title.get_rect(centerx=cx, y=box_y + 12))
 
-        back_surf = font_small.render("B: back", True, theme.TEXT_DIM)
-        surface.blit(back_surf, back_surf.get_rect(centerx=cx, y=theme.SCREEN_H - 24))
+        soon = theme.txt(theme.FONT_SMALL, "COMING SOON", theme.HIGHLIGHT)
+        surface.blit(soon, soon.get_rect(centerx=cx, y=box_y + 52))
+
+        back = theme.txt(theme.FONT_TINY, "B / Esc: back", theme.TEXT_DIM)
+        surface.blit(back, back.get_rect(centerx=cx, y=theme.SCREEN_H - 16))
