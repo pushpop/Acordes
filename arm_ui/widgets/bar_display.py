@@ -12,9 +12,9 @@ class BarDisplay:
     value is expected to be pre-normalized to 0.0-1.0 by the caller.
     """
 
-    _LABEL_WIDTH = 72   # Pixels reserved for the label on the left
-    _PCT_WIDTH   = 34   # Pixels reserved for the percentage text on the right
-    _BAR_HEIGHT  = 8    # Filled bar height in pixels
+    _LABEL_WIDTH = 36   # Pixels reserved for the label on the left (240x160 coords)
+    _PCT_WIDTH   = 18   # Pixels reserved for the percentage text on the right
+    _BAR_HEIGHT  = 4    # Filled bar height in pixels
 
     def __init__(self, rect: pygame.Rect, label: str, value: float = 0.0) -> None:
         self.rect  = rect

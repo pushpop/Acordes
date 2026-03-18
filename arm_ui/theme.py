@@ -3,15 +3,21 @@
 
 import pygame
 
-# Screen dimensions (matches TFT-LCD and HDMI output configured in tft_config.txt)
-SCREEN_W = 480
-SCREEN_H = 320
+# ── Render dimensions ────────────────────────────────────────────────────────
+# All screens render to the INTERNAL surface (240x160). The app scales it 2x
+# to DISPLAY size (480x320) using nearest-neighbor before writing to /dev/fb0.
+# This gives chunky pixel-art doubling: 1 render pixel = 2x2 display pixels.
+SCREEN_W     = 240    # Internal render width  (screens use this for all layout)
+SCREEN_H     = 160    # Internal render height (screens use this for all layout)
+DISPLAY_W    = 480    # Output width written to /dev/fb0
+DISPLAY_H    = 320    # Output height written to /dev/fb0
+RENDER_SCALE = 2      # Scale factor: DISPLAY = RENDER * RENDER_SCALE
 
 # ── Colors ──────────────────────────────────────────────────────────────────
-# Elektron/OP-1 inspired: pure black bg, white body text, green+orange accents only.
+# Elektron/OP-1 inspired: pure black bg, white body text, green+orange accents.
 BG_COLOR        = (  0,   0,   0)   # Pure black background
 BG_DARK         = (  0,   0,   0)   # Same black for inner panels
-BG_PANEL        = (  8,   8,   8)   # Very slightly lighter panel (barely visible)
+BG_PANEL        = (  8,   8,   8)   # Very slightly lighter panel
 ACCENT          = (  0, 210,  70)   # Green (active, enabled, playing)
 ACCENT_DIM      = (  0,  70,  25)   # Dim green for borders and inactive
 HIGHLIGHT       = (255, 140,   0)   # Orange (selected, focused)
@@ -27,27 +33,27 @@ BADGE_BUILTIN   = (  0,  55,  20)   # "Built-in" badge background
 BADGE_USER      = ( 70,  45,   0)   # "User" badge background
 SEPARATOR       = ( 40,  40,  40)   # Horizontal rule lines
 
-# Minimum touch target size in pixels (both axes)
-MIN_TOUCH = 60
+# Minimum touch target size in pixels (internal render coords)
+MIN_TOUCH = 30
 
-# ── Font sizes ───────────────────────────────────────────────────────────────
-# Pixel art aesthetic: use exact sizes for crisp bitmap rendering.
-FONT_GIANT  = 56   # BPM display, large numeric readouts
-FONT_LARGE  = 28   # Preset name, chord name
-FONT_MEDIUM = 18   # Button labels, section headers
-FONT_SMALL  = 13   # Parameter labels, info text
-FONT_TINY   =  9   # Status footnotes, counters, hints
+# ── Font sizes (at 240x160 internal; appear 2x larger on the 480x320 display) ─
+# A FONT_LARGE=20 render pixel appears as 40px on screen - clearly readable.
+FONT_GIANT  = 32   # BPM / large readouts (appears 64px on display)
+FONT_LARGE  = 20   # Preset name, chord name (appears 40px)
+FONT_MEDIUM = 14   # Button labels, section headers (appears 28px)
+FONT_SMALL  = 11   # Parameter labels, info text (appears 22px)
+FONT_TINY   =  8   # Status footnotes, counters, hints (appears 16px)
 
-# ── Carousel layout ──────────────────────────────────────────────────────────
-CAROUSEL_CENTER_W  = 140
-CAROUSEL_CENTER_H  = 150
-CAROUSEL_SIDE_W    = 90
-CAROUSEL_SIDE_H    = 100
-CAROUSEL_FAR_W     = 56
-CAROUSEL_FAR_H     = 70
+# ── Carousel layout (internal 240x160 coordinates) ───────────────────────────
+CAROUSEL_CENTER_W  = 72
+CAROUSEL_CENTER_H  = 82
+CAROUSEL_SIDE_W    = 44
+CAROUSEL_SIDE_H    = 52
+CAROUSEL_FAR_W     = 26
+CAROUSEL_FAR_H     = 34
 CAROUSEL_CENTER_X  = (SCREEN_W - CAROUSEL_CENTER_W) // 2
-CAROUSEL_CENTER_Y  = 50
-CAROUSEL_ITEM_GAP  = 10   # Pixels between carousel items
+CAROUSEL_CENTER_Y  = 24
+CAROUSEL_ITEM_GAP  = 6    # Pixels between carousel items
 
 
 def _try_pixel_font(size: int) -> pygame.font.Font:
@@ -76,7 +82,6 @@ def _try_pixel_font(size: int) -> pygame.font.Font:
 
 
 # Fonts are populated by arm_ui.app after pygame.init() has been called.
-# Access via: theme.FONTS[theme.FONT_MEDIUM]
 FONTS: dict = {}
 
 
@@ -94,7 +99,7 @@ def txt(font_size: int, text: str, color: tuple) -> pygame.Surface:
 
 def draw_dotted_rect(surface: pygame.Surface, color: tuple,
                      rect, step: int = 3) -> None:
-    """Draw a dotted/dashed border around rect - Elektron Digitakt panel style.
+    """Draw a dotted border around rect - Elektron Digitakt panel style.
 
     Dots are spaced every `step` pixels on each edge.
     rect can be a pygame.Rect or a (x, y, w, h) tuple.
@@ -104,12 +109,10 @@ def draw_dotted_rect(surface: pygame.Surface, color: tuple,
     else:
         x, y, w, h = rect.x, rect.y, rect.width, rect.height
 
-    # Top and bottom edges
     for px in range(x, x + w, step):
         surface.set_at((px, y),         color)
         surface.set_at((px, y + h - 1), color)
 
-    # Left and right edges
     for py in range(y, y + h, step):
         surface.set_at((x,         py), color)
         surface.set_at((x + w - 1, py), color)
@@ -139,7 +142,7 @@ def draw_corner_marks(surface: pygame.Surface, color: tuple,
     pygame.draw.line(surface, color, (r,     y), (r,     y + s))
     # Bottom-left
     pygame.draw.line(surface, color, (x,     b), (x + s, b))
-    pygame.draw.line(surface, color, (x,     b - s), (x, b))
+    pygame.draw.line(surface, color, (x,     b - s), (x,  b))
     # Bottom-right
     pygame.draw.line(surface, color, (r - s, b), (r,     b))
-    pygame.draw.line(surface, color, (r,     b - s), (r,   b))
+    pygame.draw.line(surface, color, (r,     b - s), (r,  b))

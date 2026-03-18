@@ -44,6 +44,7 @@ class ArmApp:
 
         self._surface: pygame.Surface | None = None
         self._clock: pygame.time.Clock | None = None
+        self._display_surface: pygame.Surface | None = None
         self._fb0_writer: Fb0Writer | None = None
         self._keyboard: KeyboardHandler | None = None
         self._running = False
@@ -100,11 +101,15 @@ class ArmApp:
         os.environ.setdefault("SDL_FBACCEL", "0")
 
         pygame.init()
-        # Plain surface - no display window needed; Fb0Writer handles output.
+        # Internal render surface at half resolution (240x160). Each frame is
+        # scaled 2x to the display surface (480x320) using nearest-neighbor
+        # before being written to /dev/fb0. This gives chunky pixel-art doubling:
+        # 1 render pixel = 2x2 display pixels, with no blurring.
         self._surface = pygame.Surface((theme.SCREEN_W, theme.SCREEN_H))
-        print("[arm_ui] pygame init OK (surface: dummy + fb0_writer)", file=sys.stderr)
+        self._display_surface = pygame.Surface((theme.DISPLAY_W, theme.DISPLAY_H))
+        print("[arm_ui] pygame init OK (render:240x160 -> display:480x320, dummy+fb0)", file=sys.stderr)
 
-        self._fb0_writer = Fb0Writer(theme.SCREEN_W, theme.SCREEN_H)
+        self._fb0_writer = Fb0Writer(theme.DISPLAY_W, theme.DISPLAY_H)
 
         self._keyboard = KeyboardHandler()
         self._keyboard.start()   # opens device + sets O_NONBLOCK; no thread
@@ -172,7 +177,7 @@ class ArmApp:
             loading.update(dt)   # sets _dirty via request_redraw() if animating
             if self._dirty:
                 loading.draw(self._surface)
-                self._fb0_writer.write_surface(self._surface)
+                self._flush_to_display()
                 self._dirty = False
 
         loading.on_exit()
@@ -201,7 +206,7 @@ class ArmApp:
             if self._dirty:
                 if self._current_screen is not None:
                     self._current_screen.draw(self._surface)
-                self._fb0_writer.write_surface(self._surface)
+                self._flush_to_display()
                 self._dirty = False
 
     # ── Screen management ────────────────────────────────────────────────────
@@ -255,6 +260,16 @@ class ArmApp:
         if factory is None:
             raise ValueError(f"Unknown screen name: {name!r}")
         return factory()
+
+    def _flush_to_display(self) -> None:
+        """Scale internal 240x160 surface to 480x320 and write to /dev/fb0.
+
+        pygame.transform.scale uses nearest-neighbor (no smoothing), which
+        gives the crisp 2x pixel-art doubling we want.
+        """
+        pygame.transform.scale(self._surface, (theme.DISPLAY_W, theme.DISPLAY_H),
+                               self._display_surface)
+        self._fb0_writer.write_surface(self._display_surface)
 
     def request_redraw(self) -> None:
         """Ask for a redraw on the next frame.

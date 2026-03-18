@@ -9,7 +9,11 @@ from arm_ui import theme
 
 
 class LoadingScreen(BaseScreen):
-    """Animated loading screen with pixel art style."""
+    """Animated loading screen with pixel art style.
+
+    All coordinates are in internal render space (240x160).
+    The app scales to 480x320 before writing to the framebuffer.
+    """
 
     _CYCLE_PERIOD    = 3.0   # Seconds for one full 0-99% animation cycle
     _DONE_HOLD       = 1.0   # Seconds to hold at 100% before transitioning
@@ -59,16 +63,16 @@ class LoadingScreen(BaseScreen):
     def draw(self, surface: pygame.Surface) -> None:
         surface.fill(theme.BG_COLOR)
 
-        cx = theme.SCREEN_W // 2
+        cx  = theme.SCREEN_W // 2
         pct = self._progress()
 
-        # Title - pixel art style with character spacing
+        # Title - large, pixel art spaced lettering
         title = theme.txt(theme.FONT_LARGE, "A C O R D E S", theme.ACCENT)
-        surface.blit(title, title.get_rect(centerx=cx, y=55))
+        surface.blit(title, title.get_rect(centerx=cx, y=28))
 
-        # Subtitle / version
+        # Subtitle
         sub = theme.txt(theme.FONT_TINY, "OStra", theme.TEXT_DIM)
-        surface.blit(sub, sub.get_rect(centerx=cx, y=95))
+        surface.blit(sub, sub.get_rect(centerx=cx, y=52))
 
         # Status line
         if self._is_done:
@@ -77,37 +81,38 @@ class LoadingScreen(BaseScreen):
         else:
             err = self.app.synth_engine.get_error() if self.app.synth_engine else None
             if err:
-                status_text  = f"ERR  {err[:30]}"
+                status_text  = f"ERR  {err[:24]}"
                 status_color = theme.ERROR_COLOR
             else:
                 status_text  = "LOADING AUDIO ENGINE"
                 status_color = theme.TEXT_SECONDARY
 
-        status = theme.txt(theme.FONT_SMALL, status_text, status_color)
-        surface.blit(status, status.get_rect(centerx=cx, y=128))
+        status = theme.txt(theme.FONT_TINY, status_text, status_color)
+        surface.blit(status, status.get_rect(centerx=cx, y=65))
 
-        # Progress bar - blocky pixel style
-        bar_w  = 320
-        bar_h  = 8
+        # Progress bar
+        bar_w  = 160
+        bar_h  = 6
         bar_x  = (theme.SCREEN_W - bar_w) // 2
-        bar_y  = 158
+        bar_y  = 80
         fill_w = int(bar_w * pct)
 
         pygame.draw.rect(surface, theme.BAR_BG, (bar_x, bar_y, bar_w, bar_h))
         if fill_w > 0:
             pygame.draw.rect(surface, theme.BAR_FG, (bar_x, bar_y, fill_w, bar_h))
-        theme.draw_dotted_rect(surface, theme.ACCENT_DIM, (bar_x, bar_y, bar_w, bar_h), step=4)
+        theme.draw_dotted_rect(surface, theme.ACCENT_DIM,
+                               (bar_x, bar_y, bar_w, bar_h), step=4)
 
         # Percentage
         pct_txt = theme.txt(theme.FONT_TINY, f"{int(pct * 100):3d}%", theme.TEXT_SECONDARY)
-        surface.blit(pct_txt, pct_txt.get_rect(centerx=cx, y=bar_y + bar_h + 6))
+        surface.blit(pct_txt, pct_txt.get_rect(centerx=cx, y=bar_y + bar_h + 4))
 
-        # Pixel art spinner - cycling block characters
+        # Pixel art spinner
         _SPIN = ["|", "/", "-", "\\"]
         spin_ch = _SPIN[int(self._elapsed * 6) % len(_SPIN)] if not self._is_done else "*"
         spin = theme.txt(theme.FONT_SMALL, spin_ch, theme.HIGHLIGHT)
-        surface.blit(spin, spin.get_rect(x=bar_x - 20, y=bar_y - 2))
+        surface.blit(spin, spin.get_rect(x=bar_x - 14, centery=bar_y + bar_h // 2))
 
         # Bottom hint
         hint = theme.txt(theme.FONT_TINY, "Esc: quit", theme.TEXT_DIM)
-        surface.blit(hint, (theme.SCREEN_W - hint.get_width() - 6, theme.SCREEN_H - 16))
+        surface.blit(hint, (theme.SCREEN_W - hint.get_width() - 4, theme.SCREEN_H - 10))
