@@ -145,26 +145,22 @@ class MainMenuScreen(BaseScreen):
             # Large icon glyph centered in the upper portion of the tile
             icon_size  = theme.FONT_LARGE   if is_sel else theme.FONT_MEDIUM
             icon_color = theme.TEXT_PRIMARY  if is_sel else theme.TEXT_DIM
-            icon_font  = (theme.FONTS_M[icon_size] if is_sel
-                          else theme.FONTS_R[icon_size])
-            icon_surf  = icon_font.render(icon, False, icon_color)
+            icon_surf  = theme.FONTS_UI[icon_size].render(icon, False, icon_color)
             icon_x     = item_cx - icon_surf.get_width() // 2
             icon_y     = iy + h // 2 - icon_surf.get_height() // 2 - theme.CELL_H // 2
             surface.blit(icon_surf, (icon_x, icon_y))
 
             # Mode label below the icon, inside the tile bottom area
-            lbl_color = theme.ACCENT        if is_sel else theme.TEXT_DIM
-            lbl_font  = (theme.FONTS_M[theme.FONT_TINY] if is_sel
-                         else theme.FONTS_R[theme.FONT_TINY])
-            lbl_surf  = lbl_font.render(lbl, False, lbl_color)
+            lbl_color = theme.ACCENT if is_sel else theme.TEXT_DIM
+            lbl_surf  = theme.FONTS_UI[theme.FONT_TINY].render(lbl, False, lbl_color)
             lbl_x     = item_cx - lbl_surf.get_width() // 2
             lbl_y     = icon_y + icon_surf.get_height() + 2
             surface.blit(lbl_surf, (lbl_x, lbl_y))
 
         # Hint bar at bottom
         if self._quit_armed:
-            font = theme.FONTS_M[theme.FONT_TINY]
-            s = font.render("PRESS ESC AGAIN TO QUIT", False, theme.ERROR_COLOR)
+            s = theme.FONTS_UI[theme.FONT_TINY].render(
+                "PRESS ESC AGAIN TO QUIT", False, theme.ERROR_COLOR)
             y = theme.SCREEN_H - theme.CELL_H
             widgets.hline(surface, 0, y - 2, theme.SCREEN_W, theme.SEPARATOR)
             surface.blit(s, s.get_rect(centerx=theme.SCREEN_W // 2, y=y))

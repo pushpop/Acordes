@@ -41,7 +41,7 @@ class StubScreen(BaseScreen):
 
         # "COMING SOON" centered inside the box
         inner = widgets.box_inner(bx, by, box_w, box_h)
-        label_s = theme.FONTS_M[theme.FONT_SMALL].render(
+        label_s = theme.FONTS_UI[theme.FONT_SMALL].render(
             "COMING SOON", False, theme.TEXT_PRIMARY)
         surface.blit(label_s, label_s.get_rect(
             centerx=inner.centerx, centery=inner.centery))

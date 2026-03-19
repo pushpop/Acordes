@@ -1,5 +1,5 @@
-# ABOUTME: Visual theme constants for the ARM Pygame UI (480x320 framebuffer).
-# ABOUTME: All colors, font sizes, and layout values are defined here - nowhere else.
+# ABOUTME: Visual theme constants and font loading for the ARM Pygame UI.
+# ABOUTME: Silkscreen handles readable text; PixelCode handles glyphs and UI chrome.
 
 import os
 import pygame
@@ -66,22 +66,15 @@ CAROUSEL_ITEM_GAP  = 6
 
 
 # -- Font loading -------------------------------------------------------------
-# Three PixelCode variants loaded from arm_ui/fonts/:
-#   PixelCode.ttf         -> Regular: body text, box chrome, parameter labels
-#   PixelCode-Italic.ttf  -> Italic:  hints, secondary info, dim text
-#   PixelCode-Medium.ttf  -> Medium:  section headers, selected item names
-#
-# To download on Pi (fonts are committed to the repo; use git pull):
-#   BASE="https://github.com/qwerasd205/PixelCode/raw/main/dist/ttf"
-#   wget "$BASE/PixelCode.ttf"         -O arm_ui/fonts/PixelCode.ttf
-#   wget "$BASE/PixelCode-Italic.ttf"  -O arm_ui/fonts/PixelCode-Italic.ttf
-#   wget "$BASE/PixelCode-Medium.ttf"  -O arm_ui/fonts/PixelCode-Medium.ttf
+# Two fonts loaded from arm_ui/fonts/:
+#   Silkscreen.ttf  -> all readable UI text: titles, labels, buttons, menus, hints
+#   PixelCode.ttf   -> all glyph-based UI chrome: box drawing, block elements,
+#                      geometric shapes, indicators, AND long readable text
+#                      (compendium descriptions, etc.)
 
-# Font dicts - populated by init_fonts(), keyed by font size int.
-FONTS_R = {}   # Regular: body text, box chrome, labels
-FONTS_I = {}   # Italic:  hints, secondary info, status messages
-FONTS_M = {}   # Medium:  headers, selected names, emphasis
-FONTS   = {}   # Backward-compat alias pointing to FONTS_R
+# Font dicts keyed by size int - populated by init_fonts().
+FONTS_UI = {}   # Silkscreen: readable text
+FONTS_GL = {}   # PixelCode:  glyphs and UI chrome
 
 
 def _load_font_file(filename, size):
@@ -118,7 +111,7 @@ def _snap(value, cell):
 
 def init_fonts():
     """Populate font dicts and compute grid cell size. Must be called after pygame.init()."""
-    global FONTS_R, FONTS_I, FONTS_M, FONTS, CELL_W, CELL_H
+    global FONTS_UI, FONTS_GL, CELL_W, CELL_H
     global CAROUSEL_CENTER_W, CAROUSEL_CENTER_H
     global CAROUSEL_SIDE_W,   CAROUSEL_SIDE_H
     global CAROUSEL_FAR_W,    CAROUSEL_FAR_H
@@ -127,18 +120,12 @@ def init_fonts():
     sizes = [FONT_TINY, FONT_SMALL, FONT_MEDIUM, FONT_LARGE, FONT_GIANT]
 
     for s in sizes:
-        r = _load_font_file("PixelCode.ttf", s) or _fallback_font(s)
-        i = _load_font_file("PixelCode-Italic.ttf", s) or r
-        m = _load_font_file("PixelCode-Medium.ttf", s) or r
-        FONTS_R[s] = r
-        FONTS_I[s] = i
-        FONTS_M[s] = m
+        FONTS_UI[s] = _load_font_file("Silkscreen.ttf", s) or _fallback_font(s)
+        FONTS_GL[s] = _load_font_file("PixelCode.ttf",  s) or _fallback_font(s)
 
-    FONTS = FONTS_R   # backward compat
-
-    # Compute cell dimensions from actual rendered metrics at FONT_SMALL.
+    # Compute glyph cell dimensions from actual PixelCode metrics at FONT_SMALL.
     # Block character (U+2588) is guaranteed full-advance-width in PixelCode.
-    cell = FONTS_R[FONT_SMALL].size("\u2588")
+    cell = FONTS_GL[FONT_SMALL].size("\u2588")
     CELL_W = max(1, cell[0])
     CELL_H = max(1, cell[1])
 
@@ -156,26 +143,27 @@ def init_fonts():
 # -- Text rendering helpers ---------------------------------------------------
 
 def txt(font_size, text, color):
-    """Render with Regular variant, antialias=False (body text, labels, box chrome)."""
-    return FONTS_R[font_size].render(text, False, color)
+    """Render readable text using Silkscreen (antialias=False for crisp pixels).
+
+    Use for: titles, labels, button text, menus, hints, parameter names.
+    """
+    return FONTS_UI[font_size].render(text, False, color)
 
 
-def txt_italic(font_size, text, color):
-    """Render with Italic variant (hints, secondary info, dim text)."""
-    return FONTS_I[font_size].render(text, False, color)
+def glyph(font_size, text, color):
+    """Render UI chrome using PixelCode (antialias=False for crisp pixels).
+
+    Use for: box-drawing characters, block elements, geometric shapes,
+    progress bars, indicators, and long descriptive text (compendium, etc.).
+    """
+    return FONTS_GL[font_size].render(text, False, color)
 
 
-def txt_medium(font_size, text, color):
-    """Render with Medium variant (section headers, selected item names)."""
-    return FONTS_M[font_size].render(text, False, color)
-
-
-# -- Legacy drawing helpers ---------------------------------------------------
+# -- Drawing helpers ----------------------------------------------------------
 
 def draw_box(surface, rect, active=False):
     """Draw a solid-border filled box. White border when active, dark grey when not.
 
-    Kept for backward compatibility; new code should use widgets.Box instead.
     rect can be a pygame.Rect or (x, y, w, h) tuple.
     """
     color = BORDER_ACTIVE if active else BORDER_INACTIVE
