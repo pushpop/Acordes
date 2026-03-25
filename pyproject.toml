@@ -27,6 +27,7 @@ dependencies = [
     # evdev: gamepad input on Linux ARM via /dev/input. Desktop platforms use
     # the pygame.joystick backend (pygame is already in the non-ARM dep list).
     "evdev>=1.6.0; sys_platform == 'linux' and (platform_machine == 'armv7l' or platform_machine == 'aarch64')",
+    "matplotlib>=3.9.4",
 ]
 
 [tool.setuptools]

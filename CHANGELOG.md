@@ -5,6 +5,37 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-03-25 - Grasp: Polyphonic Voice Stealing Refinement
+
+### Added
+
+**Ghost voice system (POLY mode)**:
+- New overflow voice pool (2 slots on desktop, 1 on ARM) that captures release tails from stolen voices
+- When a POLY voice must be stolen while still audible (envelope > 5%), its full state (phase, filter memory, DC blocker, envelope position) is promoted to a ghost slot
+- The real slot is freed immediately for the new note with a clean filter state, preventing frequency-domain glitches
+- Ghost voices output at reduced gain (0.7×) and are never counted in gain normalisation
+- Ghost slots auto-reclaim when their release envelope fully decays
+- Three-tier steal priority: (1) safe steal of near-silent releasing voices, (2) ghost promotion for still-audible tails, (3) brutal steal if all slots full (rare)
+
+**ARM filter upgrade (4-pole cascade)**:
+- Replaced single 2nd-order biquad (12dB/oct) with two cascaded biquad sections (4-pole, 24dB/oct)
+- Stage 1 carries resonance peak (Q scales 0.707→12 with resonance), Stage 2 near-Butterworth (Q 0.707→1.2 for stability)
+- Asymmetric Q distribution prevents runaway instability while maintaining warm Moog-like character
+- All changes use `scipy.sosfilt` (C code, GIL-free) so ARM performance remains untouched
+- Matches desktop Moog ladder rolloff slope for perceptually consistent filter character across platforms
+
+### Fixed
+
+- POLY voice stealing now preserves audible release tails instead of brutally cutting them, eliminating tail artifacts during rapid note playing
+- Simulation tool confirms zero buffer-boundary glitches across all voice modes (MONO/UNISON/POLY sequential and overlapping scenarios)
+
+### Changed
+
+- `music/synth_engine.py`: Added ghost voice pool, three-tier POLY steal logic, 4-pole ARM LPF cascade
+- `tools/simulate_octave.py`: Headless synth simulation tool with full octave playback, glitch detection, and waveform visualization
+
+---
+
 ## [1.9.3] - 2026-03-25
 
 ### Fixed
