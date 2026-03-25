@@ -5,6 +5,39 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.3] - 2026-03-25
+
+### Fixed
+
+**MONO/UNISON voice stealing artifacts (major overhaul)**:
+- Removed `_mono_dissolve_gain` normalization: the 1/sqrt(2) per-voice scale was snapping the
+  old voice down 29% at every steal and snapping back up ~41% 150ms later, both audible as clicks
+- Filter delay-line states (ladder, SVF, DC blocker) no longer inherited on voice steal: stale
+  frequency-mismatch energy at high resonance (Q≈9) rang as ghost tones on pure-sine waveforms
+- Pre-gate S-curve now inherits `pre_gate_progress` from the outgoing voice instead of resetting
+  to 0.0: rapid re-triggers (key bounce, half-pressed keys) no longer dip to silence and stutter
+- Stolen voice release capped at 15ms (new `Voice.release_time_cap`) regardless of the release
+  knob: prevents two simultaneous pure-sine voices from beating long enough to produce audible AM
+- Filter coefficient smoothers (`smooth_fl_lpf/hpf`, `smooth_resonance`) still inherited to prevent
+  sudden cutoff jumps from key tracking or FEG position at the steal moment
+- Phase continuity maintained on steal: new voice starts at old voice's phase to prevent
+  destructive interference during the dissolve overlap
+
+**Sample rate and scipy improvements**:
+- Sample rate exposed via `ACORDES_SAMPLE_RATE` env var for rapid testing without code changes
+- `scipy.lfilter` DC blocker fast path extended to all platforms (zero quality trade-off, ~100x speedup)
+- `scipy.sosfilt` Moog ladder replacement correctly guarded as ARM-only (was accidentally extended
+  to desktop in a prior session, causing quality regression)
+
+**Config mode**:
+- Oversampling toggle vertical size fixed: no longer shifts the screen or causes scroll overlap
+
+### Changed
+
+- `music/synth_engine.py`: MONO/UNISON voice steal rewrite, sample rate env var, scipy guards,
+  `_TRANSITION_XF_SAMPLES` raised from 8 to 48 samples (1.1ms), `Voice.release_time_cap` field
+- `modes/config_mode.py`: Oversampling toggle layout fix
+
 ## [1.9.2] - 2026-03-10
 
 ### Added

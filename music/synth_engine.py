@@ -112,6 +112,12 @@ class Voice:
         # Applied between oscillator and filter so the filter sees a smoothly growing
         # signal.  Default 1.0 = fully open; zero impact on all other paths.
         self.pre_gate_progress: float = 1.0
+        # When > 0, caps the exponential release time constant to this value (seconds)
+        # for the duration of this release.  Set on the outgoing voice during a MONO
+        # voice steal so its fade-out finishes in ≤15ms regardless of the release knob.
+        # Prevents two simultaneous pure-sine voices from beating together long enough
+        # to become audible.  Cleared to 0.0 in reset() so normal note-offs are unaffected.
+        self.release_time_cap: float = 0.0
 
         # Per-voice filter cutoff smoothing: tracks the effective fl_lpf / fl_hpf used
         # in the previous buffer.  Interpolating toward the new value each buffer prevents
@@ -217,6 +223,7 @@ class Voice:
         self._arm_hpf_zi_r1 = None
         self._arm_hpf_zi_r2 = None
         self._arm_dcblock_zi = None
+        self.release_time_cap = 0.0
 
 
 def list_output_devices() -> list:
@@ -367,10 +374,13 @@ class SynthEngine:
 
     def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None,
                  enable_oversampling=True):
-        # 44100 Hz on all platforms. Matches the bcm2835 headphone jack native
-        # rate on ARM (avoids ALSA resampling overhead). On desktop the difference
-        # from 48000 is inaudible for synth use and keeps ARM/desktop parity.
-        self.sample_rate = 44100
+        # Sample rate default: 44100 Hz. Override with ACORDES_SAMPLE_RATE env var
+        # for quick testing without touching code, e.g.:
+        #   ACORDES_SAMPLE_RATE=48000 uv run python main.py
+        # Valid values: 44100, 48000, 88200, 96000. Anything else falls back to 44100.
+        _VALID_RATES = {44100, 48000, 88200, 96000}
+        _env_rate = int(os.environ.get("ACORDES_SAMPLE_RATE", "0"))
+        self.sample_rate = _env_rate if _env_rate in _VALID_RATES else 44100
         # ARM: floor at 2048 (~46ms at 44100Hz). The Pi 4's single usable Python
         # core (GIL) must handle both Textual UI and the audio callback. 1024
         # (~43ms) leaves too little headroom and causes periodic underruns that
@@ -393,18 +403,26 @@ class SynthEngine:
         # Startup diagnostic string populated after stream init (ARM only).
         # Read by engine_proxy._audio_process_main and forwarded to LoadingScreen.
         self._startup_info = ""
-        # ARM Lite: import scipy signal functions once at init time so the audio
-        # callback never pays the import cost. Falls back gracefully if scipy is
-        # missing (the Python loop filters are used instead).
+        # Import scipy signal functions once at init time so the audio callback
+        # never pays the import cost. Falls back gracefully if scipy is not installed.
+        #
+        # _scipy_sosfilt: ARM only. Replaces the 4-pole Moog ladder + SVF with a
+        #   2nd-order biquad approximation. Necessary on ARM because the Python
+        #   per-sample ladder loop cannot run in real-time. On desktop the Moog
+        #   ladder runs fine and must not be bypassed (would be a quality regression).
+        #
+        # _scipy_lfilter: All platforms. Used only for the DC blocker — an exact
+        #   implementation (not an approximation), gives ~100x speedup with zero
+        #   quality trade-off. Especially valuable when oversampling is enabled.
         self._scipy_sosfilt = None
         self._scipy_lfilter = None
-        if self._IS_ARM:
-            try:
-                from scipy.signal import sosfilt as _sosfilt, lfilter as _lfilter
+        try:
+            from scipy.signal import sosfilt as _sosfilt, lfilter as _lfilter
+            if self._IS_ARM:
                 self._scipy_sosfilt = _sosfilt
-                self._scipy_lfilter = _lfilter
-            except ImportError:
-                pass
+            self._scipy_lfilter = _lfilter
+        except ImportError:
+            pass
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
         # -2 = System Default (None passed to sounddevice — OS chooses the output)
@@ -593,8 +611,8 @@ class SynthEngine:
         # drive / gain_ramp changes between buffers.
         self._last_output_L: float = 0.0
         self._last_output_R: float = 0.0
-        self._transition_xf_remaining: int = 0  # samples left in active crossfade
-        self._TRANSITION_XF_SAMPLES:  int = 8   # 8 smp ≈ 0.17ms: inaudible at 48kHz
+        self._transition_xf_remaining: int = 0   # samples left in active crossfade
+        self._TRANSITION_XF_SAMPLES:  int = 48  # 48 smp ≈ 1.1ms: inaudible, covers UNISON freq-step artifact
 
         # FX tail drain counter — keeps the audio callback alive (not early-returning
         # silence) while Delay / Chorus ring buffers still have audible wet content.
@@ -1202,6 +1220,10 @@ class SynthEngine:
             # that was here previously made releases sound 4x shorter than the UI indicated.
             rel_mod = 1.0 / (0.5 + voice.release_velocity)
             time_const = max(0.005, self.release * rel_mod)
+            # On a MONO voice steal the outgoing voice gets a short cap so two pure-sine
+            # voices don't beat together long enough to produce an audible AM artifact.
+            if voice.release_time_cap > 0.0:
+                time_const = min(time_const, voice.release_time_cap)
             envelope = voice.release_start_level * np.exp(-times / time_const)
             ANTI_R = 0.002
             if times[0] < ANTI_R:
@@ -1480,10 +1502,10 @@ class SynthEngine:
         fl_lpf = voice.smooth_fl_lpf
         fl_hpf = voice.smooth_fl_hpf
 
-        # ── ARM Lite fast path: scipy biquad (C code, GIL-free, ~100x faster) ─
+        # ── scipy fast path: biquad IIR (C code, GIL-free, ~100x faster) ───────
         # Replaces the per-sample Python loops for both HPF and LPF stages.
         # Uses RBJ cookbook 2nd-order IIR with sosfilt state continuity across buffers.
-        if self._IS_ARM and self._scipy_sosfilt is not None:
+        if self._scipy_sosfilt is not None:
             _sosfilt = self._scipy_sosfilt
             # HPF stage (only if cutoff is meaningfully above DC — > 30 Hz)
             if fl_hpf > 30.0:
@@ -1624,10 +1646,10 @@ class SynthEngine:
         else:
             coeff = 0.9997
 
-        # ARM Lite fast path: scipy lfilter (C code, GIL-free).
+        # scipy fast path: lfilter (C code, GIL-free).
         # DC blocker H(z) = (1 - z^-1)/(1 - coeff*z^-1); b=[1,-1], a=[1,-coeff].
         # Transposed DF-II initial state: zi[0] = -x_prev + coeff * y_prev.
-        if self._IS_ARM and self._scipy_lfilter is not None:
+        if self._scipy_lfilter is not None:
             b_dc = np.array([1.0, -1.0])
             a_dc = np.array([1.0, -coeff])
             if voice._arm_dcblock_zi is None:
@@ -1876,21 +1898,60 @@ class SynthEngine:
 
             has_amplitude = old_v.last_envelope_level > 0.001
             if has_amplitude:
+                # Capture oscillator phase and filter coefficient smoothers from the
+                # outgoing voice.  Phase inheritance prevents destructive interference
+                # during the dissolve overlap (two pure-sine voices at different phases
+                # cancel and create a click at the steal moment).  Smooth variable
+                # inheritance prevents a sudden jump in filter coefficients when key
+                # tracking or the FEG leaves the cutoff at a different value than the
+                # new voice's starting point.
+                #
+                # Filter delay-line states (ladder, SVF, DC blocker) are intentionally
+                # NOT inherited.  Each state transfer introduces accumulated frequency-
+                # mismatch error: the filter "remembers" energy at the old pitch, and
+                # when the new oscillator drives it at a different pitch that stored
+                # energy rings at the wrong frequency.  With high resonance (Q≈9) this
+                # ringing is clearly audible on pure-sine waveforms.  Starting with zero
+                # filter state and the pre-gate S-curve (which ramps the oscillator from
+                # 0 to 1 over 30ms) gives the filter a clean cold start with no stored
+                # energy to mismatch — eliminating the artifact entirely.
+                _old_phase      = old_v.phase
+                _old_pre_gate   = old_v.pre_gate_progress
+                _old_smooth_lpf = old_v.smooth_fl_lpf
+                _old_smooth_hpf = old_v.smooth_fl_hpf
+                _old_smooth_res = old_v.smooth_resonance
+
                 # Dissolve: send outgoing voice into ADSR release (it fades naturally),
-                # trigger incoming voice from zero (it attacks naturally).
-                # The overlap duration is the outgoing release time, so the crossfade
-                # length is musically tied to the preset's release setting.
+                # trigger incoming voice fresh (it attacks naturally).
+                # Cap stolen voice release to 15ms so two simultaneous pure-sine voices
+                # at different pitches do not beat long enough to produce audible AM.
                 old_v.release(self.attack, self.decay, self.sustain, 1.0)
+                old_v.release_time_cap = 0.015
                 old_v.feg_release_level = self._feg_level_snapshot(old_v)
                 old_v.feg_is_releasing = True
                 old_v.feg_release_start = old_v.feg_time
                 new_v.trigger(note, freq, vel)
                 new_v.onset_ms = onset_ms_for_note
-                new_v.phase = 0.0
-                new_v.pre_gate_progress = 0.0
+                # Phase continuity: match outgoing oscillator to prevent destructive
+                # interference during the dissolve overlap period.
+                new_v.phase = _old_phase
+                # Gate continuity: inherit the outgoing voice's pre-gate progress so
+                # the oscillator does not dip back to zero on every re-trigger.
+                # Without this, rapid key presses (key bounce, half-pressed contact,
+                # fast playing) reset the ramp to 0 each time, causing the output to
+                # stutter to silence then rebuild over 30ms on every steal.
+                # Filter states are still zero (trigger() cleared them), so no stored
+                # resonant energy can ghost-ring regardless of the pre_gate level —
+                # the filter sees a smoothly-continuing input at whatever level the
+                # ramp was already at, with no abrupt step.
+                new_v.pre_gate_progress = _old_pre_gate
+                # Inherit coefficient smoothers so the filter cutoff does not jump.
+                new_v.smooth_fl_lpf = _old_smooth_lpf
+                new_v.smooth_fl_hpf = _old_smooth_hpf
+                new_v.smooth_resonance = _old_smooth_res
                 self._mono_primary = new_idx
                 self.mono_voice_index = new_idx
-                # Short engine crossfade to hide any FIR transient at the transition boundary.
+                # Engine crossfade to hide any residual FIR boundary transient.
                 self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
             else:
                 # From silence: hard trigger on the primary slot, no crossfade needed.
@@ -2267,13 +2328,15 @@ class SynthEngine:
                     if self.ENABLE_OVERSAMPLING and len(s1) == frame_count * oversample_factor:
                         s1 = self._downsample_polyphase_signal(s1, self.OVERSAMPLE_FACTOR, history=v._oversample_history)
 
-                    # Pre-gate: S-curve fade-in over 10ms for sine/pure_sine in MONO/UNISON.
-                    # Applied between oscillator and filter so the filter sees a smoothly
-                    # growing signal from phase=0.  Shape: (1 - cos(π·t)) / 2 gives zero
-                    # slope at both endpoints — no instantaneous amplitude steps at start
-                    # or finish.  The existing steal crossfade (steal_start_level) handles
-                    # fading out the old note's amplitude in parallel, creating a natural
-                    # sequential out→in transition.  Default progress=1.0 = no effect.
+                    # Pre-gate: S-curve fade-in for MONO/UNISON.  Applied between oscillator
+                    # and filter so the filter sees a smoothly changing input level.
+                    # Shape: (1 - cos(π·t)) / 2 gives zero slope at both endpoints —
+                    # no instantaneous amplitude steps at start or finish.
+                    # On voice steal, pre_gate_progress is inherited from the outgoing
+                    # voice so rapid re-triggers (key bounce, half-pressed contact) do NOT
+                    # reset the ramp back to zero and produce a stutter.  On first trigger
+                    # from silence, progress starts at 0.0 and ramps to 1.0 over 30ms.
+                    # Default progress=1.0 = fully open, no processing overhead.
                     if (self.voice_type in ("mono", "unison")
                             and v.pre_gate_progress < 1.0):
                         _GATE_RAMP_S = 0.030 * self.sample_rate  # 30ms in samples

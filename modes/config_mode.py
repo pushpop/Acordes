@@ -81,6 +81,33 @@ class ConfigMode(Screen):
         padding-left: 1;
     }
 
+    #oversample-section {
+        width: 1fr;
+        height: auto;
+        padding-left: 1;
+    }
+
+    #oversample-label {
+        width: 100%;
+        color: #ffd700;
+        text-style: bold;
+        margin-top: 1;
+    }
+
+    #oversample-list {
+        width: 100%;
+        height: 4;
+        border: solid #ffd700;
+        margin: 0 0 0 0;
+    }
+
+    #selected-oversample {
+        width: 100%;
+        content-align: left middle;
+        color: #00ff00;
+        margin: 0;
+    }
+
     #backend-label {
         width: 100%;
         color: #ffd700;
