@@ -1,4 +1,4 @@
-# Acordes v1.10.0 - Grasp: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.10.1 - Grasp: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -25,7 +25,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.10.0 - Grasp (Full Gamepad Controller Support)
+**Latest Version**: 1.10.1 - Grasp (Full Gamepad Controller Support + Output Gain Optimization)
 
 ---
 
@@ -259,7 +259,7 @@ Your configuration and user presets are stored in `config.json` and `presets/` a
 
 ### Checking Your Version
 
-In the app, look at the window title which displays the current version (e.g. `Acordes v1.10.0 - Grasp`).
+In the app, look at the window title which displays the current version (e.g. `Acordes v1.10.1 - Grasp`).
 
 ---
 
@@ -275,9 +275,14 @@ In the app, look at the window title which displays the current version (e.g. `A
 For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 For Xbox-style gamepad controller support, see **[GAMEPAD.md](GAMEPAD.md)**.
 
-### What's New (v1.10.0 - Grasp)
+### What's New (v1.10.1 - Grasp)
 
-**Full Xbox-Style Gamepad Controller Support**:
+**Output Gain Optimization & Bug Fixes**:
+- **Key Tracking Parameter Fix**: Parameter updates were silently dropped due to missing `self.key_tracking` attribute in hasattr() check. Now fully responsive with smooth 90ms ramping (0-100% range affects filter brightness across the keyboard).
+- **Output Makeup Gain**: Added +3 dB pre-saturation boost to compensate for unused headroom from conservative per-voice normalization. Single voices now output at -3.6 dBFS (vs. previous -8 dBFS) without changing saturation character or affecting high-drive presets.
+- **Platform-Level Improvements**: Refined dithering integration and filter stability across desktop/ARM platforms.
+
+**v1.10.0 - Full Xbox-Style Gamepad Controller Support**:
 - **Platform Coverage**: Windows (XInput API), Linux x86_64/ARM (evdev), macOS (Pygame controller)
 - **All Modes Playable**: Every mode (Main Menu, Piano, Synth, Compendium, Metronome, Tambor) fully navigable with controller
 - **Smart Input Routing**:

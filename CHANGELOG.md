@@ -5,6 +5,26 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.1] - 2026-03-25 - Grasp Refinement: Output Optimization & Parameter Fixes
+
+### Added
+
+**Output gain optimization**:
+- Added +3 dB pre-saturation makeup gain to fill unused headroom from conservative per-voice normalization
+- Single voices now output at -3.6 dBFS (vs. previous -8 dBFS), giving the synth more "juice" at typical playing levels
+- Transparent optimization: high-drive presets are unaffected (tanh already saturates fully at drive ≥ 2.0)
+- Maintains soft-clipper saturation character while increasing perceived loudness without additional DSP cost
+
+### Fixed
+
+- **Key Tracking Parameter**: Parameter updates were silently dropped due to missing `self.key_tracking` attribute sentinel in `hasattr()` guard. Added `self.key_tracking = 0.5` to enable proper queue dispatch and smooth 90ms parameter ramping. Now fully responsive (0-100% range).
+
+### Changed
+
+- `music/synth_engine.py` line 2980+: Added `_MAKEUP_GAIN = 1.4` pre-saturation multiplier with detailed comments
+
+---
+
 ## [1.10.0] - 2026-03-25 - Grasp: Polyphonic Voice Stealing Refinement
 
 ### Added

@@ -535,6 +535,18 @@ class SynthEngine:
         self._cb_wet_l    = np.zeros(_bs, dtype=np.float32)
         self._cb_wet_r    = np.zeros(_bs, dtype=np.float32)
         self._cb_gain_ramp = np.zeros(_bs, dtype=np.float32)
+        # TPDF dither: two independent uniform random arrays per channel,
+        # pre-allocated so the hot path does no heap allocation.
+        # Amplitude = 1 LSB at 16-bit (1/32768). Applied after final clip
+        # before writing to outdata so the float32→int16 conversion that the
+        # Windows Audio Engine (WASAPI shared mode) or any 16-bit DAC performs
+        # is dithered correctly, eliminating quantisation distortion.
+        self._dither_r1_l = np.zeros(_bs, dtype=np.float32)
+        self._dither_r2_l = np.zeros(_bs, dtype=np.float32)
+        self._dither_r1_r = np.zeros(_bs, dtype=np.float32)
+        self._dither_r2_r = np.zeros(_bs, dtype=np.float32)
+        self._DITHER_AMP: float = 1.0 / 32768.0   # 1 LSB at 16-bit depth
+        self._dither_rng = np.random.default_rng()  # PCG64 generator; supports out= param
         # Float index array reused for vectorized ring-buffer index math
         self._cb_indices  = np.arange(_bs, dtype=np.float32)
 
@@ -589,6 +601,7 @@ class SynthEngine:
         self.noise_level_current = 0.0
         self.noise_level_target  = 0.0
         self.noise_level_smoothing = 0.90
+        self.key_tracking         = 0.5   # hasattr sentinel — required for param_update dispatch
         self.key_tracking_current = 0.5
         self.key_tracking_target  = 0.5
         self.key_tracking_smoothing = 0.90
@@ -605,9 +618,10 @@ class SynthEngine:
         # pitch to the new one over this duration.  Exponential interpolation in
         # frequency space gives equal-tempered semitone steps the same duration
         # regardless of interval size (1 semitone glides as smoothly as 1 octave).
-        # Subtle default (40ms) hides the abrupt frequency step without sounding
-        # like a pronounced slide effect.
-        self.portamento_time: float = 0.040   # seconds; 0 = hard, 0.040 = subtle legato
+        # Subtle default (20ms) hides the abrupt frequency step without sounding
+        # like a pronounced slide effect.  Shorter than 40ms so the glide finishes
+        # before the next note arrives at fast tempos (300+ BPM sixteenth notes ~50ms).
+        self.portamento_time: float = 0.020   # seconds; 0 = hard, 0.020 = subtle legato
         self._held_notes_ordered: list = []  # Ordered note stack for MONO/UNISON last-note priority (list of (note, velocity))
         self._held_notes_vel: dict = {}      # note -> velocity (0-1) for last-note priority resume
         self.velocity_current = 1.0
@@ -1581,11 +1595,18 @@ class SynthEngine:
         Per-voice SVF integrator states (svf*_lp/bp) are repurposed for the HPF stage;
         the SVF slots are no longer used for the LPF since the ladder always handles that.
         """
-        # Key tracking: shift cutoff proportionally with pitch relative to C4 (middle C).
-        # C4 (261.63 Hz) is the reference — track_mult = 1.0 at C4 regardless of KT.
-        # Formula: linear interpolation between 1.0 (no tracking) and f/261.63 (full tracking).
-        f_base = voice.base_frequency or 261.63
-        track_mult = 1.0 + self.key_tracking_current * (f_base / 261.63 - 1.0)
+        # Key tracking: shift cutoff proportionally with the actual sounding pitch.
+        # Reference is C4 at the current octave setting — track_mult = 1.0 there.
+        # base_frequency holds the raw MIDI frequency; apply the same octave shift
+        # that the oscillator applies so the filter tracks the note you hear, not
+        # the unshifted MIDI pitch (which caused ktrack to have no audible effect
+        # when octave != 0, and weak effect when octave == 0 because the reference
+        # was fixed at 261.63 regardless of the octave knob position).
+        _oct_mult  = (2.0 ** self.octave) if (self.octave_enabled and self.octave != 0) else 1.0
+        f_sounding = (voice.base_frequency or 261.63) * _oct_mult
+        # C4 reference also shifts with the octave so track_mult stays 1.0 on C4.
+        _ref_freq  = 261.63 * _oct_mult
+        track_mult = 1.0 + self.key_tracking_current * (f_sounding / _ref_freq - 1.0)
 
         fl_lpf = float(np.clip(self.cutoff_current * cutoff_mod * track_mult, 20.0, 20000.0))
         fl_hpf = float(np.clip(self.hpf_cutoff_current * track_mult, 20.0, fl_lpf * 0.9))
@@ -2087,8 +2108,14 @@ class SynthEngine:
                 # Portamento glide: if enabled, slide from the old pitch to the new one.
                 # Because v.frequency also drives key-tracking cutoff, the filter cutoff
                 # glides in sync — no sudden coefficient jump at the steal moment.
-                if self.portamento_time > 0.0 and old_v.frequency and old_v.frequency != freq:
-                    new_v._glide_from_freq = old_v.frequency
+                # Use base_frequency (target pitch) not frequency (mid-glide position) as
+                # the glide source to prevent portamento accumulation at fast tempos: if we
+                # used mid-glide position, each rapid steal would inherit the drifted frequency
+                # and the pitch would never converge to any actual note.
+                _glide_src = (old_v.base_frequency if old_v._glide_from_freq > 0.0
+                              else old_v.frequency)
+                if self.portamento_time > 0.0 and _glide_src and _glide_src != freq:
+                    new_v._glide_from_freq = _glide_src
                     new_v._glide_elapsed   = 0
                 else:
                     new_v._glide_from_freq = 0.0
@@ -2157,8 +2184,13 @@ class SynthEngine:
                     # Arm portamento glide from current pitch to new target.
                     # Each voice carries its own detuned source and target frequency
                     # so the detune spread glides in proportion across the interval.
-                    if self.portamento_time > 0.0 and v.frequency and v.frequency != detuned_freq:
-                        v._glide_from_freq = v.frequency
+                    # Use base_frequency as glide source (not mid-glide frequency) to
+                    # prevent accumulating pitch drift at fast tempos — same reasoning
+                    # as the MONO steal above.
+                    _u_glide_src = (v.base_frequency if v._glide_from_freq > 0.0
+                                    else v.frequency)
+                    if self.portamento_time > 0.0 and _u_glide_src and _u_glide_src != detuned_freq:
+                        v._glide_from_freq = _u_glide_src
                         v._glide_elapsed   = 0
                     else:
                         v._glide_from_freq = 0.0
@@ -2943,6 +2975,16 @@ class SynthEngine:
             mixed_r *= gain_ramp
             mixed_l *= octave_comp
             mixed_r *= octave_comp
+            # Makeup gain: constant-power stereo panning (cos/sin at 45°) costs
+            # ~3 dB per channel on centre-panned voices.  Combined with conservative
+            # per-voice normalization this leaves roughly -8 dBFS of headroom unused
+            # at normal playing levels.  A pre-saturation boost of 1.4× (~+3 dB)
+            # fills that headroom while letting the tanh work a little harder for
+            # natural analog warmth.  Applied before drive so high-drive presets
+            # are unaffected (tanh already saturates fully at drive >= 2).
+            _MAKEUP_GAIN = 1.4
+            mixed_l *= _MAKEUP_GAIN
+            mixed_r *= _MAKEUP_GAIN
             # Drive applied here — after _sanitize_signal has already guarded per-voice
             # filter output. Multiplying the summed mix by filter_drive pushes the signal
             # above ceiling into tanh saturation. drive=1.0 leaves the signal near the
@@ -2986,8 +3028,33 @@ class SynthEngine:
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
-            outdata[:, 0] = clipped_l
-            outdata[:, 1] = clipped_r
+
+            # TPDF dither: subtract two independent uniform random signals
+            # each in [0, _DITHER_AMP).  The difference has a triangular
+            # distribution on (-_DITHER_AMP, +_DITHER_AMP) — one 16-bit LSB
+            # wide.  This breaks up the quantisation grid that the downstream
+            # converter (WASAPI shared mode, ALSA plug layer, or any 16-bit
+            # DAC) would otherwise impose, trading quantisation distortion for
+            # inaudible low-level noise.  Uses pre-allocated views of the full
+            # buffer to avoid heap allocation in the callback.
+            fc = frame_count
+            r1l = self._dither_r1_l[:fc]
+            r2l = self._dither_r2_l[:fc]
+            r1r = self._dither_r1_r[:fc]
+            r2r = self._dither_r2_r[:fc]
+            # Fill dither buffers in-place using the Generator API (numpy >= 1.17).
+            # default_rng().random() accepts out= so no heap allocation happens here.
+            rng = self._dither_rng
+            rng.random(fc, dtype=np.float32, out=r1l)
+            rng.random(fc, dtype=np.float32, out=r2l)
+            rng.random(fc, dtype=np.float32, out=r1r)
+            rng.random(fc, dtype=np.float32, out=r2r)
+            r1l *= self._DITHER_AMP
+            r2l *= self._DITHER_AMP
+            r1r *= self._DITHER_AMP
+            r2r *= self._DITHER_AMP
+            outdata[:fc, 0] = np.clip(clipped_l + r1l - r2l, -1.0, 1.0)
+            outdata[:fc, 1] = np.clip(clipped_r + r1r - r2r, -1.0, 1.0)
 
             if _arm_probe:
                 _cb_ms = (self._perf_counter() - _cb_t0) * 1000.0

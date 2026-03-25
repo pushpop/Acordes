@@ -254,8 +254,8 @@ class SynthMode(Widget):
     # nav_up/down steps through these; dispatch in _adjust_focused_param uses the name.
     _SECTION_PARAMS = {
         "oscillator": ["Wave", "Noise", "Octave", "Drive"],
-        "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "Route"],
-        "amp_eg":     ["Attack", "Decay", "Sustain", "Release", "KTrack"],
+        "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "KTrack"],
+        "amp_eg":     ["Attack", "Decay", "Sustain", "Release", "Route"],
         "filter_eg":  ["Atk", "Dcy", "Sus", "Rel", "Amount"],
         "lfo":        ["Rate", "Depth", "Shape", "Target"],
         "chorus":     ["Rate", "Depth", "Mix", "Voices"],
@@ -596,9 +596,9 @@ class SynthMode(Widget):
                     yield Label(self._row_label("LPF Pk", ""), classes="control-label", id="lbl-filter-3")
                     self.resonance_display = Label(self._fmt_resonance(), classes="control-value", id="resonance-display")
                     yield self.resonance_display
-                    yield Label(self._row_label("Route", ""), classes="control-label", id="lbl-filter-4")
-                    self.filter_routing_display = Label(self._fmt_filter_routing(), classes="control-value", id="filter-routing-display")
-                    yield self.filter_routing_display
+                    yield Label(self._row_label("KTrack", ""), classes="control-label", id="lbl-filter-4")
+                    self.key_tracking_display = Label(self._fmt_key_tracking(), classes="control-value", id="key-tracking-display")
+                    yield self.key_tracking_display
                     yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── FILTER EG ────────────────────────────────────────────
@@ -642,9 +642,9 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Release", ""), classes="control-label", id="lbl-amp-eg-3")
                     self.release_display = Label(self._fmt_time(self.release), classes="control-value", id="release-display")
                     yield self.release_display
-                    yield Label(self._row_label("Keyboard Track", ""), classes="control-label", id="lbl-amp-eg-4")
-                    self.key_tracking_display = Label(self._fmt_key_tracking(), classes="control-value", id="key-tracking-display")
-                    yield self.key_tracking_display
+                    yield Label(self._row_label("Route", ""), classes="control-label", id="lbl-amp-eg-4")
+                    self.filter_routing_display = Label(self._fmt_filter_routing(), classes="control-value", id="filter-routing-display")
+                    yield self.filter_routing_display
                     yield Label(self._section_bottom(), classes="section-bottom")
 
             # ── SPACING ───────────────────────────────────────────────────
@@ -1302,14 +1302,14 @@ class SynthMode(Widget):
             elif name == "HPF Pk":  self._do_adjust_hpf_resonance(direction)
             elif name == "LPF Cut": self._do_adjust_cutoff(direction)
             elif name == "LPF Pk":  self._do_adjust_resonance(direction)
-            elif name == "Route":   self._do_cycle_filter_routing(direction)
+            elif name == "KTrack":  self._do_step_key_tracking(direction)
         # AMP EG
         elif sec == "amp_eg":
             if name == "Attack":      self._do_adjust_attack(direction)
             elif name == "Decay":     self._do_adjust_decay(direction)
             elif name == "Sustain":   self._do_adjust_sustain(direction)
             elif name == "Release":   self._do_adjust_release(direction)
-            elif name == "KTrack":    self._do_step_key_tracking(direction)
+            elif name == "Route":     self._do_cycle_filter_routing(direction)
         # FILTER EG
         elif sec == "filter_eg":
             if name == "Atk":    self._do_adjust_feg_attack(direction)
@@ -2151,9 +2151,13 @@ class SynthMode(Widget):
             elif name == "LPF Pk":
                 self.resonance = ini["resonance"]
                 _push_and_refresh("resonance", "resonance_display", self._fmt_resonance)
-            elif name == "Route":
-                self.filter_routing = ini["filter_routing"]
-                _push_and_refresh("filter_routing", "filter_routing_display", self._fmt_filter_routing)
+            elif name == "KTrack":
+                self.key_tracking = ini["key_tracking"]
+                steps = self._KEY_TRACKING_STEPS
+                self.key_tracking = steps[min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))]
+                self.synth_engine.update_parameters(key_tracking=self.key_tracking)
+                if self.key_tracking_display: self.key_tracking_display.update(self._fmt_key_tracking())
+                self._mark_dirty(); self._autosave_state()
 
         elif sec == "amp_eg":
             if name == "Attack":
@@ -2171,13 +2175,9 @@ class SynthMode(Widget):
             elif name == "Release":
                 self.release = ini["release"]
                 _push_and_refresh("release", "release_display", lambda: self._fmt_time(self.release))
-            elif name == "KTrack":
-                self.key_tracking = ini["key_tracking"]
-                steps = self._KEY_TRACKING_STEPS
-                self.key_tracking = steps[min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))]
-                self.synth_engine.update_parameters(key_tracking=self.key_tracking)
-                if self.key_tracking_display: self.key_tracking_display.update(self._fmt_key_tracking())
-                self._mark_dirty(); self._autosave_state()
+            elif name == "Route":
+                self.filter_routing = ini["filter_routing"]
+                _push_and_refresh("filter_routing", "filter_routing_display", self._fmt_filter_routing)
 
         elif sec == "filter_eg":
             if name == "Atk":
@@ -2392,8 +2392,8 @@ class SynthMode(Widget):
                     weights=[50, 35, 15])[0], 2)
                 self.synth_engine.update_parameters(resonance=self.resonance)
                 if self.resonance_display: self.resonance_display.update(self._fmt_resonance())
-            elif name == "Route":
-                pass  # Filter routing excluded from randomization — user sets this manually
+            elif name == "KTrack":
+                pass  # Key Tracking excluded from randomization — user sets this manually
         # ── Amp EG ────────────────────────────────────────────────
         elif sec == "amp_eg":
             if name == "Attack":
@@ -2414,8 +2414,8 @@ class SynthMode(Widget):
                 self.release = round(10 ** random.uniform(math.log10(0.008), math.log10(3.0)), 4)
                 self.synth_engine.update_parameters(release=self.release)
                 if self.release_display: self.release_display.update(self._fmt_time(self.release))
-            elif name == "KTrack":
-                pass  # Key Tracking excluded from randomization — user sets this manually
+            elif name == "Route":
+                pass  # Filter routing excluded from randomization — user sets this manually
         # ── Filter EG ─────────────────────────────────────────────
         elif sec == "filter_eg":
             label = self._SECTION_PARAMS["filter_eg"][self._focus_param]
