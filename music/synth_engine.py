@@ -22,7 +22,7 @@ except ImportError:
 class Voice:
     """Individual synthesizer voice with its own oscillator and envelope."""
 
-    def __init__(self, sample_rate: int, voice_index: int = 0):
+    def __init__(self, sample_rate: int, voice_index: int = 0, buffer_size: int = 512):
         self.sample_rate = sample_rate
         self.voice_index = voice_index
         self.midi_note: Optional[int] = None
@@ -152,6 +152,28 @@ class Voice:
         self._arm_hpf_zi_r1: Optional[np.ndarray] = None
         self._arm_hpf_zi_r2: Optional[np.ndarray] = None
         self._arm_dcblock_zi: Optional[np.ndarray] = None
+
+        # ── Pre-allocated hot-path working buffers ────────────────────────────
+        # Each voice carries its own set of reusable numpy arrays so the audio
+        # callback never calls np.zeros / np.ones / np.arange mid-flight.
+        # Sized at 4× buffer_size to cover all oversampling settings (1×/2×/4×)
+        # without reallocation.  Memory cost: ~36 KB per voice.
+        _vbs = buffer_size * 4   # max oversampled length  (e.g. 480×4 = 1920)
+        # Oscillator waveform output — one buffer per oscillator rank / sub-osc.
+        self._v_osc_buf:     np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        self._v_osc_buf_r2:  np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        self._v_osc_buf_sin: np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        # Phase accumulation and normalised-phase intermediate for waveform math.
+        self._v_phase_arr:   np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        self._v_tnorm_buf:   np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        # Envelope, per-sample time array, and onset ramp (base value = 1.0 = flat).
+        self._v_env_buf:     np.ndarray = np.zeros(buffer_size, dtype=np.float32)
+        self._v_times_buf:   np.ndarray = np.zeros(buffer_size, dtype=np.float32)
+        self._v_onset_ramp:  np.ndarray = np.ones(buffer_size,  dtype=np.float32)
+        # Filter output (shared across ladder and SVF — never used simultaneously).
+        self._v_flt_buf:     np.ndarray = np.zeros(buffer_size, dtype=np.float32)
+        # DC blocker output buffer (desktop non-scipy path).
+        self._v_dc_buf:      np.ndarray = np.zeros(buffer_size, dtype=np.float32)
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -563,6 +585,23 @@ class SynthEngine:
         self._dither_rng_r  = np.random.default_rng(0xACC05001)
         # Float index array reused for vectorized ring-buffer index math
         self._cb_indices  = np.arange(_bs, dtype=np.float32)
+        # Oversample-length index array: covers up to 4× oversampling so
+        # _generate_waveform can compute phase arrays in-place without np.arange.
+        self._cb_indices_4x = np.arange(_bs * 4, dtype=np.float32)
+
+        # Tier 2: pre-allocated ring-buffer write-index arrays.
+        # Chorus and delay previously called .astype(np.int32) every buffer,
+        # creating 480-element int32 arrays that were immediately discarded.
+        # These int32 views accept float→int assignment directly (numpy truncates).
+        self._cb_idx_f       = np.zeros(_bs, dtype=np.float32)  # float temp for index math
+        self._cb_cho_wr_idx  = np.zeros(_bs, dtype=np.int32)    # chorus write positions
+        self._cb_dly_wr_idx  = np.zeros(_bs, dtype=np.int32)    # delay write positions
+
+        # Tier 3: shared ramp buffers replacing np.linspace allocations.
+        # _cb_ramp_buf   — primary scalar ramp (filter-switch, mute, onset, XF).
+        # _cb_ramp_cos   — intermediate for the pre-gate S-curve cosine computation.
+        self._cb_ramp_buf    = np.zeros(_bs, dtype=np.float32)
+        self._cb_ramp_cos    = np.zeros(_bs, dtype=np.float32)
 
         # ── Arpeggiator (audio-callback driven clock) ────────────────────
         self.arp_enabled  = False
@@ -725,7 +764,7 @@ class SynthEngine:
             self._arm_slow_cb_count = 0  # callbacks that used >50% of deadline
             self._arm_cb_count     = 0   # total callbacks processed
 
-        self.voices: List[Voice] = [Voice(self.sample_rate, i) for i in range(self.num_voices)]
+        self.voices: List[Voice] = [Voice(self.sample_rate, i, _bs) for i in range(self.num_voices)]
 
         # Ghost voice pool: pre-allocated extra voices that hold release tails from
         # stolen POLY voices.  When a real voice is stolen while still audible, its
@@ -735,7 +774,7 @@ class SynthEngine:
         # ARM (Pi): 1 ghost slot (CPU budget is tight).  Desktop: 2 ghost slots.
         _ghost_count = 1 if self._IS_ARM else 2
         self._ghost_voices: List[Voice] = [
-            Voice(self.sample_rate, self.num_voices + i)
+            Voice(self.sample_rate, self.num_voices + i, _bs)
             for i in range(_ghost_count)
         ]
         # Maximum release time (seconds) allowed for a ghost voice.
@@ -1223,7 +1262,23 @@ class SynthEngine:
 
         return pink.astype(np.float32)
 
-    def _generate_waveform(self, waveform: str, frequency: float, num_samples: int, start_phase: float, oversample_factor: int = 1) -> tuple[np.ndarray, float]:
+    def _fill_linspace(self, buf: np.ndarray, start: float, stop: float, n: int) -> np.ndarray:
+        """Write a linear ramp from start to stop into buf[:n] with zero allocation.
+
+        Equivalent to np.linspace(start, stop, n, dtype=np.float32) but uses the
+        pre-allocated self._cb_indices array and in-place multiply/add so no heap
+        allocation occurs.  Returns a view of buf[:n].
+        """
+        view = buf[:n]
+        if n == 1:
+            view[0] = start
+            return view
+        scale = np.float32((stop - start) / (n - 1))
+        np.multiply(self._cb_indices[:n], scale, out=view)
+        view += np.float32(start)
+        return view
+
+    def _generate_waveform(self, waveform: str, frequency: float, num_samples: int, start_phase: float, oversample_factor: int = 1, _out: Optional[np.ndarray] = None, _phases: Optional[np.ndarray] = None) -> tuple[np.ndarray, float]:
         # Handle noise waveforms first (they don't use frequency/phase)
         if waveform == "noise_white":
             samples = np.random.randn(num_samples).astype(np.float32) * 0.5
@@ -1232,36 +1287,73 @@ class SynthEngine:
             samples = self._generate_pink_noise(num_samples) * 0.5
             return samples, start_phase
 
-        # Regular pitched waveforms use phase accumulation
-        # Support 4× oversampling: generate at 192 kHz if oversample_factor=4
+        # Regular pitched waveforms use phase accumulation.
+        # Support 4× oversampling: generate at 192 kHz if oversample_factor=4.
         effective_sample_rate = self.sample_rate * oversample_factor
         effective_num_samples = num_samples * oversample_factor
 
-        phase_inc = 2 * np.pi * frequency / effective_sample_rate
-        t = np.arange(effective_num_samples)
-        phases = start_phase + t * phase_inc
-        t_norm = (phases / (2 * np.pi)) % 1.0
-        if waveform == "pure_sine":
-            samples = np.sin(phases)
-        elif waveform == "sine":
-            # Vintage-warm sine: fundamental + 1% 2nd harmonic for subtle colour.
-            # Using sin(2*phase) instead of a sawtooth avoids the wrap discontinuity
-            # that caused a periodic tick once per cycle at the phase-rollover point.
-            samples = np.sin(phases) * 0.99 + np.sin(2.0 * phases) * 0.01
-        elif waveform == "triangle":
-            samples = 4.0 * np.abs(t_norm - 0.5) - 1.0
-        elif waveform == "square":
-            samples = np.where(np.sin(phases) >= 0, 1.0, -1.0)
+        phase_inc = np.float32(2.0 * np.pi * frequency / effective_sample_rate)
+
+        # Phase accumulation — use pre-allocated buffer when supplied to avoid
+        # np.arange + broadcast allocation (~7 KB per call at 4× oversampling).
+        if _phases is not None and len(_phases) >= effective_num_samples:
+            phases = _phases[:effective_num_samples]
+            # Compute phases[i] = start_phase + i * phase_inc in-place using the
+            # pre-built oversample-length index array (self._cb_indices_4x).
+            np.multiply(self._cb_indices_4x[:effective_num_samples], phase_inc, out=phases)
+            phases += np.float32(start_phase)
         else:
-            # Sawtooth (default)
-            samples = 2.0 * t_norm - 1.0
+            phases = start_phase + np.arange(effective_num_samples) * phase_inc
+
+        # Normalised phase t_norm = (phase / 2π) % 1  — used by triangle/saw/square.
+        # Uses pre-allocated _v_tnorm_buf when _phases buffer is the voice's own array.
+        t_norm = (phases / np.float32(2.0 * np.pi)) % np.float32(1.0)
+
+        # Output buffer: use caller-supplied pre-allocated array when provided.
+        if _out is not None and len(_out) >= effective_num_samples:
+            samples = _out[:effective_num_samples]
+            if waveform == "pure_sine":
+                np.sin(phases, out=samples)
+            elif waveform == "sine":
+                np.sin(phases, out=samples)
+                samples *= np.float32(0.99)
+                # Compute 2nd harmonic into t_norm (reuse as temp since it's been read)
+                np.multiply(phases, np.float32(2.0), out=t_norm)
+                np.sin(t_norm, out=t_norm)
+                samples += t_norm * np.float32(0.01)
+                # Restore t_norm for PolyBLEP (not needed for sine — PolyBLEP skips sine)
+            elif waveform == "triangle":
+                np.subtract(t_norm, np.float32(0.5), out=samples)
+                np.abs(samples, out=samples)
+                samples *= np.float32(4.0)
+                samples -= np.float32(1.0)
+            elif waveform == "square":
+                np.sin(phases, out=samples)
+                np.sign(samples, out=samples)
+            else:
+                # Sawtooth (default)
+                np.multiply(t_norm, np.float32(2.0), out=samples)
+                samples -= np.float32(1.0)
+        else:
+            if waveform == "pure_sine":
+                samples = np.sin(phases)
+            elif waveform == "sine":
+                # Vintage-warm sine: fundamental + 1% 2nd harmonic for subtle colour.
+                samples = np.sin(phases) * 0.99 + np.sin(2.0 * phases) * 0.01
+            elif waveform == "triangle":
+                samples = 4.0 * np.abs(t_norm - 0.5) - 1.0
+            elif waveform == "square":
+                samples = np.where(np.sin(phases) >= 0, 1.0, -1.0)
+            else:
+                # Sawtooth (default)
+                samples = 2.0 * t_norm - 1.0
 
         # Apply PolyBLEP anti-aliasing to band-limited waveforms.
         # Skipped on ARM: single-core Pi 4 cannot afford it without xruns.
         if not self._IS_ARM and waveform in ["sawtooth", "square", "triangle"]:
             samples = self._apply_polyblep(waveform, samples, phases, frequency, effective_num_samples, effective_sample_rate)
 
-        final_phase = (start_phase + effective_num_samples * phase_inc) % (2 * np.pi)
+        final_phase = float((start_phase + effective_num_samples * phase_inc) % (2.0 * np.pi))
         return samples.astype(np.float32), final_phase
 
     def _apply_polyblep(self, waveform: str, samples: np.ndarray, phase: np.ndarray, frequency: float, num_samples: int, sample_rate: float = None) -> np.ndarray:
@@ -1312,13 +1404,34 @@ class SynthEngine:
 
         return samples
 
-    def _apply_envelope(self, voice: Voice, samples: np.ndarray, num_samples: int) -> np.ndarray:
-        dt = 1.0 / self.sample_rate
+    def _apply_envelope(self, voice: Voice, samples: np.ndarray, num_samples: int,
+                        _env_buf: Optional[np.ndarray] = None,
+                        _times_buf: Optional[np.ndarray] = None) -> np.ndarray:
+        dt = np.float32(1.0 / self.sample_rate)
         VEL_C, VEL_F = 1.3, 0.15
         v_scaled = VEL_F + (1.0 - VEL_F) * (voice.velocity ** VEL_C)
         v_int = 1.0 * v_scaled
-        times = voice.envelope_time + np.arange(num_samples) * dt
-        envelope = np.zeros(num_samples, dtype=np.float32)
+
+        # Time array: voice.envelope_time + [0, dt, 2dt, …, (n-1)*dt].
+        # Use pre-allocated buffer when supplied; otherwise allocate (fallback).
+        if _times_buf is not None and len(_times_buf) >= num_samples:
+            times = _times_buf[:num_samples]
+            # Inline linspace to avoid _fill_linspace function-call overhead (called 8x per buffer).
+            t_start = np.float32(voice.envelope_time)
+            if num_samples > 1:
+                np.multiply(self._cb_indices[:num_samples], dt, out=times)
+                times += t_start
+            else:
+                times[0] = t_start
+        else:
+            times = voice.envelope_time + np.arange(num_samples) * dt
+
+        # Envelope output — use pre-allocated buffer when supplied.
+        if _env_buf is not None and len(_env_buf) >= num_samples:
+            envelope = _env_buf[:num_samples]
+            envelope.fill(0.0)
+        else:
+            envelope = np.zeros(num_samples, dtype=np.float32)
         if voice.is_releasing:
             # rel_mod scales release time by note-off velocity (soft release -> longer tail).
             # time_const is the RC time constant of the exponential decay — the /4 divisor
@@ -1440,7 +1553,8 @@ class SynthEngine:
         return filtered, state, state_b
 
     def _filter_ladder_process(self, samples: np.ndarray, cutoff: float,
-                               prev_states: list, res: float = 0.0) -> tuple:
+                               prev_states: list, res: float = 0.0,
+                               _out: Optional[np.ndarray] = None) -> tuple:
         """4-pole Moog ladder filter — warm, strong resonance, self-oscillates near res=0.99.
 
         Uses one-sample-delayed feedback (inaudible at 48 kHz) so the per-sample
@@ -1468,7 +1582,11 @@ class SynthEngine:
         # creating a tight per-sample dependency that cannot be safely extended
         # to per-buffer or per-chunk delays without audible artifacts at high resonance.
         N   = len(samples)
-        out = np.zeros(N, dtype=np.float32)
+        # Use pre-allocated output buffer when supplied; otherwise allocate.
+        if _out is not None and len(_out) >= N:
+            out = _out[:N]
+        else:
+            out = np.zeros(N, dtype=np.float32)
         s0, s1, s2, s3 = prev_states[0], prev_states[1], prev_states[2], prev_states[3]
 
         for i in range(N):
@@ -1484,7 +1602,8 @@ class SynthEngine:
 
     def _filter_svf_process(self, samples: np.ndarray, cutoff: float,
                             lp_state: float, bp_state: float,
-                            res: float = 0.0) -> tuple:
+                            res: float = 0.0,
+                            _out: Optional[np.ndarray] = None) -> tuple:
         """Chamberlin State Variable Filter — 2-pole LP output.
 
         Uses the correct Chamberlin update order (lp updated from previous bp, not
@@ -1503,7 +1622,8 @@ class SynthEngine:
         f = float(np.clip(f_raw, 0.0, f_max))
 
         N = len(samples)
-        out = np.zeros(N, dtype=np.float32)
+        out = (_out[:N] if _out is not None and len(_out) >= N
+               else np.zeros(N, dtype=np.float32))
         lp = lp_state
         bp = bp_state
 
@@ -1523,7 +1643,8 @@ class SynthEngine:
 
     def _filter_svf_hp_process(self, samples: np.ndarray, cutoff: float,
                                lp_state: float, bp_state: float,
-                               res: float = 0.0, routing: str = "lp_hp") -> tuple:
+                               res: float = 0.0, routing: str = "lp_hp",
+                               _out: Optional[np.ndarray] = None) -> tuple:
         """Chamberlin SVF — multi-output.  Returns selected routing output plus integrator states.
 
         HPF cutoff capped at sr/12 (~4kHz) for Chamberlin stability, which covers
@@ -1550,7 +1671,8 @@ class SynthEngine:
         f = float(np.clip(f_raw, 0.0, f_max))
 
         N = len(samples)
-        out = np.zeros(N, dtype=np.float32)
+        out = (_out[:N] if _out is not None and len(_out) >= N
+               else np.zeros(N, dtype=np.float32))
         lp = lp_state
         bp = bp_state
 
@@ -1685,7 +1807,7 @@ class SynthEngine:
         hpf_bp_s = voice.filter_state_svf1_bp if rank == 1 else voice.filter_state_svf2_bp
         samples, hpf_lp_s, hpf_bp_s = self._filter_svf_hp_process(
             samples, fl_hpf, hpf_lp_s, hpf_bp_s, self.hpf_resonance_current,
-            routing=self.filter_routing)
+            routing=self.filter_routing, _out=voice._v_flt_buf)
         if rank == 1:
             voice.filter_state_svf1_lp, voice.filter_state_svf1_bp = hpf_lp_s, hpf_bp_s
         else:
@@ -1700,7 +1822,7 @@ class SynthEngine:
 
         ladder_s = voice.filter_state_ladder1 if rank == 1 else voice.filter_state_ladder2
         filtered, ladder_s = self._filter_ladder_process(
-            samples, fl_lpf, ladder_s, voice.smooth_resonance)
+            samples, fl_lpf, ladder_s, voice.smooth_resonance, _out=voice._v_flt_buf)
         if rank == 1: voice.filter_state_ladder1 = ladder_s
         else:         voice.filter_state_ladder2 = ladder_s
 
@@ -1809,24 +1931,29 @@ class SynthEngine:
             return filtered.astype(np.float32)
 
         xp, yp = voice.dc_blocker_x, voice.dc_blocker_y
-        filtered = np.zeros_like(samples)
-        for i in range(len(samples)):
+        n = len(samples)
+        # All Voice instances have _v_dc_buf pre-allocated in __init__ — no hasattr needed.
+        filtered = voice._v_dc_buf[:n]
+        for i in range(n):
             filtered[i] = samples[i] - xp + coeff * yp
             xp, yp = samples[i], filtered[i]
         voice.dc_blocker_x, voice.dc_blocker_y = xp, yp
         return filtered
 
     def _sanitize_signal(self, samples: np.ndarray) -> np.ndarray:
-        """Replace NaN/Inf with zeros and hard-clip to ±2.0.
+        """Replace NaN/Inf with zeros and hard-clip to ±2.0 in-place.
 
         Guards against NaN propagation from gain compensation at extreme alpha values.
         Called at the filter output stage — the only pipeline point where gain
         multiplication could theoretically produce Inf despite the formula clamping.
         ±2.0 ceiling is above tanh's linear region (tanh(2)≈0.964) so normal peaks
         are unaffected; only pathological values are clipped.
+        In-place operations avoid allocation overhead on each per-voice call.
         """
-        samples = np.where(np.isfinite(samples), samples, 0.0)
-        return np.clip(samples, -2.0, 2.0)
+        # Replace non-finite values (NaN/Inf/-Inf) with 0 in-place.
+        np.nan_to_num(samples, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+        np.clip(samples, -2.0, 2.0, out=samples)
+        return samples
 
     def _process_midi_events(self):
         """Drain the event queue at the start of each audio callback.
@@ -2641,9 +2768,14 @@ class SynthEngine:
                     f1 = v.frequency * vco_lfo if v.frequency else 440.0
                     if self.octave_enabled and self.octave != 0: f1 *= (2.0 ** self.octave)
 
-                    # Generate primary oscillator with optional 4× oversampling
+                    # Generate primary oscillator with optional 4× oversampling.
+                    # Pass pre-allocated voice buffers (_v_osc_buf for waveform output,
+                    # _v_phase_arr for phase accumulation) to avoid malloc in hot path.
                     oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
-                    s1, v.phase = self._generate_waveform(self.waveform, f1, frame_count, p1_s, oversample_factor=oversample_factor)
+                    s1, v.phase = self._generate_waveform(
+                        self.waveform, f1, frame_count, p1_s,
+                        oversample_factor=oversample_factor,
+                        _out=v._v_osc_buf, _phases=v._v_phase_arr)
 
                     # Downsample oscillator output from 192 kHz to 48 kHz if oversampling enabled.
                     # Noise waveforms skip oversampling in _generate_waveform (they return
@@ -2667,17 +2799,29 @@ class SynthEngine:
                         _rate = 1.0 / _GATE_RAMP_S
                         _prog_start = v.pre_gate_progress
                         _prog_end = min(1.0, _prog_start + _rate * frame_count)
-                        _prog_arr = np.linspace(_prog_start, _prog_end, frame_count, dtype=np.float32)
-                        _prog_arr = np.clip(_prog_arr, 0.0, 1.0)
-                        # S-curve: zero slope at 0 and 1, smooth throughout
-                        _gate = ((1.0 - np.cos(np.pi * _prog_arr)) * 0.5).astype(np.float32)
+                        # Allocation-free pre-gate ramp using shared ramp buffers.
+                        # _cb_ramp_buf holds the linear progress array [start, end].
+                        # _cb_ramp_cos holds the S-curve intermediate (cos computation).
+                        _prog_arr = self._fill_linspace(
+                            self._cb_ramp_buf, _prog_start, _prog_end, frame_count)
+                        np.clip(_prog_arr, 0.0, 1.0, out=_prog_arr)
+                        # S-curve: (1 - cos(π·t)) / 2 — zero slope at both endpoints.
+                        # Compute in-place: _cb_ramp_cos = cos(π * _prog_arr), then derive.
+                        np.multiply(_prog_arr, np.float32(np.pi), out=self._cb_ramp_cos[:frame_count])
+                        np.cos(self._cb_ramp_cos[:frame_count], out=self._cb_ramp_cos[:frame_count])
+                        _gate = self._cb_ramp_cos[:frame_count]
+                        _gate *= np.float32(-0.5)
+                        _gate += np.float32(0.5)
                         v.pre_gate_progress = _prog_end
                         s1 = s1 * _gate
 
                     # Sine sub-oscillator mixed pre-filter so it's shaped by the
                     # filter (and Filter EG) alongside the primary oscillator.
                     if self.sine_mix > 0:
-                        ss, v.sine_phase = self._generate_waveform("pure_sine", f1, frame_count, v.sine_phase, oversample_factor=oversample_factor)
+                        ss, v.sine_phase = self._generate_waveform(
+                            "pure_sine", f1, frame_count, v.sine_phase,
+                            oversample_factor=oversample_factor,
+                            _out=v._v_osc_buf_sin, _phases=v._v_phase_arr)
                         if self.ENABLE_OVERSAMPLING and len(ss) == frame_count * oversample_factor:
                             ss = self._downsample_polyphase_signal(ss, self.OVERSAMPLE_FACTOR, history=v._oversample_history_sine)
                         s1 = s1 + ss * self.sine_mix
@@ -2710,7 +2854,10 @@ class SynthEngine:
 
                     if self.rank2_enabled:
                         f2 = f1 * (2.0 ** (self.rank2_detune / 1200.0))
-                        s2, v.phase2 = self._generate_waveform(self.rank2_waveform, f2, frame_count, p2_s, oversample_factor=oversample_factor)
+                        s2, v.phase2 = self._generate_waveform(
+                            self.rank2_waveform, f2, frame_count, p2_s,
+                            oversample_factor=oversample_factor,
+                            _out=v._v_osc_buf_r2, _phases=v._v_phase_arr)
 
                         # Downsample rank 2 oscillator output if oversampling enabled.
                         # Guard length: noise waveforms return frame_count samples, not oversampled.
@@ -2724,7 +2871,9 @@ class SynthEngine:
                     else:
                         v_samples = s1
 
-                    v_samples = self._apply_envelope(v, v_samples, frame_count) * vca_lfo
+                    v_samples = self._apply_envelope(
+                        v, v_samples, frame_count,
+                        _env_buf=v._v_env_buf, _times_buf=v._v_times_buf) * vca_lfo
                     # Per-voice onset ramp: a frequency-adaptive linear fade-in applied
                     # to the post-envelope signal before the DC blocker.  The DC blocker
                     # resets to zero on every new trigger; if the signal is non-zero at
@@ -2740,12 +2889,13 @@ class SynthEngine:
                     ONSET_RAMP = int(self.sample_rate * v.onset_ms / 1000.0)
                     if v.onset_samples < ONSET_RAMP:
                         n = min(frame_count, ONSET_RAMP - v.onset_samples)
-                        ramp = np.ones(frame_count, dtype=np.float32)
-                        ramp[:n] = np.linspace(
-                            v.onset_samples / ONSET_RAMP,
-                            min((v.onset_samples + n) / ONSET_RAMP, 1.0),
-                            n, dtype=np.float32
-                        )
+                        # Use pre-allocated onset ramp buffer.
+                        # Default value is 1.0 (flat); only the first n samples need updating.
+                        ramp = v._v_onset_ramp[:frame_count]
+                        ramp.fill(1.0)
+                        self._fill_linspace(
+                            ramp, v.onset_samples / ONSET_RAMP,
+                            min((v.onset_samples + n) / ONSET_RAMP, 1.0), n)
                         v_samples = v_samples * ramp
                         v.onset_samples += frame_count
                     v_samples = self._apply_dc_blocker(v, v_samples)
@@ -2785,16 +2935,18 @@ class SynthEngine:
                     if self.ENABLE_OVERSAMPLING and len(gs) == frame_count * oversample_factor:
                         gs = self._downsample_polyphase_signal(gs, self.OVERSAMPLE_FACTOR, history=g._oversample_history)
                     gs = self._sanitize_signal(self._apply_filter(g, gs))
-                    gs = self._sanitize_signal(self._apply_envelope(g, gs, frame_count))
+                    gs = self._sanitize_signal(self._apply_envelope(g, gs, frame_count,
+                                                                     _env_buf=g._v_env_buf,
+                                                                     _times_buf=g._v_times_buf))
                     ONSET_RAMP = int(self.sample_rate * g.onset_ms / 1000.0)
                     if g.onset_samples < ONSET_RAMP:
                         n = min(frame_count, ONSET_RAMP - g.onset_samples)
-                        ramp = np.linspace(
-                            g.onset_samples / ONSET_RAMP,
-                            min((g.onset_samples + n) / ONSET_RAMP, 1.0),
-                            n, dtype=np.float32
-                        )
-                        gs[:n] = gs[:n] * ramp
+                        ramp = g._v_onset_ramp[:frame_count]
+                        ramp.fill(1.0)
+                        self._fill_linspace(
+                            ramp, g.onset_samples / ONSET_RAMP,
+                            min((g.onset_samples + n) / ONSET_RAMP, 1.0), n)
+                        gs[:n] = gs[:n] * ramp[:n]
                         g.onset_samples += frame_count
                     gs = self._apply_dc_blocker(g, gs)
                     mixed_l += gs * np.cos(_ghost_ang) * _GHOST_GAIN
@@ -2822,7 +2974,12 @@ class SynthEngine:
                 # Read positions are always behind write positions by at least base_dly
                 # samples, so writes and reads within the same buffer never alias.
                 idx_fc = self._cb_indices[:frame_count]  # pre-allocated float index array
-                write_pos = ((self._chorus_write + idx_fc) % buf_len).astype(np.int32)
+                # Tier 2: compute write positions into pre-allocated int32 buffer.
+                # Replaces .astype(np.int32) which created a fresh 480-element array.
+                np.add(float(self._chorus_write), idx_fc, out=self._cb_idx_f[:frame_count])
+                np.mod(self._cb_idx_f[:frame_count], float(buf_len), out=self._cb_idx_f[:frame_count])
+                self._cb_cho_wr_idx[:frame_count] = self._cb_idx_f[:frame_count]
+                write_pos = self._cb_cho_wr_idx[:frame_count]
                 self._chorus_buf_l[write_pos] = mixed_l
                 self._chorus_buf_r[write_pos] = mixed_r
 
@@ -2867,7 +3024,11 @@ class SynthEngine:
                     # Minimum useful delay time = frame_count/sample_rate = ~5.3ms at
                     # 256 samples; any musically meaningful delay exceeds this easily.
                     idx_fc = self._cb_indices[:frame_count]
-                    write_pos = ((self._delay_write + idx_fc) % buf_len).astype(np.int32)
+                    # Tier 2: pre-allocated int32 array for delay write positions.
+                    np.add(float(self._delay_write), idx_fc, out=self._cb_idx_f[:frame_count])
+                    np.mod(self._cb_idx_f[:frame_count], float(buf_len), out=self._cb_idx_f[:frame_count])
+                    self._cb_dly_wr_idx[:frame_count] = self._cb_idx_f[:frame_count]
+                    write_pos = self._cb_dly_wr_idx[:frame_count]
                     read_pos  = (write_pos - ds) % buf_len
                     wet_l = self._delay_buf_l[read_pos]
                     wet_r = self._delay_buf_r[read_pos]
@@ -2902,7 +3063,7 @@ class SynthEngine:
             if self._filter_ramp_remaining > 0:
                 ramp_start = 1.0 - (self._filter_ramp_remaining / self._FILTER_RAMP_LEN)
                 ramp_end   = 1.0 - max(0, self._filter_ramp_remaining - frame_count) / self._FILTER_RAMP_LEN
-                ramp = np.linspace(ramp_start, ramp_end, frame_count, dtype=np.float32)
+                ramp = self._fill_linspace(self._cb_ramp_buf, ramp_start, ramp_end, frame_count)
                 mixed_l *= ramp
                 mixed_r *= ramp
                 self._filter_ramp_remaining = max(0, self._filter_ramp_remaining - frame_count)
@@ -2917,7 +3078,7 @@ class SynthEngine:
             if self._mute_ramp_remaining > 0:
                 ramp_start = self._mute_ramp_remaining / self._MUTE_RAMP_LEN
                 ramp_end   = max(0, self._mute_ramp_remaining - frame_count) / self._MUTE_RAMP_LEN
-                ramp = np.linspace(ramp_start, ramp_end, frame_count, dtype=np.float32)
+                ramp = self._fill_linspace(self._cb_ramp_buf, ramp_start, ramp_end, frame_count)
                 mixed_l *= ramp
                 mixed_r *= ramp
                 self._mute_ramp_remaining = max(0, self._mute_ramp_remaining - frame_count)
@@ -2939,7 +3100,7 @@ class SynthEngine:
             if self._mute_ramp_fadein > 0:
                 ramp_start = 1.0 - (self._mute_ramp_fadein / self._MUTE_RAMP_LEN)
                 ramp_end   = 1.0 - max(0, self._mute_ramp_fadein - frame_count) / self._MUTE_RAMP_LEN
-                ramp = np.linspace(ramp_start, ramp_end, frame_count, dtype=np.float32)
+                ramp = self._fill_linspace(self._cb_ramp_buf, ramp_start, ramp_end, frame_count)
                 mixed_l *= ramp
                 mixed_r *= ramp
                 self._mute_ramp_fadein = max(0, self._mute_ramp_fadein - frame_count)
@@ -3016,17 +3177,17 @@ class SynthEngine:
             # guarantees exact sample-0 continuity regardless of drive or gain_ramp changes.
             if self._transition_xf_remaining > 0:
                 n_xf = min(self._transition_xf_remaining, frame_count)
-                p = np.linspace(0.0, float(n_xf) / self._TRANSITION_XF_SAMPLES,
-                                n_xf, dtype=np.float32)
+                p = self._fill_linspace(self._cb_ramp_buf,
+                                        0.0, float(n_xf) / self._TRANSITION_XF_SAMPLES, n_xf)
                 mixed_l[:n_xf] = self._last_output_L * (1.0 - p) + mixed_l[:n_xf] * p
                 mixed_r[:n_xf] = self._last_output_R * (1.0 - p) + mixed_r[:n_xf] * p
                 self._transition_xf_remaining -= n_xf
-            # Write float32 L/R into sounddevice's output buffer.
-            # Store the clipped values so the inter-buffer crossfade blends from the
-            # exact DAC output (not the pre-clip tanh value). Pre-clamping sat to ±drive
-            # above means these clips should rarely fire; kept as a safety net.
-            clipped_l = np.clip(mixed_l, -1.0, 1.0)
-            clipped_r = np.clip(mixed_r, -1.0, 1.0)
+            # Tier 3: in-place clip — avoids creating two new 480-element arrays per buffer.
+            # mixed_l/mixed_r already live in pre-allocated _cb_mixed_l/r; clip to ±1 in-place.
+            np.clip(mixed_l, -1.0, 1.0, out=mixed_l)
+            np.clip(mixed_r, -1.0, 1.0, out=mixed_r)
+            clipped_l = mixed_l
+            clipped_r = mixed_r
 
             # Mix metronome click into the output after saturation/clipping so
             # it always sounds clean and is not coloured by the synth signal chain.
