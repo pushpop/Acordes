@@ -675,7 +675,8 @@ class MainScreen(Screen):
             if engine is not None:
                 engine.all_notes_off()
 
-            # Reopen MIDI device
+            # Reopen MIDI device; cancel any pending auto-reconnect poller.
+            self._stop_midi_reconnect_polling()
             selected = self.app_context["device_manager"].get_selected_device()
             if selected:
                 self.app_context["midi_handler"].close_device()
@@ -766,6 +767,8 @@ class AcordesApp(App):
 
         # Register disconnect handler.
         self.midi_handler._disconnect_callback = self._on_midi_disconnect
+        # Timer for auto-reconnect polling after MIDI disconnect; None when idle.
+        self._midi_reconnect_timer = None
 
         # Gamepad handler: detect and connect on startup; gracefully absent if no
         # controller is plugged in.  Polling is started in MainScreen.on_mount().
@@ -930,21 +933,68 @@ class AcordesApp(App):
     def _on_midi_disconnect(self):
         """Called when the MIDI port errors out (device unplugged mid-session).
 
-        Silences the synth and opens the config screen so the user can
-        reconnect or select a different device. Uses call_later to safely
-        re-enter the Textual event loop from the poll timer context.
+        Soft-silences the synth (preserves looper state) and shows a toast
+        notification. A background reconnect poller then watches for the
+        device to reappear on USB and reconnects automatically.
+        Uses call_later so all UI work happens on the Textual event loop,
+        not on the poll-timer thread that invoked this callback.
         """
-        self.synth_engine.all_notes_off()
+        # Soft-silence: stop all notes but do NOT kill the looper state machine.
+        if self.synth_engine:
+            self.synth_engine.soft_all_notes_off()
+
+        self.call_later(self._handle_midi_disconnect_ui)
+
+    def _handle_midi_disconnect_ui(self):
+        """UI-thread side of MIDI disconnect: notify user and start auto-reconnect."""
         self.update_sub_title()
+        self.notify(
+            "MIDI controller disconnected. Reconnecting automatically...",
+            severity="warning",
+            timeout=8,
+        )
+        self._start_midi_reconnect_polling()
 
-        def open_config():
-            try:
-                main_screen = self.query_one(MainScreen)
-                main_screen.action_show_config()
-            except Exception:
-                pass
+    def _start_midi_reconnect_polling(self):
+        """Start a 2-second background timer that auto-reconnects the MIDI device."""
+        # Guard: don't stack multiple timers if disconnect fires more than once.
+        if getattr(self, "_midi_reconnect_timer", None) is not None:
+            return
+        self._midi_reconnect_timer = self.set_interval(2.0, self._try_midi_reconnect)
 
-        self.call_later(open_config)
+    def _try_midi_reconnect(self):
+        """Poll for the saved MIDI device; reconnect and stop the timer when found."""
+        if self.midi_handler.is_device_open():
+            # Already reconnected (e.g. via config screen); cancel the poller.
+            self._stop_midi_reconnect_polling()
+            return
+
+        saved_device = self.device_manager.get_selected_device()
+        if not saved_device:
+            return
+
+        try:
+            import mido
+            available = mido.get_input_names()
+        except Exception:
+            return
+
+        if saved_device in available:
+            if self.midi_handler.open_device(saved_device):
+                self._stop_midi_reconnect_polling()
+                self.update_sub_title()
+                self.notify(
+                    f"MIDI reconnected: {saved_device}",
+                    severity="information",
+                    timeout=4,
+                )
+
+    def _stop_midi_reconnect_polling(self):
+        """Cancel the auto-reconnect poller if it is running."""
+        timer = getattr(self, "_midi_reconnect_timer", None)
+        if timer is not None:
+            timer.stop()
+            self._midi_reconnect_timer = None
 
     def _create_main_menu_mode(self, main_screen):
         """Create main menu widget."""

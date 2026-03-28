@@ -79,6 +79,16 @@ class SynthMode(Widget):
         # ── Visualizer ────────────────────────────────────────────────────────
         Binding("v",   "toggle_visualizer",            "VU Meter (v)",      show=False),
         Binding("f",   "toggle_visualizer_fullscreen", "VU Fullscreen (f)", show=False),
+        # ── MIDI Looper ────────────────────────────────────────────────────────
+        # Note: 'r' is already taken by reset_focused_param so looper uses ctrl+r.
+        # priority=True ensures these fire before any parent widget intercepts them.
+        # ctrl+space is unreliable on Windows terminals (maps to null byte); use
+        # ctrl+p (pause/stop) instead, which terminals reliably deliver.
+        Binding("l",      "toggle_looper",     "Looper (l)",  show=False, priority=True),
+        Binding("ctrl+r", "looper_record",     "Rec",         show=False, priority=True),
+        Binding("ctrl+p", "looper_stop",       "Stop",        show=False, priority=True),
+        Binding("ctrl+b", "looper_dub",        "Dub",         show=False, priority=True),
+        Binding("ctrl+x", "looper_clear",      "Clear loop",  show=False, priority=True),
         # Tab cycles visual modes forward; Shift+Tab cycles backward.
         # priority=True overrides Textual's default Tab focus-traversal so the
         # key reaches this action inside SynthMode.
@@ -126,6 +136,15 @@ class SynthMode(Widget):
         height: 1;
         background: #0a120a;
         color: #d79b00;
+        padding: 0 1;
+        margin: 0;
+    }
+
+    #looper-bar {
+        width: 100%;
+        height: 3;
+        background: #0d0d1a;
+        color: #8888ff;
         padding: 0 1;
         margin: 0;
     }
@@ -538,6 +557,12 @@ class SynthMode(Widget):
         self._vis_note_queue     = collections.deque()   # thread-safe note buffer
         self._vis_note_write_ptr = 0                      # monotonic uint8 counter
 
+        # ── MIDI Looper UI state ─────────────────────────────────────────────
+        self._looper_visible    = False  # whether the overlay bar is shown
+        self._looper_bars       = 2      # pre-set bar count (1/2/4/8)
+        self._looper_poll_timer = None   # Textual timer for state polling
+        self._looper_clear_ts   = 0.0   # wall-clock time of last clear (0=never)
+
     def _load_initial_params(self) -> dict:
         # Load parameters in order: preset → synth_state → defaults
         # Synth state takes priority (preserves parameter tweaks even after preset load)
@@ -835,11 +860,21 @@ class SynthMode(Widget):
                     yield self.master_volume_display
                     yield Label(self._section_bottom(), classes="section-bottom")
 
+        # ── LOOPER BAR (hidden until user presses L) ─────────────────────────
+        yield Static(self._fmt_looper_bar(), id="looper-bar", markup=True)
+
     # ── Lifecycle ────────────────────────────────────────────────
 
     def on_mount(self):
         self._poll_timer = None
         self.focus()
+        # Hide the looper bar until the user presses L.
+        # Done here programmatically because Textual's CSS display:none is not
+        # guaranteed to apply before the first render on all versions.
+        try:
+            self.query_one("#looper-bar").display = False
+        except Exception:
+            pass
         self._register_midi_callbacks()
         # 10ms poll on all platforms. uvloop makes the asyncio wake cheap enough
         # that the original ARM GIL-contention concern no longer applies.
@@ -856,10 +891,16 @@ class SynthMode(Widget):
         self._stop_visualizer()
 
     def on_key(self, event) -> None:
-        """Block all keybindings except visualizer controls while visualizer is in fullscreen.
-        This prevents accidental mode switches or parameter changes when the visualizer
-        is covering the full display.
-        """
+        """Handle bar-count selection for the looper and fullscreen visualizer lock."""
+        # Bar count shortcuts: 1/2/4/8 set loop length when looper is visible.
+        if self._looper_visible and event.key in ('1', '2', '4', '8'):
+            bars = int(event.key)
+            self._looper_bars = bars
+            self.synth_engine.looper_set_bars(bars)
+            self._update_looper_bar()
+            event.stop()
+            return
+        # Block all keys except visualizer controls while visualizer is fullscreen.
         if self._vis_fullscreen:
             if event.key not in ('v', 'f', 'tab', 'shift+tab'):
                 event.prevent_default()
@@ -887,6 +928,12 @@ class SynthMode(Widget):
         if self._poll_timer is not None:
             self._poll_timer.stop()
             self._poll_timer = None
+        if self._visualizer_feed_timer is not None:
+            self._visualizer_feed_timer.stop()
+            self._visualizer_feed_timer = None
+        if self._looper_poll_timer is not None:
+            self._looper_poll_timer.stop()
+            self._looper_poll_timer = None
         gp = self.gamepad_handler
         if gp is not None:
             gp.clear_callbacks()
@@ -896,10 +943,27 @@ class SynthMode(Widget):
 
         Re-registers MIDI callbacks, restarts the poll timer, and refreshes
         the engine and UI state so everything is in sync after returning.
+        Config uses push_screen (not _switch_mode), so on_mode_pause is never
+        called before this. Guard both timers against duplicate creation.
         """
         self.focus()
         self._register_midi_callbacks()
+        # Stop any existing poll timer before creating a new one.
+        # Config opens via push_screen so on_mode_pause is skipped, leaving the
+        # old timer running. Without this guard, returning from config creates a
+        # second timer and doubles the MIDI polling rate.
+        if self._poll_timer is not None:
+            self._poll_timer.stop()
+            self._poll_timer = None
         self._poll_timer = self.set_interval(0.01, self._poll_midi)
+        # Guard visualizer feed timer the same way: if it is already running
+        # (push_screen path), leave it as-is. Only start it if it was previously
+        # stopped by a genuine on_mode_pause from a normal mode switch.
+        if self._visualizer_process is not None and self._visualizer_feed_timer is None:
+            self._visualizer_feed_timer = self.set_interval(1 / 30, self._feed_visualizer_levels)
+        # Restart looper poll timer only if it was stopped by on_mode_pause.
+        if self._looper_visible and self._looper_poll_timer is None:
+            self._looper_poll_timer = self.set_interval(1 / 8, self._update_looper_bar)
         self._push_params_to_engine()
         self._update_preset_ui()
         self._register_gamepad_callbacks()
@@ -2546,7 +2610,12 @@ class SynthMode(Widget):
             write_pos, waveform_bytes = self.synth_engine.get_waveform_frame()
             struct.pack_into('i', self._visualizer_shm.buf, 12, write_pos)
             self._visualizer_shm.buf[16:16 + len(waveform_bytes)] = waveform_bytes
-            # Drain note events into the SHM ring buffer
+            # Pull looper-generated note events from the engine proxy ring buffer
+            # and inject them into _vis_note_queue so the visualizer sees them
+            # just like manually-played MIDI notes.
+            for (_ln, _lv, _lt) in self.synth_engine.get_looper_note_events():
+                self._vis_note_queue.append((_ln, _lv, _lt))
+            # Drain the combined note queue into the visualizer SHM ring buffer
             _note_base = 16 + 2048 * 4   # = 8208
             while self._vis_note_queue:
                 _n, _v, _t = self._vis_note_queue.popleft()
@@ -2630,6 +2699,283 @@ class SynthMode(Widget):
             struct.pack_into('i', self._visualizer_shm.buf, 8, 3)
         except Exception:
             pass
+
+    # ── MIDI Looper ──────────────────────────────────────────────────────────
+
+    def _fmt_looper_bar(self, state: str = 'stopped', bar: int = 0,
+                        total: int = 0, beat: int = 0, width: int = 120) -> str:
+        """Render the 3-line looper panel using Rich markup for color.
+
+        Line 1: State label + wide timeline + position readout.
+        Line 2: Transport buttons, centered.
+        Line 3: Key binding hints, centered, dimmed.
+
+        Color scheme: red=recording/armed/dub, green=playing, dim=idle.
+        Armed state blinks at ~2 Hz using wall-clock time — no extra timer needed.
+        """
+        is_rec   = state == 'recording'
+        is_armed = state == 'armed'
+        is_play  = state == 'playing'
+        is_dub   = state == 'overdubbing'
+        is_stop  = state == 'stopped'
+
+        blink    = int(time.time() * 2) % 2   # alternates 0/1 at 2 Hz
+        now      = time.time()
+
+        # ── helpers ───────────────────────────────────────────────────────────
+        def _bar_markers(n_bars: int, tl_w: int, chars: list) -> None:
+            """Stamp bar-boundary dividers onto the character list in place."""
+            for b in range(1, n_bars):
+                pos = round(tl_w * b / n_bars)
+                if 0 < pos < tl_w and chars[pos] not in ('█', '▶'):
+                    chars[pos] = '│'
+
+        # ── Clear flash: override line 1 for 1 second after ctrl+x ───────────
+        # Checked first so it takes priority over all other states.
+        _show_clear_flash = (now - self._looper_clear_ts) < 1.0
+
+        # ── Line 1: state icon + timeline + position ──────────────────────────
+        # Budget: 2 (left pad + icon gap) + icon_w + 2 (brackets) + tl + 2 (brackets) + pos_w
+        icon_w   = 8    # "● REC  " or "▶ PLAY " etc.
+        pos_w    = 20   # " bar 8/8 · beat 4 " worst case
+        tl_w     = max(8, width - icon_w - 4 - pos_w - 4)
+
+        if is_armed:
+            # Blink the icon; timeline shows an empty bar-cap grid waiting for input.
+            if blink:
+                icon = "[bold red]● REC[/bold red]"
+                tl_chars = ['─'] * tl_w
+            else:
+                icon = "[dim red]● REC[/dim red]"
+                tl_chars = ['·'] * tl_w
+            # Overlay cap bar markers so user can see bar structure.
+            cap_bars = self._looper_bars
+            _bar_markers(cap_bars, tl_w, tl_chars)
+            colored_tl = f"[dim]{''.join(tl_chars)}[/dim]"
+            pos_label  = f"[yellow] waiting for note[/yellow]"
+
+        elif is_rec:
+            icon      = "[bold red]● REC[/bold red]"
+            cap_bars  = self._looper_bars
+            beat_abs  = bar * 4 + beat
+            beats_cap = cap_bars * 4
+            filled    = max(0, min(round(tl_w * beat_abs / max(1, beats_cap)), tl_w))
+            # Build chars: recorded=█, playhead=▶ at frontier, remaining=·
+            # Place ▶ before bar-marker stamping so markers skip the playhead cell.
+            tl_chars  = list('·' * tl_w)
+            for i in range(filled):
+                tl_chars[i] = '█'
+            if filled < tl_w:
+                tl_chars[filled] = '▶'
+            _bar_markers(cap_bars, tl_w, tl_chars)
+            # Colorize: red recorded block | bold-red playhead | dim remaining cap
+            recorded_s  = ''.join(tl_chars[:filled])
+            playhead_s  = tl_chars[filled] if filled < tl_w else ''
+            remaining_s = ''.join(tl_chars[filled + 1:]) if filled < tl_w else ''
+            colored_tl  = (f"[red]{recorded_s}[/red]"
+                           f"[bold red]{playhead_s}[/bold red]"
+                           f"[dim]{remaining_s}[/dim]")
+            pos_label   = f"[red] bar {bar + 1}/{cap_bars} · beat {beat + 1}[/red]"
+
+        elif is_dub:
+            icon      = "[bold yellow]⊕ DUB[/bold yellow]"
+            beat_abs  = bar * 4 + beat
+            beats_tot = total * 4 if total > 0 else 1
+            filled    = max(0, min(round(tl_w * beat_abs / beats_tot), tl_w))
+            tl_chars  = list('░' * tl_w)
+            for i in range(filled):
+                tl_chars[i] = '█'
+            if filled < tl_w:
+                tl_chars[filled] = '▶'
+            _bar_markers(total if total > 0 else 1, tl_w, tl_chars)
+            recorded_s  = ''.join(tl_chars[:filled])
+            playhead_s  = tl_chars[filled] if filled < tl_w else ''
+            remaining_s = ''.join(tl_chars[filled + 1:]) if filled < tl_w else ''
+            colored_tl  = (f"[yellow]{recorded_s}[/yellow]"
+                           f"[bold yellow]{playhead_s}[/bold yellow]"
+                           f"[dim green]{remaining_s}[/dim green]")
+            pos_label   = f"[yellow] bar {bar + 1}/{total} · beat {beat + 1}[/yellow]"
+
+        elif is_play and total > 0:
+            icon      = "[bold green]▶ PLAY[/bold green]"
+            beat_abs  = bar * 4 + beat
+            beats_tot = total * 4
+            head      = max(0, min(round(tl_w * beat_abs / max(1, beats_tot)), tl_w - 1))
+            tl_chars  = list('░' * tl_w)
+            tl_chars[head] = '▶'
+            _bar_markers(total, tl_w, tl_chars)
+            before_s   = ''.join(tl_chars[:head])
+            cursor_s   = tl_chars[head]
+            after_s    = ''.join(tl_chars[head + 1:])
+            colored_tl = (f"[green]{before_s}[/green]"
+                          f"[bold green]{cursor_s}[/bold green]"
+                          f"[dim]{after_s}[/dim]")
+            pos_label  = f"[green] bar {bar + 1}/{total} · beat {beat + 1}[/green]"
+
+        elif is_stop and total > 0:
+            icon      = "[dim]■ STOP[/dim]"
+            tl_chars  = list('░' * tl_w)
+            _bar_markers(total, tl_w, tl_chars)
+            colored_tl = f"[dim]{''.join(tl_chars)}[/dim]"
+            pos_label  = f"[dim] {total} bar loop · stopped[/dim]"
+
+        else:
+            icon       = "[dim]■ STOP[/dim]"
+            colored_tl = f"[dim]{'─' * tl_w}[/dim]"
+            pos_label  = f"[dim] no loop[/dim]"
+
+        if _show_clear_flash:
+            # Override the entire line 1 with a red blink for 1 second.
+            empty_tl = f"[dim]{'─' * tl_w}[/dim]"
+            if blink:
+                line1 = f" [bold red]✕ LOOP CLEARED[/bold red]  [dim]▐[/dim]{empty_tl}[dim]▌[/dim]"
+            else:
+                line1 = f" [dim]✕ loop cleared[/dim]  [dim]▐{('─' * tl_w)}▌[/dim]"
+        else:
+            line1 = f" {icon}  [dim]▐[/dim]{colored_tl}[dim]▌[/dim]{pos_label}"
+
+        # ── Lines 2 + 3: buttons aligned directly above their key hints ─────────
+        # Each slot has a fixed plain width = max(label_w, hint_w) + 2 padding.
+        # Both lines use identical column widths so labels sit exactly above hints.
+        # IMPORTANT: never use ASCII [ ] inside Rich markup — Rich will try to
+        # parse them as tags (e.g. "[● REC]" → MarkupError).  Use plain bold
+        # color for the active state; the contrast vs dim is sufficient.
+        def _col(label: str, hint: str, active: bool, color: str) -> tuple:
+            """Return (btn_markup, hint_plain, col_width)."""
+            col_w   = max(len(label), len(hint)) + 2
+            lpad    = (col_w - len(label)) // 2
+            rpad    = col_w - len(label) - lpad
+            hpad_l  = (col_w - len(hint)) // 2
+            hpad_r  = col_w - len(hint) - hpad_l
+            if active:
+                # Bold + underline distinguishes active from idle without brackets.
+                btn = ' ' * lpad + f"[bold underline {color}]{label}[/bold underline {color}]" + ' ' * rpad
+            else:
+                btn = f"[dim]{' ' * lpad}{label}{' ' * rpad}[/dim]"
+            hint_str = ' ' * hpad_l + hint + ' ' * hpad_r
+            return btn, hint_str, col_w
+
+        # play/stop shows current-state icon but always occupies the same width.
+        play_label  = "PLAY/STOP"
+        play_active = is_play or (is_stop and total > 0)
+        play_color  = 'green' if is_play else 'white'
+
+        cols = [
+            _col("● REC",      "^r · rec",       is_rec or is_armed, 'red'),
+            _col(play_label,   "^p · play/stop",  play_active,        play_color),
+            _col("⊕ DUB",      "^b · dub",        is_dub,             'yellow'),
+            _col("✕ CLR",      "^x · clear",      False,              'white'),
+            _col(f"{self._looper_bars}B", "1/2/4/8", False,           'cyan'),
+        ]
+
+        total_col_w = sum(c[2] for c in cols)
+        outer_pad   = max(0, (width - total_col_w) // 2)
+        pad_s       = ' ' * outer_pad
+
+        line2 = pad_s + ''.join(c[0] for c in cols)
+        line3 = f"[dim]{pad_s}{''.join(c[1] for c in cols)}[/dim]"
+
+        return f"{line1}\n{line2}\n{line3}"
+
+    def _update_looper_bar(self):
+        """Poll looper state from shared memory and refresh the bar widget."""
+        try:
+            bar_widget = self.query_one("#looper-bar")
+        except Exception:
+            return
+        if not self._looper_visible:
+            return
+        try:
+            ls = self.synth_engine.get_looper_state()
+            bar_widget.update(self._fmt_looper_bar(
+                ls['state'], ls['bar'], ls['total_bars'], ls['beat'],
+                width=self.size.width,
+            ))
+        except Exception:
+            pass
+
+    def action_toggle_looper(self):
+        """Show or hide the looper control bar (L key)."""
+        self._looper_visible = not self._looper_visible
+        try:
+            bar_widget = self.query_one("#looper-bar")
+            bar_widget.display = self._looper_visible
+            if self._looper_visible:
+                self._update_looper_bar()
+                if self._looper_poll_timer is None:
+                    self._looper_poll_timer = self.set_interval(
+                        1 / 8, self._update_looper_bar)
+            else:
+                if self._looper_poll_timer is not None:
+                    self._looper_poll_timer.stop()
+                    self._looper_poll_timer = None
+        except Exception:
+            pass
+
+    def action_looper_record(self):
+        """Arm for recording.  Only valid when stopped (no loop or cleared)."""
+        if not self._looper_visible:
+            return
+        ls = self.synth_engine.get_looper_state()
+        if ls['state'] == 'stopped':
+            self.synth_engine.looper_record()
+
+    def action_looper_stop(self):
+        """Play/stop transport toggle.  Playback always starts from bar 1.
+
+        stopped + loop exists  → rewind to bar 1, then play
+        stopped + no loop      → no-op
+        armed                  → cancel arm, back to stopped
+        recording              → quantize to bar, rewind, start playback
+        playing / overdubbing  → stop, rewind so next play starts from bar 1,
+                                 release any stuck notes
+        """
+        if not self._looper_visible:
+            return
+        ls = self.synth_engine.get_looper_state()
+        state = ls['state']
+        if state == 'stopped' and ls['total_bars'] > 0:
+            # Always start from the top.
+            self.synth_engine.looper_go_to_start()
+            self.synth_engine.looper_play()
+        elif state in ('armed', 'recording', 'playing', 'overdubbing'):
+            self.synth_engine.looper_stop()
+            # Rewind immediately so the next ctrl+p play starts from bar 1.
+            self.synth_engine.looper_go_to_start()
+            self.synth_engine.soft_all_notes_off()
+
+    def action_looper_dub(self):
+        """Toggle overdub layer.
+
+        playing      → arm overdub (layer over existing loop)
+        overdubbing  → finish overdub, return to normal playback
+        """
+        if not self._looper_visible:
+            return
+        ls = self.synth_engine.get_looper_state()
+        state = ls['state']
+        if state == 'playing':
+            self.synth_engine.looper_record()
+        elif state == 'overdubbing':
+            self.synth_engine.looper_stop()
+
+    def action_looper_clear(self):
+        """Erase the loop (ctrl+x).
+
+        Releases stuck notes, drains stale looper note events from the ring
+        buffer so they don't bleed into the next recording's visualizer feed,
+        and triggers a 1-second visual flash so the user gets clear feedback.
+        """
+        if not self._looper_visible:
+            return
+        self.synth_engine.looper_clear()
+        self.synth_engine.soft_all_notes_off()
+        # Drain any pending looper note events so the second recording starts clean.
+        try:
+            self.synth_engine.get_looper_note_events()
+        except Exception:
+            pass
+        self._looper_clear_ts = time.time()
 
     def action_randomize(self):
         """Roll the dice — generate musically useful random synth parameters."""

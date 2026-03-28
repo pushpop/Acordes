@@ -116,12 +116,25 @@ class SynthEngineProxy:
         # Shared byte array for startup diagnostic info (device, rate, etc.).
         self._startup_info_arr = multiprocessing.Array('c', 1024)
 
-        # Shared memory block for VU meter levels and waveform written by audio subprocess.
-        # Layout: [level_l f32][level_r f32][write_pos i32][2048 x f32 waveform samples]
-        # Total: 8 + 4 + 2048*4 = 8204 bytes.
+        # Shared memory block for VU meter levels, waveform, looper state, and
+        # looper note events (so the visualizer subprocess can track held notes).
+        # Layout:
+        #   bytes    0-7:    level_l, level_r (f32 x2)
+        #   bytes    8-11:   waveform write_pos (i32)
+        #   bytes   12-8203: 2048 x f32 waveform samples
+        #   bytes 8204-8207: looper state (4 x uint8: state, bar, total_bars, beat)
+        #   byte  8208:      looper note ring write_ptr (uint8, wraps at 256)
+        #   bytes 8209-8211: padding
+        #   bytes 8212-8275: 16 looper note slots x 4 bytes (note:B velocity:B type:B pad:x)
+        #                    type 0=note_on, 1=note_off
+        # Total: 8208 + 4 + 64 = 8276 bytes.
         _WAVEFORM_SAMPLES = 2048
-        self._level_shm = SharedMemory(create=True, size=8 + 4 + _WAVEFORM_SAMPLES * 4)
+        _LNR_SLOTS = 16
+        _SHM_SIZE  = 8 + 4 + _WAVEFORM_SAMPLES * 4 + 4 + 4 + _LNR_SLOTS * 4
+        self._level_shm = SharedMemory(create=True, size=_SHM_SIZE)
         struct.pack_into('ffi', self._level_shm.buf, 0, 0.0, 0.0, 0)
+        # Proxy-side read pointer for the looper note ring (tracks last-read wptr).
+        self._looper_note_rptr: int = 0
 
         # Local shadow of engine parameters — updated on every update_parameters()
         # call so get_current_params() can return accurate state without IPC.
@@ -217,6 +230,17 @@ class SynthEngineProxy:
         Caller must wait for is_available() before sending commands.
         """
         self.close()
+        # close() destroys _level_shm; recreate it so the new audio subprocess
+        # has a valid shared memory segment and the proxy-side buf stays readable.
+        # Without this, get_level_l/r/waveform_frame silently return zeros after
+        # any config-driven restart, breaking the visualizer feed.
+        _WAVEFORM_SAMPLES = 2048
+        _LNR_SLOTS = 16
+        _SHM_SIZE  = 8 + 4 + _WAVEFORM_SAMPLES * 4 + 4 + 4 + _LNR_SLOTS * 4
+        self._level_shm = SharedMemory(create=True, size=_SHM_SIZE)
+        struct.pack_into('ffi', self._level_shm.buf, 0, 0.0, 0.0, 0)
+        self._looper_note_rptr = 0
+
         self._output_device_index = output_device_index
         self._cmd_queue = multiprocessing.Queue()
         self.midi_event_queue = self._cmd_queue
@@ -276,6 +300,75 @@ class SynthEngineProxy:
 
     def soft_all_notes_off(self):
         self._cmd_queue.put({'type': 'soft_all_notes_off'})
+
+    # ── MIDI Looper commands ───────────────────────────────────────
+
+    def looper_record(self):
+        """Start recording (or overdub if a loop already exists)."""
+        self._cmd_queue.put({'type': 'looper_record'})
+
+    def looper_stop(self):
+        """Stop recording (quantizing to full bar) or stop playback."""
+        self._cmd_queue.put({'type': 'looper_stop'})
+
+    def looper_play(self):
+        """Start playback of the recorded loop."""
+        self._cmd_queue.put({'type': 'looper_play'})
+
+    def looper_go_to_start(self):
+        """Reset the loop playback head to bar 1."""
+        self._cmd_queue.put({'type': 'looper_go_to_start'})
+
+    def looper_clear(self):
+        """Erase all recorded events and reset the looper."""
+        self._cmd_queue.put({'type': 'looper_clear'})
+
+    def looper_set_bars(self, bars: int):
+        """Set the maximum loop length in bars (1, 2, 4, or 8)."""
+        self._cmd_queue.put({'type': 'looper_set_bars', 'bars': bars})
+
+    def get_looper_state(self) -> dict:
+        """Read looper state from shared memory written by the audio subprocess.
+
+        Returns a dict with keys:
+          state      -- str: 'stopped' | 'recording' | 'playing' | 'overdubbing'
+          bar        -- int: current bar (0-based)
+          total_bars -- int: loop length in bars (0 until first recording)
+          beat       -- int: current beat within bar (0-based)
+        """
+        _STATE_NAMES = {0: 'stopped', 1: 'recording', 2: 'playing', 3: 'overdubbing', 4: 'armed'}
+        try:
+            s, bar, total, beat = struct.unpack_from('BBBB', self._level_shm.buf, 8204)
+            return {
+                'state':      _STATE_NAMES.get(s, 'stopped'),
+                'bar':        bar,
+                'total_bars': total,
+                'beat':       beat,
+            }
+        except Exception:
+            return {'state': 'stopped', 'bar': 0, 'total_bars': 0, 'beat': 0}
+
+    def get_looper_note_events(self) -> list:
+        """Return new looper note events written by the audio subprocess since last call.
+
+        Drains the looper note ring buffer in shared memory and returns a list of
+        (note: int, velocity: int, type: int) tuples where type 0=note_on, 1=note_off.
+        Velocity for note_on is 0-127; velocity for note_off is always 0.
+        """
+        events = []
+        try:
+            wptr = struct.unpack_from('B', self._level_shm.buf, 8208)[0]
+            rptr = self._looper_note_rptr
+            while rptr != wptr:
+                slot = rptr % 16
+                note, vel, etype = struct.unpack_from('BBB', self._level_shm.buf,
+                                                      8212 + slot * 4)
+                events.append((note, vel, etype))
+                rptr = (rptr + 1) & 0xFF
+            self._looper_note_rptr = rptr
+        except Exception:
+            pass
+        return events
 
     # ── Parameter updates ─────────────────────────────────────────
 

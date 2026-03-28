@@ -184,6 +184,11 @@ class Voice:
         self.cap_ws_state: float = 0.0
         # cap waveshaper working buffer — same size convention as other _v_* buffers.
         self._v_cap_ws_buf:  np.ndarray = np.zeros(_vbs, dtype=np.float32)
+        # Peak-to-peak detector on oscillator output (Feature B).
+        self.osc_peak_pos: float = 0.0   # positive envelope
+        self.osc_peak_neg: float = 0.0   # negative envelope (starts 0, moves negative)
+        # Output peak detector for gentle dynamic ceiling (Feature C).
+        self.out_peak: float = 0.0
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -225,6 +230,9 @@ class Voice:
             self.cap_env      = 0.0
             self.sustain_cap  = 1.0
             self.cap_ws_state = 0.0
+            self.osc_peak_pos = 0.0
+            self.osc_peak_neg = 0.0
+            self.out_peak     = 0.0
             # Note: self.phase and self.sine_phase are NOT reset here (Free-Running)
             # Clear FIR history only when starting from true silence.  For voice-steal
             # or legato transitions (was_silent=False), preserve history so the FIR
@@ -280,6 +288,9 @@ class Voice:
         self.cap_env      = 0.0
         self.sustain_cap  = 1.0
         self.cap_ws_state = 0.0
+        self.osc_peak_pos = 0.0
+        self.osc_peak_neg = 0.0
+        self.out_peak     = 0.0
         self._glide_from_freq = 0.0
         self._glide_elapsed   = 0
 
@@ -636,6 +647,10 @@ class SynthEngine:
         self._arp_gate_samples:   int           = int(60.0 / 120.0 * self.sample_rate * 0.5)
         self._arp_direction:      int           = 1   # +1 or -1 for up_down
 
+        # ── MIDI Looper (audio-callback driven, same clock as arpeggiator) ───
+        from music.midi_looper import MidiLooper
+        self._looper = MidiLooper(self.sample_rate)
+
         self.amp_level = 0.95
         self.amp_level_target = 0.95
         self.amp_level_current = 0.95
@@ -660,6 +675,13 @@ class SynthEngine:
                 self._level_shm = SharedMemory(name=level_shm_name)
             except Exception:
                 pass
+        # Monotonic write pointer for the looper note ring buffer (uint8, wraps at 256).
+        # Layout in _level_shm starting at byte 8208:
+        #   8208: write_ptr (uint8)   -- incremented each event written
+        #   8209-8211: padding
+        #   8212-8275: 16 slots x 4 bytes (note:B, velocity:B, type:B, pad:x)
+        #              type 0 = note_on, type 1 = note_off
+        self._looper_note_wptr: int = 0
 
         # --- Smoothed filter / intensity parameters (target/current pattern) ---
         # DSP reads *_current; UI sets the raw attribute which routes to *_target via
@@ -795,8 +817,6 @@ class SynthEngine:
         self._COMP_HARMONIC  = 0.12   # 2nd harmonic depth during compression
 
         # ── Analog capacitor simulation constants ──────────────────────────────
-        # Varicap: attack rate for the per-voice RMS envelope follower (~200ms).
-        self._CAP_VARICAP_ATK   = 0.003
         # Varicap: maximum fractional cutoff reduction at full signal level (10%).
         self._CAP_VARICAP_DEPTH = 0.10
         # Sustain leakage: one-sample charge loss, giving a ~6.5 s time constant.
@@ -807,6 +827,18 @@ class SynthEngine:
         self._CAP_WS_RC         = 1.0
         # RC gate curve: tau as fraction of ramp duration (1-exp(-1/0.33)=0.953).
         self._CAP_GATE_TAU      = 0.33
+        # Peak detector: per-sample exponential decay, ~300 ms half-life.
+        # exp(-ln2 / (0.300 * sr)): at 48 kHz approx 0.999952; applied as decay**frame_count per buffer.
+        self._CAP_PEAK_DECAY    = math.exp(-math.log(2.0) / (0.300 * self.sample_rate))
+        # Peak-to-peak oscillator detector (Feature B).
+        self._CAP_PP_THRESH     = 1.8     # swing above which soft reduction engages
+        self._CAP_PP_BLEND      = 0.15    # 15% wet — very subtle
+        self._CAP_PP_DECAY      = self._CAP_PEAK_DECAY   # same 300ms half-life
+        # Output peak soft limiter (Feature C).
+        self._CAP_OUT_THRESH    = 0.85    # level above which ceiling engages
+        self._CAP_OUT_DEPTH     = 0.08    # max 8% gain reduction at full scale
+        self._CAP_OUT_MIN_GAIN  = 0.92    # floor — never reduce more than 8%
+        self._CAP_OUT_DECAY     = self._CAP_PEAK_DECAY   # same 300ms half-life
 
         self.pitch_bend = 0.0
         self.pitch_bend_target = 0.0
@@ -1855,13 +1887,19 @@ class SynthEngine:
         fl_lpf = voice.smooth_fl_lpf
         fl_hpf = voice.smooth_fl_hpf
 
-        # Feature 1: Varicap — voltage-dependent filter modulation.
-        # Loud signals increase the effective capacitance, darkening the filter
-        # by up to 10%. Models the non-linear behaviour of varicap diodes used
-        # in real analog filter circuits under high drive conditions.
+        # Feature A: Varicap — true peak detector replaces symmetric RMS follower.
+        # A diode in the analog circuit is forward-biased only when the signal
+        # exceeds the stored peak, charging the capacitor instantly (attack = 0).
+        # When the signal falls, the diode reverse-biases and the capacitor
+        # discharges slowly through a bleed resistor (~300 ms half-life).
+        # The asymmetric attack/decay is what gives real varicap circuits their
+        # "punch" — the filter darkens on the transient and drifts back slowly.
         if fl_lpf > 0.0:
-            sig_level = float(np.sqrt(np.mean(samples * samples)))
-            voice.cap_env += (sig_level - voice.cap_env) * self._CAP_VARICAP_ATK
+            peak_level = float(np.max(np.abs(samples)))
+            if peak_level > voice.cap_env:
+                voice.cap_env = peak_level                                      # instant attack
+            else:
+                voice.cap_env *= self._CAP_PEAK_DECAY ** len(samples)           # ~300 ms decay
             fl_lpf = fl_lpf * (1.0 - self._CAP_VARICAP_DEPTH * voice.cap_env)
             fl_lpf = float(np.clip(fl_lpf, 20.0, 20000.0))
 
@@ -2153,6 +2191,19 @@ class SynthEngine:
                 # Choosing accent vs. normal click is decided by the sender.
                 self._metro_click_buf = self._metro_accent_buf if e.get('accent') else self._metro_normal_buf
                 self._metro_click_pos = 0
+            elif e['type'] == 'looper_record':
+                self._looper.cmd_record()
+            elif e['type'] == 'looper_stop':
+                self._looper.cmd_stop()
+            elif e['type'] == 'looper_play':
+                self._looper.cmd_play()
+            elif e['type'] == 'looper_go_to_start':
+                self._looper.cmd_go_to_start()
+            elif e['type'] == 'looper_clear':
+                self._looper.cmd_clear()
+                self.all_notes_off()
+            elif e['type'] == 'looper_set_bars':
+                self._looper.cmd_set_bars(e['bars'])
             else:
                 # note_on / note_off — collect and process below with the cap.
                 pending_notes.append(e)
@@ -2175,6 +2226,8 @@ class SynthEngine:
                 self.midi_event_queue.put(e)
             else:
                 if e['type'] == 'note_on':
+                    # Capture into looper if recording or overdubbing.
+                    self._looper.record_event(0, e)
                     if self.arp_enabled:
                         n = e['note']
                         if n not in self._arp_held_notes:
@@ -2185,6 +2238,8 @@ class SynthEngine:
                         self._trigger_note(e['note'], e['velocity'])
                     note_events_processed += 1
                 elif e['type'] == 'note_off':
+                    # Capture into looper if recording or overdubbing.
+                    self._looper.record_event(0, e)
                     n = e['note']
                     if self.arp_enabled:
                         if n in self._arp_held_notes:
@@ -2487,12 +2542,20 @@ class SynthEngine:
             #   2 = releasing, not held, still audible
             #   1 = releasing, still held
             #   0 = active
+            #
+            # Within tiers 0 and 1, use inverted envelope level as tie-breaker so
+            # the quietest voice is always preferred over the oldest. This mirrors
+            # the analog voice assigner comparator approach: a hardware comparator
+            # monitors each voice's envelope CV and flags the lowest as available.
+            # Stealing a nearly-silent voice causes no audible click; stealing a
+            # loud active voice causes the artifact the user heard.
             def _steal_priority(v):
+                quietest = -v.last_envelope_level   # lower amplitude → higher score
                 if v.is_releasing and v.midi_note not in self.held_notes:
                     return (3, v.envelope_time) if v.last_envelope_level < 0.05 else (2, v.envelope_time)
                 if v.is_releasing:
-                    return (1, v.envelope_time)
-                return (0, v.age)
+                    return (1, quietest)
+                return (0, quietest)
 
             best_v = max(self.voices, key=_steal_priority)
 
@@ -2739,6 +2802,40 @@ class SynthEngine:
                     self._trigger_note(note, 1.0)
                     self._arp_note_playing = note
 
+            # ── MIDI Looper playback ─────────────────────────────────────────
+            # process_buffer advances the loop position and returns any events
+            # whose sample offset falls within this buffer. Events are fired
+            # exactly like incoming MIDI — _trigger_note / _release_note — so
+            # the looped notes go through the same voice allocation and DSP path.
+            _looper_events = self._looper.process_buffer(frame_count, self.arp_bpm)
+            for (_lev_offset, _lev_e) in _looper_events:
+                if _lev_e['type'] == 'note_on':
+                    self._trigger_note(_lev_e['note'], _lev_e['velocity'])
+                    # Publish note event to the looper note ring so the visualizer
+                    # subprocess can update held_notes / planet / asteroid / COF visuals.
+                    if self._level_shm is not None:
+                        try:
+                            _lnr_slot = self._looper_note_wptr % 16
+                            struct.pack_into('BBBx', self._level_shm.buf,
+                                            8212 + _lnr_slot * 4,
+                                            _lev_e['note'] & 0xFF, int(_lev_e['velocity'] * 127) & 0xFF, 0)
+                            self._looper_note_wptr = (self._looper_note_wptr + 1) & 0xFF
+                            struct.pack_into('B', self._level_shm.buf, 8208, self._looper_note_wptr)
+                        except Exception:
+                            pass
+                elif _lev_e['type'] == 'note_off':
+                    self._release_note(_lev_e['note'], _lev_e.get('velocity', 0.5))
+                    if self._level_shm is not None:
+                        try:
+                            _lnr_slot = self._looper_note_wptr % 16
+                            struct.pack_into('BBBx', self._level_shm.buf,
+                                            8212 + _lnr_slot * 4,
+                                            _lev_e['note'] & 0xFF, 0, 1)
+                            self._looper_note_wptr = (self._looper_note_wptr + 1) & 0xFF
+                            struct.pack_into('B', self._level_shm.buf, 8208, self._looper_note_wptr)
+                        except Exception:
+                            pass
+
             # Reclaim ghost slots that have finished their release tail.
             # A ghost voice that becomes available (envelope fully decayed) is reset
             # to a clean state so its slot is ready for the next promotion.
@@ -2937,6 +3034,28 @@ class SynthEngine:
                         v.cap_ws_state = _cap_s
                         s1 = s1 * (1.0 - self._CAP_WS_BLEND) + _ws_out * self._CAP_WS_BLEND
 
+                    # Feature B: Peak-to-peak detector — models soft saturation of an
+                    # analog oscillator stage exceeding its linear range. Positive and
+                    # negative envelopes are tracked independently with instant attack
+                    # (diode forward-bias) and ~300 ms decay. When their combined swing
+                    # exceeds the threshold, a blend of gain-reduced signal is mixed in
+                    # at 15% wet — very subtle, adds analog texture at high velocities.
+                    _buf_max = float(np.max(s1))
+                    _buf_min = float(np.min(s1))
+                    _pp_decay_buf = self._CAP_PP_DECAY ** frame_count
+                    if _buf_max > v.osc_peak_pos:
+                        v.osc_peak_pos = _buf_max
+                    else:
+                        v.osc_peak_pos *= _pp_decay_buf
+                    if _buf_min < v.osc_peak_neg:
+                        v.osc_peak_neg = _buf_min
+                    else:
+                        v.osc_peak_neg *= _pp_decay_buf
+                    _pp_swing = v.osc_peak_pos - v.osc_peak_neg
+                    if _pp_swing > self._CAP_PP_THRESH:
+                        _pp_gain = self._CAP_PP_THRESH / _pp_swing
+                        s1 = s1 * (1.0 - self._CAP_PP_BLEND) + s1 * _pp_gain * self._CAP_PP_BLEND
+
                     # Filter EG: compute per-buffer scalar and add to vcf_lfo modulation.
                     # feg_value is 0→1; scaled by feg_amount×_FEG_MAX_SWEEP_HZ and added
                     # to the base cutoff inside _apply_filter via cutoff_mod offset.
@@ -3015,6 +3134,20 @@ class SynthEngine:
                         ramp[:n] /= np.float32(1.0 - math.exp(-1.0 / self._CAP_GATE_TAU))
                         v_samples = v_samples * ramp
                         v.onset_samples += frame_count
+                    # Feature C: Output peak soft limiter — gentle dynamic ceiling.
+                    # Tracks the peak of this voice's output with instant attack and
+                    # ~300 ms decay. When the tracked peak exceeds the threshold, a
+                    # proportional gain reduction (max 8%) is applied. Applied before
+                    # the DC blocker so no gain step is injected into the blocker state.
+                    _out_buf_peak = float(np.max(np.abs(v_samples)))
+                    if _out_buf_peak > v.out_peak:
+                        v.out_peak = _out_buf_peak
+                    else:
+                        v.out_peak *= self._CAP_OUT_DECAY ** frame_count
+                    if v.out_peak > self._CAP_OUT_THRESH:
+                        _out_excess = (v.out_peak - self._CAP_OUT_THRESH) / (1.0 - self._CAP_OUT_THRESH)
+                        _out_gain = max(self._CAP_OUT_MIN_GAIN, 1.0 - self._CAP_OUT_DEPTH * _out_excess)
+                        v_samples = v_samples * np.float32(_out_gain)
                     v_samples = self._apply_dc_blocker(v, v_samples)
                     if self.voice_type == "unison":
                         # Map each voice's detune position to the stereo field.
@@ -3417,6 +3550,23 @@ class SynthEngine:
                     wf_arr[wp:] = mono[:first]
                     wf_arr[:end - _WF_N] = mono[first:]
                 struct.pack_into('i', self._level_shm.buf, 8, end % _WF_N)
+                # Looper state at fixed offset after waveform buffer.
+                # Layout (bytes 8204+):
+                #   8204: state byte  0=stopped 1=recording 2=playing 3=overdubbing 4=armed
+                #   8205: current_bar (uint8, 0-based)
+                #   8206: total_bars  (uint8)
+                #   8207: current_beat (uint8)
+                _ls = self._looper
+                _lstate = {
+                    _ls.STATE_STOPPED: 0, _ls.STATE_RECORDING: 1,
+                    _ls.STATE_PLAYING: 2, _ls.STATE_OVERDUBBING: 3,
+                    _ls.STATE_ARMED: 4,
+                }.get(_ls.state, 0)
+                struct.pack_into('BBBB', self._level_shm.buf, 8204,
+                                 _lstate,
+                                 min(_ls.current_bar, 255),
+                                 min(_ls.total_bars,  255),
+                                 min(_ls.current_beat, 255))
 
             # TPDF dither (airwindows-inspired independent channel design).
             # One double-length random buffer per channel; first half is r1,
