@@ -676,7 +676,7 @@ class MainScreen(Screen):
                 engine.all_notes_off()
 
             # Reopen MIDI device; cancel any pending auto-reconnect poller.
-            self._stop_midi_reconnect_polling()
+            self.app._stop_midi_reconnect_polling()
             selected = self.app_context["device_manager"].get_selected_device()
             if selected:
                 self.app_context["midi_handler"].close_device()
