@@ -175,6 +175,19 @@ class SynthEngineProxy:
         raw = self._startup_info_arr.get_obj().raw.split(b'\x00')[0]
         return raw.decode('utf-8', errors='replace')
 
+    @property
+    def sample_rate(self) -> int:
+        """Nominal sample rate used by the audio engine (always 48000 on desktop)."""
+        import os
+        _VALID = {44100, 48000, 88200, 96000}
+        _env = int(os.environ.get("ACORDES_SAMPLE_RATE", "0"))
+        return _env if _env in _VALID else 48000
+
+    @property
+    def buffer_size(self) -> int:
+        """Buffer size the proxy was configured with."""
+        return self._buffer_size
+
     def is_available(self) -> bool:
         return self._ready_event.is_set() and self._process.is_alive()
 

@@ -1,4 +1,5 @@
 """Synth mode - Polyphonic synthesizer interface with preset management."""
+import collections
 import json
 import math
 import random
@@ -76,8 +77,13 @@ class SynthMode(Widget):
         # Focus-mode: reset highlighted param to init value
         Binding("r", "reset_focused_param", "Reset param",    show=False),
         # ── Visualizer ────────────────────────────────────────────────────────
-        Binding("v", "toggle_visualizer",            "VU Meter (v)",          show=False),
-        Binding("f", "toggle_visualizer_fullscreen", "VU Fullscreen (f)",     show=False),
+        Binding("v",   "toggle_visualizer",            "VU Meter (v)",      show=False),
+        Binding("f",   "toggle_visualizer_fullscreen", "VU Fullscreen (f)", show=False),
+        # Tab cycles visual modes forward; Shift+Tab cycles backward.
+        # priority=True overrides Textual's default Tab focus-traversal so the
+        # key reaches this action inside SynthMode.
+        Binding("tab",       "cycle_vis_mode",         "Cycle vis mode",  show=False, priority=True),
+        Binding("shift+tab", "cycle_vis_mode_reverse", "Cycle vis mode ◄", show=False, priority=True),
     ]
 
     CSS = """
@@ -119,7 +125,7 @@ class SynthMode(Widget):
         width: 100%;
         height: 1;
         background: #0a120a;
-        color: #00ff00;
+        color: #d79b00;
         padding: 0 1;
         margin: 0;
     }
@@ -229,7 +235,7 @@ class SynthMode(Widget):
         text-align: center;
         padding: 0;
         margin: 0;
-        color: #556655;
+        color: #443300;
     }
 
     .video-art-bright {
@@ -243,7 +249,7 @@ class SynthMode(Widget):
     }
 
     .section-label {
-        color: #00ff00;
+        color: #d79b00;
         text-style: bold;
         padding: 0;
         margin: 0;
@@ -253,7 +259,7 @@ class SynthMode(Widget):
     }
 
     .section-bottom {
-        color: #00ff00;
+        color: #d79b00;
         text-style: bold;
         padding: 0;
         margin: 0;
@@ -263,7 +269,7 @@ class SynthMode(Widget):
     }
 
     .control-label {
-        color: #556655;
+        color: #443300;
         width: 100%;
         height: 1;
         text-align: left;
@@ -528,6 +534,9 @@ class SynthMode(Widget):
         self._visualizer_process = None          # subprocess.Popen handle
         self._visualizer_shm = None              # SharedMemory block
         self._visualizer_feed_timer = None       # Textual timer handle
+        self._vis_fullscreen = False             # mirrors fullscreen state in subprocess
+        self._vis_note_queue     = collections.deque()   # thread-safe note buffer
+        self._vis_note_write_ptr = 0                      # monotonic uint8 counter
 
     def _load_initial_params(self) -> dict:
         # Load parameters in order: preset → synth_state → defaults
@@ -846,6 +855,16 @@ class SynthMode(Widget):
         self._autosave_state()
         self._stop_visualizer()
 
+    def on_key(self, event) -> None:
+        """Block all keybindings except visualizer controls while visualizer is in fullscreen.
+        This prevents accidental mode switches or parameter changes when the visualizer
+        is covering the full display.
+        """
+        if self._vis_fullscreen:
+            if event.key not in ('v', 'f', 'tab', 'shift+tab'):
+                event.prevent_default()
+                event.stop()
+
     def _register_midi_callbacks(self):
         """Register MIDI callbacks with the MIDI handler."""
         self.midi_handler.set_callbacks(
@@ -949,6 +968,8 @@ class SynthMode(Widget):
     def _on_note_on(self, note: int, velocity: int):
         self.current_note = note
         self.synth_engine.note_on(note, velocity)
+        if self._visualizer_shm is not None:
+            self._vis_note_queue.append((note, velocity, 0))  # type 0 = note-on
         if self.header:
             note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
             oct_ = (note // 12) - 1
@@ -959,6 +980,8 @@ class SynthMode(Widget):
 
     def _on_note_off(self, note: int, velocity: int = 0):
         self.synth_engine.note_off(note, velocity)
+        if self._visualizer_shm is not None:
+            self._vis_note_queue.append((note, 0, 1))  # type 1 = note-off
         if self.current_note == note:
             self.current_note = None
             self._update_preset_ui()
@@ -2412,10 +2435,15 @@ class SynthMode(Widget):
             #   bytes  8-11: command (i32)  0=idle, 1=toggle fullscreen
             #   bytes 12-15: waveform write_pos (i32)
             #   bytes 16+:   2048 x f32 waveform circular buffer
-            # Total: 16 + 2048*4 = 8208 bytes.
+            #   bytes 8208:  note ring write_ptr (uint8, 1 byte + 3 padding = 4 bytes)
+            #   bytes 8212+: 8 note slots x 4 bytes (note uint8, vel uint8, 2 padding)
+            # Total: 16 + 2048*4 + 4 + 8*4 = 8244 bytes.
             _VIS_WF_N = 2048
-            self._visualizer_shm = SharedMemory(create=True, size=16 + _VIS_WF_N * 4)
+            _VIS_NOTE_SLOTS = 8
+            self._visualizer_shm = SharedMemory(
+                create=True, size=16 + _VIS_WF_N * 4 + 4 + _VIS_NOTE_SLOTS * 4)
             struct.pack_into('ffii', self._visualizer_shm.buf, 0, 0.0, 0.0, 0, 0)
+            struct.pack_into('I', self._visualizer_shm.buf, 16 + _VIS_WF_N * 4, 0)
 
             # On Windows use pythonw.exe — the GUI variant that never allocates
             # a console, so no terminal tab appears alongside the pygame window.
@@ -2428,11 +2456,47 @@ class SynthMode(Widget):
                 if _os.path.exists(pythonw):
                     python_exe = pythonw
 
+            # Capture the terminal window ID BEFORE spawning so the visualizer
+            # subprocess can return focus to it immediately after creation.
+            # Windows: GetConsoleWindow() returns the console HWND.
+            # Linux:   xdotool getactivewindow returns the X11 window ID.
+            # macOS:   no reliable method without pyobjc; pass 0 (no-op).
+            terminal_wid = 0
+            _sys_name = platform.system()
+            if _sys_name == "Windows":
+                try:
+                    import ctypes as _ct
+                    terminal_wid = _ct.windll.kernel32.GetConsoleWindow()
+                except Exception:
+                    terminal_wid = 0
+            elif _sys_name == "Linux":
+                # Wayland compositors enforce focus rules at the protocol level
+                # so focus stealing does not occur — no action needed.
+                # On X11 sessions, capture the active window ID for xdotool.
+                import os as _os
+                _on_wayland = bool(_os.environ.get('WAYLAND_DISPLAY'))
+                if not _on_wayland:
+                    try:
+                        terminal_wid = int(subprocess.check_output(
+                            ['xdotool', 'getactivewindow'],
+                            stderr=subprocess.DEVNULL, timeout=1
+                        ).strip())
+                    except Exception:
+                        terminal_wid = 0
+
+            # Gather audio/system metadata for the info panel in bar VU mode.
+            _sr  = getattr(self.synth_engine, 'sample_rate', 44100)
+            _buf = getattr(self.synth_engine, 'buffer_size', 512)
+            _bit = 'INT 16'
+            _os  = platform.system()
+            _midi = self.config_manager.get_selected_device() or ''
+
             cmd = [python_exe, '-m', 'visualizer.visualizer_window',
-                   self._visualizer_shm.name]
+                   self._visualizer_shm.name, str(terminal_wid),
+                   str(_sr), str(_buf), _bit, _os, _midi]
 
             kwargs = {}
-            if platform.system() == "Windows":
+            if _sys_name == "Windows":
                 DETACHED_PROCESS = 0x00000008
                 kwargs['creationflags'] = DETACHED_PROCESS
             else:
@@ -2444,37 +2508,20 @@ class SynthMode(Widget):
                 cmd, cwd=str(_project_root), **kwargs
             )
 
-            # After spawning, find the visualizer window and configure it while Acordes retains focus.
-            # This avoids focus-stealing during window creation.
-            if platform.system() == "Windows":
-                def setup_visualizer_window():
-                    try:
-                        import ctypes
-                        import ctypes.wintypes
-                        user32 = ctypes.windll.user32
-                        kernel32 = ctypes.windll.kernel32
+            # Clear any stale peak levels that may have accumulated from other
+            # modes (e.g. delay/reverb tails from piano mode). This ensures
+            # smooth_l/r in the visualizer start from 0 rather than a phantom
+            # value left over from before synth mode was entered.
+            try:
+                _lshm = getattr(self.synth_engine, '_level_shm', None)
+                if _lshm is not None:
+                    struct.pack_into('ff', _lshm.buf, 0, 0.0, 0.0)
+            except Exception:
+                pass
 
-                        # Find the visualizer window by title
-                        hwnd = user32.FindWindowW(None, "Acordes Visualizer")
-                        if hwnd:
-                            # Set as always-on-top without stealing focus
-                            GWL_EXSTYLE = -20
-                            WS_EX_TOPMOST = 0x00000008
-                            current = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-                            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current | WS_EX_TOPMOST)
-                            HWND_TOPMOST = ctypes.wintypes.HWND(-1)
-                            SWP_NOACTIVATE = 0x0010  # Don't activate the window
-                            user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | 0x0002 | 0x0001)
-
-                            # Restore focus to Acordes (the main window/console)
-                            self.app.focus()
-                    except Exception:
-                        pass
-
-                # Run setup once after visualizer window has time to be created
-                self.set_timer(0.15, setup_visualizer_window)
-
-            # Textual timer writes levels to shared memory at ~30 Hz
+            # Textual timer writes levels and waveform to shared memory at 30 Hz.
+            # The visualizer renders at 60 Hz independently; 30 Hz feed is enough
+            # for smooth waveform display and halves GIL pressure on the audio thread.
             self._visualizer_feed_timer = self.set_interval(
                 1 / 30, self._feed_visualizer_levels
             )
@@ -2499,6 +2546,16 @@ class SynthMode(Widget):
             write_pos, waveform_bytes = self.synth_engine.get_waveform_frame()
             struct.pack_into('i', self._visualizer_shm.buf, 12, write_pos)
             self._visualizer_shm.buf[16:16 + len(waveform_bytes)] = waveform_bytes
+            # Drain note events into the SHM ring buffer
+            _note_base = 16 + 2048 * 4   # = 8208
+            while self._vis_note_queue:
+                _n, _v, _t = self._vis_note_queue.popleft()
+                _slot = self._vis_note_write_ptr % 8
+                struct.pack_into('BBBx', self._visualizer_shm.buf,
+                                 _note_base + 4 + _slot * 4, _n, _v, _t)
+                self._vis_note_write_ptr = (self._vis_note_write_ptr + 1) & 0xFF
+                struct.pack_into('B', self._visualizer_shm.buf,
+                                 _note_base, self._vis_note_write_ptr)
         except Exception:
             pass
 
@@ -2518,7 +2575,10 @@ class SynthMode(Widget):
                 pass
         if self._visualizer_process is not None:
             try:
-                self._visualizer_process.wait(timeout=2)
+                # Short wait: the subprocess should exit within one render frame
+                # (~17 ms) after receiving NaN. A long wait here would block the
+                # Textual UI thread during mode switching.
+                self._visualizer_process.wait(timeout=0.1)
             except Exception:
                 self._visualizer_process.terminate()
             self._visualizer_process = None
@@ -2529,6 +2589,7 @@ class SynthMode(Widget):
             except Exception:
                 pass
             self._visualizer_shm = None
+        self._vis_fullscreen = False
 
     def action_toggle_visualizer_fullscreen(self):
         """Toggle visualizer fullscreen via shared memory command (desktop only, visualizer must be active)."""
@@ -2542,6 +2603,31 @@ class SynthMode(Widget):
             return
         try:
             struct.pack_into('i', self._visualizer_shm.buf, 8, 1)
+            self._vis_fullscreen = not self._vis_fullscreen
+        except Exception:
+            pass
+
+    def action_cycle_vis_mode(self):
+        """Cycle the visualizer display mode forward."""
+        import struct
+        if self._visualizer_process is None or self._visualizer_process.poll() is not None:
+            return
+        if self._visualizer_shm is None:
+            return
+        try:
+            struct.pack_into('i', self._visualizer_shm.buf, 8, 2)
+        except Exception:
+            pass
+
+    def action_cycle_vis_mode_reverse(self):
+        """Cycle the visualizer display mode backward."""
+        import struct
+        if self._visualizer_process is None or self._visualizer_process.poll() is not None:
+            return
+        if self._visualizer_shm is None:
+            return
+        try:
+            struct.pack_into('i', self._visualizer_shm.buf, 8, 3)
         except Exception:
             pass
 
@@ -2861,12 +2947,12 @@ class SynthMode(Widget):
         dashes = max(0, inner - len(title_padded))
         lp = dashes // 2
         rp = dashes - lp
-        color = "#00ffff" if focused else "#00cc00"
+        color = "#00ffff" if focused else "#a06000"
         return f"[bold {color}]╭{'─' * lp}{title_padded}{'─' * rp}╮[/]"
 
     def _section_bottom(self) -> str:
         """Rounded-corner section footer: ╰────────────╯"""
-        return f"[bold #00cc00]╰{'─' * self._W}╯[/]"
+        return f"[bold #a06000]╰{'─' * self._W}╯[/]"
 
     def _row_label(self, name: str, key: str, active: bool = False) -> str:
         """Row label. When active=True the name glows bright cyan (focused param)."""
@@ -2878,11 +2964,11 @@ class SynthMode(Widget):
         line  = left + " " * gap + right
         if active:
             return f"[#00ffff]│[bold]{line}[/]│[/#00ffff]"
-        return f"[#00cc00]│[/#00cc00][#445544]{line}[/#445544][#00cc00]│[/#00cc00]"
+        return f"[#a06000]│[/#a06000][#332200]{line}[/#332200][#a06000]│[/#a06000]"
 
     def _row_sep(self) -> str:
         """Thin separator row inside a section."""
-        return f"[#00cc00]│[dim]{'─' * self._W}[/dim]│[/#00cc00]"
+        return f"[#a06000]│[dim]{'─' * self._W}[/dim]│[/#a06000]"
 
     # ── Arc-sweep inline knob ─────────────────────────────────────
 
@@ -2904,16 +2990,16 @@ class SynthMode(Widget):
         empty  = "░" * max(0, empty_blocks)
 
         bar_line = (
-            f"[#00cc00]│◖[/]"
+            f"[#a06000]│◖[/]"
             f"[#00dd00]{filled}[/]"
             f"[#336633]{partial_char}{empty}[/]"
-            f"[#00cc00]◗│[/]"
+            f"[#a06000]◗│[/]"
         )
 
         lbl = label[: self._W]
         pad = self._W - len(lbl)
         lp, rp = pad // 2, pad - pad // 2
-        label_line = f"[#00cc00]│[/]{' ' * lp}[bold #aaffaa]{lbl}[/]{' ' * rp}[#00cc00]│[/]"
+        label_line = f"[#a06000]│[/]{' ' * lp}[bold #e8c060]{lbl}[/]{' ' * rp}[#a06000]│[/]"
 
         return f"{bar_line}\n{label_line}"
 
@@ -2959,15 +3045,15 @@ class SynthMode(Widget):
         parts = []
         for i, lbl in enumerate(labels):
             if i == idx:
-                parts.append(f"[bold #00ff00 reverse]{lbl}[/]")
+                parts.append(f"[bold #d79b00 reverse]{lbl}[/]")
             else:
-                parts.append(f"[#446644]{lbl}[/]")
+                parts.append(f"[#443300]{lbl}[/]")
         line  = "·".join(parts)
         plain = "·".join(labels)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_filter_drive(self) -> str:
         """Filter drive knob display (0.5x–8.0x)."""
@@ -2988,15 +3074,15 @@ class SynthMode(Widget):
         parts = []
         for i, lbl in enumerate(labels):
             if i == idx:
-                parts.append(f"[bold #00ff00 reverse]{lbl}[/]")
+                parts.append(f"[bold #d79b00 reverse]{lbl}[/]")
             else:
-                parts.append(f"[#446644]{lbl}[/]")
+                parts.append(f"[#443300]{lbl}[/]")
         line  = "·".join(parts)
         plain = "·".join(labels)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     # ── Waveform selector and shape display ───────────────────────
 
@@ -3011,15 +3097,15 @@ class SynthMode(Widget):
         parts = []
         for key, tag in entries:
             if self.waveform == key:
-                parts.append(f"[bold #00ff00 reverse]{tag}[/]")
+                parts.append(f"[bold #d79b00 reverse]{tag}[/]")
             else:
-                parts.append(f"[#446644]{tag}[/]")
+                parts.append(f"[#443300]{tag}[/]")
         line  = " ".join(parts)
         plain = " ".join(tag for _, tag in entries)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_waveform_shape(self) -> str:
         shapes = {
@@ -3032,21 +3118,21 @@ class SynthMode(Widget):
         shape_str, color = shapes.get(self.waveform, ("~~~~~~~~~~~~~~~~~~~~", "#005500"))
         inner = self._W
         shape_str = shape_str[:inner].center(inner)
-        return f"[#00cc00]│[/][{color}]{shape_str}[/][#00cc00]│[/]"
+        return f"[#a06000]│[/][{color}]{shape_str}[/][#a06000]│[/]"
 
     def _fmt_dummy_selector(self, options: list, active: int) -> str:
         parts = []
         for i, opt in enumerate(options):
             if i == active:
-                parts.append(f"[bold #00ff00 reverse]{opt}[/]")
+                parts.append(f"[bold #d79b00 reverse]{opt}[/]")
             else:
-                parts.append(f"[#446644]{opt}[/]")
+                parts.append(f"[#443300]{opt}[/]")
         line  = " ".join(parts)
         plain = " ".join(options)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     # ── LFO formatters ────────────────────────────────────────────
 
@@ -3064,30 +3150,30 @@ class SynthMode(Widget):
         parts = []
         for key, tag in entries:
             if self.lfo_shape == key:
-                parts.append(f"[bold #00ff00 reverse]{tag}[/]")
+                parts.append(f"[bold #d79b00 reverse]{tag}[/]")
             else:
-                parts.append(f"[#446644]{tag}[/]")
+                parts.append(f"[#443300]{tag}[/]")
         line  = " ".join(parts)
         plain = " ".join(tag for _, tag in entries)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_lfo_target(self) -> str:
         entries = [("all", "ALL"), ("vco", "VCO"), ("vcf", "VCF"), ("vca", "VCA")]
         parts = []
         for key, tag in entries:
             if self.lfo_target == key:
-                parts.append(f"[bold #00ff00 reverse]{tag}[/]")
+                parts.append(f"[bold #d79b00 reverse]{tag}[/]")
             else:
-                parts.append(f"[#446644]{tag}[/]")
+                parts.append(f"[#443300]{tag}[/]")
         line  = " ".join(parts)
         plain = " ".join(tag for _, tag in entries)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     # ── Chorus formatters ──────────────────────────────────────────
 
@@ -3103,15 +3189,15 @@ class SynthMode(Widget):
         parts = []
         for i, opt in enumerate(options):
             if i + 1 == self.chorus_voices:
-                parts.append(f"[bold #00ff00 reverse]{opt}[/]")
+                parts.append(f"[bold #d79b00 reverse]{opt}[/]")
             else:
-                parts.append(f"[#446644]{opt}[/]")
+                parts.append(f"[#443300]{opt}[/]")
         line  = " ".join(parts)
         plain = " ".join(options)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     # ── FX Delay formatters ────────────────────────────────────────
 
@@ -3132,7 +3218,7 @@ class SynthMode(Widget):
         pad   = max(0, self._W - len(lbl))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}[dim #556655]{lbl}[/]{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}[dim #443300]{lbl}[/]{' ' * rp}[#a06000]│[/]"
 
     # ── Arpeggio formatters ────────────────────────────────────────
 
@@ -3141,41 +3227,41 @@ class SynthMode(Widget):
         parts = []
         for key, tag in entries:
             if self.arp_mode == key:
-                parts.append(f"[bold #00ff00 reverse]{tag}[/]")
+                parts.append(f"[bold #d79b00 reverse]{tag}[/]")
             else:
-                parts.append(f"[#446644]{tag}[/]")
+                parts.append(f"[#443300]{tag}[/]")
         line  = " ".join(parts)
         plain = " ".join(tag for _, tag in entries)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_arp_range(self) -> str:
         options = ["1", "2", "3", "4"]
         parts = []
         for i, opt in enumerate(options):
             if i + 1 == self.arp_range:
-                parts.append(f"[bold #00ff00 reverse]{opt}[/]")
+                parts.append(f"[bold #d79b00 reverse]{opt}[/]")
             else:
-                parts.append(f"[#446644]{opt}[/]")
+                parts.append(f"[#443300]{opt}[/]")
         line  = " ".join(parts)
         plain = " ".join(options)
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_bool_toggle(self, value: bool, label_on: str, label_off: str) -> str:
         """Green ON / dimmed OFF toggle display."""
-        on_part  = f"[bold #00ff00 reverse]{label_on}[/]"  if value else f"[#446644]{label_on}[/]"
-        off_part = f"[#446644]{label_off}[/]"              if value else f"[bold #ff6600 reverse]{label_off}[/]"
+        on_part  = f"[bold #d79b00 reverse]{label_on}[/]"  if value else f"[#443300]{label_on}[/]"
+        off_part = f"[#443300]{label_off}[/]"              if value else f"[bold #ff6600 reverse]{label_off}[/]"
         line  = f"{on_part}  {off_part}"
         plain = f"{label_on}  {label_off}"
         pad   = max(0, self._W - len(plain))
         lp    = pad // 2
         rp    = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{line}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
 
     def _fmt_voice_type(self) -> str:
         """Format voice type as radio button display: ●MONO ○POLY ○UNISON"""
@@ -3190,7 +3276,7 @@ class SynthMode(Widget):
         display_parts = []
         for i, mode in enumerate(modes):
             if i == idx:
-                display_parts.append(f"[bold #00ff00]●{mode}[/]")
+                display_parts.append(f"[bold #d79b00]●{mode}[/]")
             else:
                 display_parts.append(f"[#666666]○{mode}[/]")
 
@@ -3200,7 +3286,7 @@ class SynthMode(Widget):
         pad = max(0, self._W - len(plain))
         lp = pad // 2
         rp = pad - lp
-        return f"[#00cc00]│[/]{' ' * lp}{display}{' ' * rp}[#00cc00]│[/]"
+        return f"[#a06000]│[/]{' ' * lp}{display}{' ' * rp}[#a06000]│[/]"
 
     # ── Octave display ────────────────────────────────────────────
 
@@ -3221,25 +3307,25 @@ class SynthMode(Widget):
         empty  = "·" * max(0, empty_blocks)
 
         bar_line = (
-            f"[#00cc00]│◖[/]"
+            f"[#a06000]│◖[/]"
             f"[#00dd00]{filled}[/]"
             f"[#336633]{partial_char}{empty}[/]"
-            f"[#00cc00]◗│[/]"
+            f"[#a06000]◗│[/]"
         )
 
         dots = "  ".join(
-            "[bold #00ff00]●[/]" if p == self.octave else "[#334433]○[/]"
+            "[bold #d79b00]●[/]" if p == self.octave else "[#2a1f00]○[/]"
             for p in positions
         )
         dots_plain = "  ".join("●" if p == self.octave else "○" for p in positions)
         dot_pad    = max(0, self._W - len(dots_plain))
         dlp, drp   = dot_pad // 2, dot_pad - dot_pad // 2
-        dots_line  = f"[#00cc00]│[/]{' ' * dlp}{dots}{' ' * drp}[#00cc00]│[/]"
+        dots_line  = f"[#a06000]│[/]{' ' * dlp}{dots}{' ' * drp}[#a06000]│[/]"
 
         label      = f"{feet.get(self.octave, '8')} ({self.octave:+d})"
         lpad       = max(0, self._W - len(label))
         llp, lrp   = lpad // 2, lpad - lpad // 2
-        label_line = f"[#00cc00]│[/]{' ' * llp}[bold #aaffaa]{label}[/]{' ' * lrp}[#00cc00]│[/]"
+        label_line = f"[#a06000]│[/]{' ' * llp}[bold #e8c060]{label}[/]{' ' * lrp}[#a06000]│[/]"
 
         return f"{bar_line}\n{dots_line}\n{label_line}"
 
@@ -3247,7 +3333,7 @@ class SynthMode(Widget):
 
     def _fmt_preset_bar(self) -> str:
         total = self.preset_manager.count()
-        randomized_indicator = " [bold #00ff00]🎲 Randomized![/]" if self._randomized_just_now else ""
+        randomized_indicator = " [bold #d79b00]🎲 Randomized![/]" if self._randomized_just_now else ""
 
         if self._current_preset and total:
             idx   = self._preset_index + 1
@@ -3257,9 +3343,9 @@ class SynthMode(Widget):
             origin_icon = "👤" if self._current_preset.origin == "user" else "🏭"
 
             return (
-                f"[dim #00aa00]◄[/] {origin_icon} [bold #00ff00]{self._current_preset.name}[/]{dirty}"
+                f"[dim #7a4a00]◄[/] {origin_icon} [bold #d79b00]{self._current_preset.name}[/]{dirty}"
                 f"  [dim]({idx}/{total})[/]"
-                f"  [dim #00aa00]►[/]{randomized_indicator}"
+                f"  [dim #7a4a00]►[/]{randomized_indicator}"
             )
         elif self._dirty and self._suggested_preset_name:
             # Show suggested name after randomization
