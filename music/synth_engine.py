@@ -763,6 +763,23 @@ class SynthEngine:
         self._transition_xf_remaining: int = 0   # samples left in active crossfade
         self._TRANSITION_XF_SAMPLES:  int = 48  # 48 smp ≈ 1.1ms: inaudible, covers UNISON freq-step artifact
 
+        # Subsonic high-pass filter on the stereo output bus (20 Hz, 1-pole IIR).
+        # Removes residual DC and very-low-frequency energy that the per-voice DC
+        # blockers don't fully cancel when many voices sum together.  Left unchecked,
+        # subsonic content wastes headroom and causes tanh to fold it into harmonic
+        # distortion across the audible band.
+        # Coefficient: alpha = 1 - exp(-2*pi*fc/fs).  At fc=20 Hz, fs=48000:
+        #   alpha ≈ 0.002618  →  pole at 1-alpha ≈ 0.9974 (just inside unit circle).
+        # Two floats of state (one per channel); no heap allocation in the hot path.
+        _sub_hp_fc = 20.0
+        self._sub_hp_alpha: float = 1.0 - math.exp(
+            -2.0 * math.pi * _sub_hp_fc / self.sample_rate
+        )
+        self._sub_hp_x_l: float = 0.0   # previous input sample, left channel
+        self._sub_hp_y_l: float = 0.0   # previous output sample, left channel
+        self._sub_hp_x_r: float = 0.0   # previous input sample, right channel
+        self._sub_hp_y_r: float = 0.0   # previous output sample, right channel
+
         # FX tail drain counter — keeps the audio callback alive (not early-returning
         # silence) while Delay / Chorus ring buffers still have audible wet content.
         # Set to the maximum possible tail length (delay_max_seconds * feedback_decay)
@@ -3435,6 +3452,26 @@ class SynthEngine:
                 mixed_l[:n_xf] = self._last_output_L * (1.0 - p) + mixed_l[:n_xf] * p
                 mixed_r[:n_xf] = self._last_output_R * (1.0 - p) + mixed_r[:n_xf] * p
                 self._transition_xf_remaining -= n_xf
+            # Subsonic high-pass (20 Hz, 1-pole IIR) on the stereo mix bus.
+            # Recurrence: y[n] = (1-alpha)*y[n-1] + (1-alpha)*(x[n] - x[n-1])
+            # Equivalent to: y[n] = x[n] - x[n-1] + (1-alpha)*y[n-1]
+            # Applied in-place; state persists across buffer boundaries.
+            _hp_a   = self._sub_hp_alpha
+            _hp_1ma = 1.0 - _hp_a
+            _xl, _yl = self._sub_hp_x_l, self._sub_hp_y_l
+            _xr, _yr = self._sub_hp_x_r, self._sub_hp_y_r
+            for _i in range(frame_count):
+                _xl_new = mixed_l[_i]
+                _yl_new = _xl_new - _xl + _hp_1ma * _yl
+                mixed_l[_i] = _yl_new
+                _xl, _yl = _xl_new, _yl_new
+                _xr_new = mixed_r[_i]
+                _yr_new = _xr_new - _xr + _hp_1ma * _yr
+                mixed_r[_i] = _yr_new
+                _xr, _yr = _xr_new, _yr_new
+            self._sub_hp_x_l, self._sub_hp_y_l = _xl, _yl
+            self._sub_hp_x_r, self._sub_hp_y_r = _xr, _yr
+
             # Tier 3: in-place clip — avoids creating two new 480-element arrays per buffer.
             # mixed_l/mixed_r already live in pre-allocated _cb_mixed_l/r; clip to ±1 in-place.
             np.clip(mixed_l, -1.0, 1.0, out=mixed_l)
