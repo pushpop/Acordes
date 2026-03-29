@@ -480,7 +480,15 @@ class ConfigMode(Screen):
         """Update the audio backend status label."""
         label = self.query_one("#selected-backend", Label)
         if self.pending_backend:
-            label.update(f"Selected: {self.pending_backend}")
+            if "asio" in self.pending_backend.lower():
+                label.update(
+                    f"Selected: {self.pending_backend}  "
+                    "[WARNING: ASIO uses exclusive device access. "
+                    "Other apps (browsers, media players) cannot use "
+                    "the same audio output while Acordes is running.]"
+                )
+            else:
+                label.update(f"Selected: {self.pending_backend}")
         else:
             label.update("No backend selected — select one above first")
 
