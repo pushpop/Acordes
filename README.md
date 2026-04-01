@@ -1,4 +1,4 @@
-# Acordes v1.12.0 - Microtonal: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.1 - Strum Artifacts Fixed: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -26,7 +26,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.12.0 - Microtonal
+**Latest Version**: 1.12.1 - Strum Artifacts Fixed
 
 ---
 

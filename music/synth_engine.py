@@ -908,15 +908,21 @@ class SynthEngine:
         # full state is copied here so the tail plays out undisturbed while the real
         # voice slot takes the new note.  Ghost voices are excluded from gain
         # normalisation and are never assigned new notes.
-        # ARM (Pi): 1 ghost slot (CPU budget is tight).  Desktop: 2 ghost slots.
-        _ghost_count = 1 if self._IS_ARM else 2
+        # ARM (Pi): 1 ghost slot (CPU budget is tight).
+        # Desktop: 4 ghost slots — needed for chord re-strum scenarios where
+        # several voices are still at sustain level when a new chord fires.
+        # With only 2 slots, a 5-note chord re-strum forces 3 brutal steals
+        # (no ghost available), each producing an audible click from the abrupt
+        # filter state reset.  4 slots covers most real-world chord sizes.
+        _ghost_count = 1 if self._IS_ARM else 4
         self._ghost_voices: List[Voice] = [
             Voice(self.sample_rate, self.num_voices + i, _bs)
             for i in range(_ghost_count)
         ]
         # Maximum release time (seconds) allowed for a ghost voice.
-        # Keeps tails short enough to free the slot quickly for the next steal.
-        self._GHOST_RELEASE_CAP: float = 0.08   # 80ms
+        # Reduced from 80ms to 60ms: frees slots faster so they are available
+        # for subsequent steals within the same strum sequence.
+        self._GHOST_RELEASE_CAP: float = 0.06   # 60ms
 
         self.held_notes: set = set()
         self.midi_event_queue = queue.Queue()
@@ -2558,6 +2564,16 @@ class SynthEngine:
                 if v.is_available():
                     v.trigger(note, freq, vel)
                     v.onset_ms = onset_ms_for_note
+                    # Spread initial oscillator phase so simultaneous chord
+                    # notes don't stack their sawtooth resets at the same
+                    # sample.  Uses a note-deterministic offset (golden-ratio
+                    # distribution) rather than random to stay reproducible
+                    # and audio-thread safe (no heap allocation or rand call).
+                    # Only applied when the voice was truly silent (phase was
+                    # last advanced by a different note or is at init=0.0).
+                    # The onset_ramp fade-in makes the phase offset inaudible.
+                    _phase_spread = (note * 3.883222) % (2.0 * math.pi)
+                    v.phase = (v.phase + _phase_spread) % (2.0 * math.pi)
                     return
             # Voice stealing — three-tier strategy:
             #
@@ -2601,11 +2617,13 @@ class SynthEngine:
                              and best_v.midi_note not in self.held_notes
                              and best_v.last_envelope_level < 0.05)
 
+            _got_ghost = False
             if not steal_is_safe:
                 # Tier 2: try to promote the stolen voice to a ghost slot so its
                 # tail completes without interruption.
                 ghost_slot = next((g for g in self._ghost_voices if g.is_available()), None)
                 if ghost_slot is not None:
+                    _got_ghost = True
                     # Copy all continuous state from the real voice to the ghost slot.
                     # This preserves oscillator phase, filter memory, and envelope level
                     # so the tail sounds identical to what would have played naturally.
@@ -2649,15 +2667,38 @@ class SynthEngine:
                     ghost_slot.is_ghost = True
                 # Tier 3: no ghost available — fall through to brutal steal below.
 
-            # Trigger the new note in the real voice slot with a clean filter state.
-            # Filter and DC blocker states are cleared to prevent frequency-domain
-            # glitches from stale integrator memory at the new note's frequency.
-            best_v.filter_state_ladder1 = [0.0, 0.0, 0.0, 0.0]
-            best_v.filter_state_ladder2 = [0.0, 0.0, 0.0, 0.0]
-            best_v.filter_state_svf1_lp = best_v.filter_state_svf1_bp = 0.0
-            best_v.filter_state_svf2_lp = best_v.filter_state_svf2_bp = 0.0
-            best_v.dc_blocker_x = best_v.dc_blocker_y = 0.0
+            # Trigger the new note in the real voice slot.
+            # For Tier 2 (ghost promoted) and Tier 1 (silent), clear filter state so
+            # the new note starts clean: the ghost carries the old filtered output forward,
+            # making the zero-start imperceptible.
+            # For Tier 3 brutal steals (no ghost, non-silent), PRESERVE filter state.
+            # Zeroing filter memory at a non-trivial amplitude jumps the output from
+            # filtered(old_state) → filtered(zero_state) in one sample — that step IS
+            # the click. Keeping old state lets the filter re-tune to the new pitch
+            # over a few ms without an abrupt amplitude discontinuity.
+            _is_brutal_steal = not steal_is_safe and not _got_ghost
+            if not _is_brutal_steal:
+                best_v.filter_state_ladder1 = [0.0, 0.0, 0.0, 0.0]
+                best_v.filter_state_ladder2 = [0.0, 0.0, 0.0, 0.0]
+                best_v.filter_state_svf1_lp = best_v.filter_state_svf1_bp = 0.0
+                best_v.filter_state_svf2_lp = best_v.filter_state_svf2_bp = 0.0
+                best_v.dc_blocker_x = best_v.dc_blocker_y = 0.0
+            else:
+                # Brutal steal: save state before trigger() zeroes it, then restore.
+                _bv_sl1 = list(best_v.filter_state_ladder1)
+                _bv_sl2 = list(best_v.filter_state_ladder2)
+                _bv_svf1lp = best_v.filter_state_svf1_lp
+                _bv_svf1bp = best_v.filter_state_svf1_bp
+                _bv_svf2lp = best_v.filter_state_svf2_lp
+                _bv_svf2bp = best_v.filter_state_svf2_bp
             best_v.trigger(note, freq, vel)
+            if _is_brutal_steal:
+                best_v.filter_state_ladder1 = _bv_sl1
+                best_v.filter_state_ladder2 = _bv_sl2
+                best_v.filter_state_svf1_lp = _bv_svf1lp
+                best_v.filter_state_svf1_bp = _bv_svf1bp
+                best_v.filter_state_svf2_lp = _bv_svf2lp
+                best_v.filter_state_svf2_bp = _bv_svf2bp
             best_v.onset_ms = onset_ms_for_note
             # Stolen voice was already past its onset period — skip the onset_ramp.
             # onset_ramp + steal_start_level both fading in simultaneously creates a

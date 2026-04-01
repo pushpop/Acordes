@@ -552,6 +552,13 @@ class MicrotonalMode(Widget):
         (low to high) regardless of pitch direction.
         """
         self._release_held()
+        # Check whether active strum notes are being cut before canceling.
+        # If so, use a small offset for the first note's timer so the note_offs
+        # are processed by a separate audio callback before the new note_ons
+        # arrive.  Without the offset, both note_off and note_on land in the same
+        # queue flush: the engine steals sustain-level voices immediately, which
+        # exhausts ghost slots and causes brutal steals (audible clicks).
+        _restrum_offset_ms = 15 if self._strum_notes else 0
         self._cancel_strum_gate()
 
         degrees = self._scale_degrees
@@ -620,7 +627,7 @@ class MicrotonalMode(Widget):
             velocity = _STRUM_VEL_MIN + int(
                 (_STRUM_VEL_MAX - _STRUM_VEL_MIN) * pos / max(1, n - 1)
             )
-            delay_s = cumulative_ms[pos] / 1000.0
+            delay_s = (cumulative_ms[pos] + _restrum_offset_ms) / 1000.0
 
             self._strum_notes.append(midi_note)
 
@@ -628,16 +635,24 @@ class MicrotonalMode(Widget):
                 self.synth_engine.pitch_bend_change(bv)
                 self.synth_engine.note_on(mn, vel)
 
-            if pos == 0:
+            if pos == 0 and _restrum_offset_ms == 0:
+                # Fresh strum (no active notes being canceled): fire the root note
+                # immediately for minimum latency.
                 _fire_note()
             else:
+                # Re-strum path (offset > 0): use set_timer for ALL notes so
+                # note_offs from _cancel_strum_gate are processed in a separate
+                # audio callback before any new note_ons arrive.  Without the
+                # offset, note_offs and note_ons land in the same queue flush,
+                # forcing steals of sustain-level voices → brutal steal clicks.
                 # Store the timer handle so _cancel_strum_gate() can stop it
-                # before it fires if a new strum or a mode switch arrives.
+                # before it fires if a new strum or mode switch arrives.
                 timer_handle = self.set_timer(delay_s, _fire_note)
                 self._strum_fire_timers.append(timer_handle)
 
         # Gate-off fires after the last note has had time to ring.
-        total_delay_s = cumulative_ms[-1] / 1000.0 + _STRUM_GATE_S
+        # Include the re-strum offset so the gate aligns with the actual last note.
+        total_delay_s = (cumulative_ms[-1] + _restrum_offset_ms) / 1000.0 + _STRUM_GATE_S
         self._strum_gate_timer = self.set_timer(total_delay_s, self._release_strum)
         self._refresh_display()
 
