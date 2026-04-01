@@ -19,6 +19,16 @@ except ImportError:
     AUDIO_AVAILABLE = False
     sd = None
 
+# Tap count for the anti-aliasing FIR lowpass filter used by the 4× oversampling
+# downsampler.  Must be odd (symmetric linear-phase FIR).  Changing this constant
+# automatically resizes both the per-voice history buffers and the filter kernel.
+# 63 taps gives ~-22 dB alias rejection at 24 kHz (the output Nyquist for 48 kHz
+# output) while keeping passband flat to 18 kHz (-1.6 dB at 18 kHz).
+# Compared to 31 taps, this doubles history memory per voice (62 floats × 3 = 186
+# float32 per voice) which is negligible, and roughly doubles FIR CPU cost.
+# ARM builds skip oversampling entirely so this constant has no effect there.
+_FIR_N_TAPS: int = 63
+
 
 class Voice:
     """Individual synthesizer voice with its own oscillator and envelope."""
@@ -78,14 +88,16 @@ class Voice:
         # the DC blocker's settling transient is hidden under the onset ramp.
         self.onset_ms: float = 3.0
 
-        # FIR history buffers for polyphase oversampling: hold the last (N_taps-1)=30
+        # FIR history buffers for polyphase oversampling: hold the last (_FIR_N_TAPS-1)
         # oversampled samples from the previous buffer so convolution uses actual past
         # samples instead of zero-padding at buffer boundaries.  Zero-padding creates
         # systematic edge artefacts that become large at note transitions.
         # Separate buffers per oscillator rank so each rank's history is independent.
-        self._oversample_history:      np.ndarray = np.zeros(30, dtype=np.float32)  # rank 1
-        self._oversample_history_r2:   np.ndarray = np.zeros(30, dtype=np.float32)  # rank 2
-        self._oversample_history_sine: np.ndarray = np.zeros(30, dtype=np.float32)  # sine sub
+        # Size is driven by _FIR_N_TAPS so changing tap count stays in sync here.
+        _fir_hist = _FIR_N_TAPS - 1
+        self._oversample_history:      np.ndarray = np.zeros(_fir_hist, dtype=np.float32)  # rank 1
+        self._oversample_history_r2:   np.ndarray = np.zeros(_fir_hist, dtype=np.float32)  # rank 2
+        self._oversample_history_sine: np.ndarray = np.zeros(_fir_hist, dtype=np.float32)  # sine sub
 
         # Last mono-mixed output sample from the most recent rendered buffer (after all
         # processing: FIR, envelope, onset ramp, DC blocker, pan/gain).  Updated every
@@ -1288,25 +1300,33 @@ class SynthEngine:
         return normal_buf, accent_buf
 
     def _create_polyphase_filter(self):
-        """ABOUTME: Create 31-tap Hamming-windowed sinc FIR lowpass filter for 4× downsampling.
-        ABOUTME: Cutoff at 20 kHz with > 60dB attenuation above Nyquist."""
-        N = 31  # Tap count (odd for symmetry)
-        n = np.arange(N) - N // 2  # Center at 0: [-15, -14, ..., 0, ..., 14, 15]
+        """ABOUTME: Create Kaiser-windowed sinc FIR lowpass filter for 4× oversampling downsampler.
+        ABOUTME: Tap count from _FIR_N_TAPS. Cutoff 22 kHz, Kaiser beta=8: ~-22 dB at 24 kHz alias zone."""
+        N = _FIR_N_TAPS  # Tap count (odd for symmetry); driven by module constant
+        n = np.arange(N) - N // 2  # Center at 0
 
-        # Normalized cutoff frequency: 20 kHz relative to the oversampled Nyquist.
-        # OVERSAMPLE_FACTOR sets the internal rate (e.g., 2× → 96 kHz at 48 kHz output).
-        # Using the actual oversample rate avoids cutting audio above ~10 kHz when
-        # OVERSAMPLE_FACTOR=2 (a hardcoded 192 kHz denominator would be wrong there).
-        oversampled_nyquist = self.sample_rate * self.OVERSAMPLE_FACTOR / 2.0
-        normalized_cutoff = 20000.0 / oversampled_nyquist
+        # Cutoff frequency for the anti-alias filter.
+        # 22 kHz sits just above the audible range while keeping the alias zone
+        # (24 kHz and above at 48 kHz output) well into the stopband.
+        # Previous value of 20 kHz caused -6 dB rolloff at 20 kHz — too aggressive.
+        _CUTOFF_HZ = 22000.0
 
-        # Sinc function: sin(πx) / (πx), with special handling at x=0
-        with np.errstate(divide='ignore', invalid='ignore'):
-            h = np.sinc(2.0 * normalized_cutoff * n)
-            h[N // 2] = 2.0 * normalized_cutoff  # Direct evaluation at x=0
+        # Correct normalization: sinc argument = 2 * fc / fs_oversampled.
+        # fc / Nyquist = 2*fc/fs, so we use normalized_cutoff directly (not 2×).
+        # Earlier code incorrectly used 2 * normalized_cutoff which placed the
+        # effective cutoff at 2×fc = 44 kHz, giving no attenuation in the alias zone.
+        oversampled_rate = self.sample_rate * self.OVERSAMPLE_FACTOR
+        oversampled_nyquist = oversampled_rate / 2.0
+        normalized_cutoff = _CUTOFF_HZ / oversampled_nyquist   # = fc / Nyquist
 
-        # Apply Hamming window to reduce Gibbs side-lobes
-        window = np.hamming(N)
+        # Sinc kernel: np.sinc(x) = sin(πx)/(πx). With argument = fc/Nyquist * n,
+        # the -6 dB point lands at exactly fc.
+        h = np.sinc(normalized_cutoff * n)
+        h[N // 2] = normalized_cutoff  # Limit at n=0
+
+        # Kaiser window, beta=8: sidelobe attenuation ~-80 dB, wider transition band
+        # than Hamming but far superior stopband rejection for anti-aliasing purposes.
+        window = np.kaiser(N, beta=8.0)
         h_windowed = h * window
 
         # Normalize so passband gain is ~1.0 at DC

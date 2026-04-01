@@ -69,6 +69,7 @@ from modes.synth_mode import SynthMode
 from modes.metronome_mode import MetronomeMode
 from modes.main_menu_mode import MainMenuMode
 from modes.tambor.tambor_mode import TamborMode
+from modes.microtonal_mode import MicrotonalMode
 from components.confirmation_dialog import ConfirmationDialog
 from gamepad import GamepadHandler, GP
 
@@ -206,6 +207,17 @@ class CompendiumHelpBar(Static):
         line1 = "SPACE: Play Chord | E: Expand All | ↑↓←→: Navigate"
         line2 = "TAB: Search"
         return line1 if not line2 else f"{line1}\n{line2}"
+
+
+class MicrotonalHelpBar(Static):
+    """ABOUTME: Help bar displaying μTonalidade keybinds - shown only in Microtonal mode.
+    ABOUTME: Displays keyboard shortcuts for microtonal scale exploration."""
+
+    def render(self) -> str:
+        """Render the help bar with two lines of keybinds."""
+        line1 = "↑↓: Step | ←→: Tonic | J/K: Mode | E/Shift+E: EDO | SPACE: Play | ENTER: Hold"
+        line2 = "Z: Strum | O/Shift+O: Octave | G/Shift+G: Gen.Interval | M: MLT filter | R: Reverse"
+        return f"{line1}\n{line2}"
 
 
 class IdleManager:
@@ -382,6 +394,7 @@ class MainScreen(Screen):
         Binding("3", "show_synth", "Synth", show=True),
         Binding("4", "show_metronome", "Metronome", show=True),
         Binding("5", "show_tambor", "Tambor", show=True),
+        Binding("6", "show_microtonal", "μTonal", show=True),
         Binding("c", "show_config", "Config", show=True),
         Binding("backspace", "go_back", "Back", show=True),
         Binding("escape", "quit_app", "Quit", show=True),
@@ -400,6 +413,7 @@ class MainScreen(Screen):
             "tambor": None,
             "metronome": None,
             "compendium": None,
+            "microtonal": None,
         }
         # Cache of mounted mode widgets, keyed by mode_name.
         # On ARM, keeping widgets mounted (display toggled) avoids the ~300ms
@@ -529,6 +543,8 @@ class MainScreen(Screen):
             self.action_show_metronome(save_history=False)
         elif previous_mode == "tambor":
             self.action_show_tambor(save_history=False)
+        elif previous_mode == "microtonal":
+            self.action_show_microtonal(save_history=False)
 
     def action_show_main_menu(self, save_history=True):
         """Show main menu mode."""
@@ -544,6 +560,7 @@ class MainScreen(Screen):
             "tambor": TamborHelpBar,
             "metronome": MetronomeHelpBar,
             "compendium": CompendiumHelpBar,
+            "microtonal": MicrotonalHelpBar,
         }
 
         if mode_name in modes_with_help:
@@ -657,6 +674,14 @@ class MainScreen(Screen):
             self._record_history()
         self._switch_mode(self.app_context["create_tambor"], "tambor")
 
+    def action_show_microtonal(self, save_history=True):
+        """Show μTonalidade microtonal explorer mode."""
+        if self.app_context.get("current_mode") == "microtonal":
+            return
+        if save_history:
+            self._record_history()
+        self._switch_mode(self.app_context["create_microtonal"], "microtonal")
+
     def action_show_config(self):
         """Show config modal."""
         # Prevent opening a second config if one is already on the screen stack.
@@ -694,6 +719,8 @@ class MainScreen(Screen):
                 self.action_show_metronome(save_history=False)
             elif previous_mode == "tambor":
                 self.action_show_tambor(save_history=False)
+            elif previous_mode == "microtonal":
+                self.action_show_microtonal(save_history=False)
             else: # Defaults to main_menu
                 self.action_show_main_menu(save_history=False)
 
@@ -745,7 +772,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.11.0 - Analogue"
+    VERSION = "1.12.0 - Microtonal"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -793,6 +820,7 @@ class AcordesApp(App):
             "create_synth": self._create_synth_mode,
             "create_metronome": self._create_metronome_mode,
             "create_tambor": self._create_tambor_mode,
+            "create_microtonal": self._create_microtonal_mode,
             "current_mode": "main_menu",
             "mode_before_config": "main_menu",
         }
@@ -1036,6 +1064,14 @@ class AcordesApp(App):
             midi_handler=self.midi_handler,
             gamepad_handler=self.gamepad_handler,
         )
+
+    def _create_microtonal_mode(self):
+        """Create μTonalidade microtonal explorer mode widget."""
+        selected = self.device_manager.get_selected_device()
+        if selected and not self.midi_handler.is_device_open():
+            self.midi_handler.open_device(selected)
+        return MicrotonalMode(self.synth_engine, midi_handler=self.midi_handler,
+                              gamepad_handler=self.gamepad_handler)
 
     def on_unmount(self):
         """Clean up on exit."""

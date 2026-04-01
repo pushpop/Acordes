@@ -1,8 +1,8 @@
-# ABOUTME: Main menu mode - displays the five mode selection buttons.
+# ABOUTME: Main menu mode - displays the six mode selection buttons.
 # ABOUTME: Input coalescing prevents CPU spikes from rapid key repeat on ARM.
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, Horizontal, Center
+from textual.containers import Vertical, Center
 from textual.widgets import Button, Static, Label
 from textual.widget import Widget
 from textual import events
@@ -16,6 +16,7 @@ _BUTTON_IDS = [
     "synth_button",
     "metronome_button",
     "tambor_button",
+    "microtonal_button",
 ]
 
 class MainMenuMode(Vertical):
@@ -31,15 +32,17 @@ class MainMenuMode(Vertical):
     }
 
     #main-menu-buttons {
-        width: 100%;
+        width: 90%;
         height: auto;
-        align: center middle;
+        layout: grid;
+        grid-size: 3 2;
+        grid-rows: 12;
+        grid-gutter: 1 2;
     }
 
     #main-menu-buttons Button {
         width: 1fr;
-        height: 12;
-        margin: 0 1;
+        height: 100%;
         border: tall $primary;
     }
 
@@ -66,12 +69,13 @@ class MainMenuMode(Vertical):
         yield HeaderWidget(title="M A I N   M E N U", subtitle="Select a mode to begin")
 
         with Center():
-            with Horizontal(id="main-menu-buttons"):
+            with Vertical(id="main-menu-buttons"):
                 yield Button("Piano", id="piano_button", variant="primary")
                 yield Button("Compendium", id="compendium_button", variant="primary")
                 yield Button("Synth", id="synth_button", variant="primary")
                 yield Button("Metronome", id="metronome_button", variant="primary")
                 yield Button("Tambor", id="tambor_button", variant="primary")
+                yield Button("μTonal", id="microtonal_button", variant="primary")
 
     def on_mount(self) -> None:
         """Focus the first button when the menu is mounted."""
@@ -101,6 +105,8 @@ class MainMenuMode(Vertical):
         gp.clear_callbacks()
         gp.set_button_callback(GP.DPAD_LEFT,  lambda: self._gp_nav(-1))
         gp.set_button_callback(GP.DPAD_RIGHT, lambda: self._gp_nav(1))
+        gp.set_button_callback(GP.DPAD_UP,    lambda: self._gp_nav(-self._GRID_COLS))
+        gp.set_button_callback(GP.DPAD_DOWN,  lambda: self._gp_nav(self._GRID_COLS))
         gp.set_button_callback(GP.CONFIRM,    self._gp_confirm)
         gp.set_button_callback(GP.BACK,       self.main_screen.action_quit_app)
 
@@ -133,6 +139,11 @@ class MainMenuMode(Vertical):
             self.main_screen.action_show_metronome()
         elif event.button.id == "tambor_button":
             self.main_screen.action_show_tambor()
+        elif event.button.id == "microtonal_button":
+            self.main_screen.action_show_microtonal()
+
+    # Grid dimensions: 3 columns, 2 rows.
+    _GRID_COLS = 3
 
     def on_key(self, event: events.Key) -> None:
         """Handle directional keys with input coalescing.
@@ -140,11 +151,16 @@ class MainMenuMode(Vertical):
         Rapid keypresses accumulate into _nav_delta. A short timer fires once
         per burst and applies all movement as a single .focus() call, producing
         one CSS state change and one render regardless of how many keys arrived.
+        Left/right moves within a row; up/down jumps between rows.
         """
-        if event.key in ("left", "up"):
+        if event.key == "left":
             self._nav_delta -= 1
-        elif event.key in ("right", "down"):
+        elif event.key == "right":
             self._nav_delta += 1
+        elif event.key == "up":
+            self._nav_delta -= self._GRID_COLS
+        elif event.key == "down":
+            self._nav_delta += self._GRID_COLS
         else:
             return
 

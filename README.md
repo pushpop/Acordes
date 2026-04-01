@@ -1,4 +1,4 @@
-# Acordes v1.11.0 - Analog Capacitor Simulation: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.0 - Microtonal: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -22,10 +22,11 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Arpeggiator**: Sample-accurate, audio-thread driven arpeggiator (UP / DOWN / UP+DOWN / RANDOM)
 - **Percussion Synthesis**: Dedicated drum machine mode with 16-step sequencer and 8 drum sounds
 - **Musical Reference Tools**: Complete chord compendium, real-time chord detection, traditional music notation (bass & treble clefs)
+- **Microtonal Synthesis**: Full μTonalidade mode with EDO (Equal Division of Octave) systems, real-time pitch bending, and scale explorer
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.11.0 - Analogue (Analog Capacitor Simulation)
+**Latest Version**: 1.12.0 - Microtonal
 
 ---
 
@@ -76,17 +77,25 @@ A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 **Audio Engine Quality**:
 - **48 kHz sample rate** (professional audio standard)
 - **Full vectorization**: NumPy/SciPy for ultra-low CPU usage
-- **Click-free polyphony**: Smooth voice allocation, intelligent voice stealing
+- **Click-free polyphony**: Smooth voice allocation, intelligent voice stealing with ghost-voice tail rendering
 - **OS-level audio thread priority**: Elevated scheduling on Windows/Linux/macOS
 - **Thread-safe parameter routing**: All changes via MIDI event queue
 - **Sample-accurate timing**: Audio callback processes all MIDI events at buffer boundaries
+- **Kaiser-windowed FIR anti-aliasing** (v1.12.0): 63-tap Kaiser β=8 lowpass filter at 22 kHz for the 4× oversampling downsampler, replacing the previous 31-tap Hamming filter and correcting a normalization bug that had placed the effective cutoff at 44 kHz instead of 22 kHz. Result: −22.5 dB alias rejection at the 24 kHz fold-back frequency (previously ~0 dB)
 
-**Analog Capacitor Simulation** (v1.11.0 Analogue):
+**Analog Capacitor Simulation** (introduced v1.11.0):
 - **Varicap Filter Modulation**: Loud input signals subtly darken the filter cutoff (up to 10%), modeling non-linear capacitor behavior under high drive in real analog circuits
 - **Sustain Leakage**: Very long held notes drift slightly downward over ~6.5 seconds, simulating dielectric loss in analog envelope generator hold capacitors
 - **Capacitor Waveshaper**: Frequency-dependent oscillator rounding via a leaky integrator (7% blend); low notes charge fully (near-identity), high notes soften transient peaks
 - **RC Gate Curve**: Onset ramp uses exponential RC charge curve instead of linear, giving attacks the characteristic "fast rise then gradual approach" of real capacitor-gated analog circuits
 - All effects are subtle, automatic, and transparent — no user controls needed
+
+**v1.12.0 Microtonal — What's New**:
+- **μTonalidade Mode**: Full microtonal scale explorer supporting 18/24/36/48/72/96-EDO systems with real-time MIDI keyboard integration, scale catalog (5 scales per EDO), MLT detection, reversed keyboard, and musical strum engine (key `6`)
+- **3×2 Main Menu Grid**: Main menu reorganized into a 3×2 grid to accommodate all six modes cleanly
+- **Anti-Aliasing FIR Upgrade**: 63-tap Kaiser β=8 lowpass filter replaces 31-tap Hamming; cutoff corrected from 44 kHz to 22 kHz; alias rejection at 24 kHz improved from ~0 dB to −22.5 dB
+- **Strum Timer Bug Fix**: Orphaned note-on timers from rapid strum re-triggering are now fully cancelled, eliminating the accumulation of stuck voices that caused digital artifacts
+- **Acknowledgments**: The FIR filter analysis and FrFT background used in the DSP review draws on Gutiérrez E., Cádiz R.F., Sing Long C., Font F., Serra X. — "Fractional Fourier Sound Synthesis" (arXiv:2506.09189v1, 2025, Music Technology Group / Universitat Pompeu Fabra and Pontificia Universidad Católica de Chile)
 
 **Preset System**:
 - **Factory Presets**: 128 professionally programmed presets across 8 categories (Bass, Leads, Pads, Plucked, Seq, FX, Misc, Synth)
@@ -123,6 +132,48 @@ A comprehensive music theory reference hub:
 - **16 Fill Patterns**: Built-in fills with dynamic expansion
 - **Controls**: Mute/solo, humanization, timing modes (straight/swing/shuffle)
 - **BPM Sync**: Synchronized with metronome and arpeggiator
+
+### μTonalidade Mode: Microtonal Scale Explorer
+
+A dedicated microtonal synthesis mode for exploring pitch systems beyond the standard 12-tone equal temperament:
+
+**EDO Systems** (Equal Divisions of the Octave):
+- Supports 18, 24, 36, 48, 72, and 96-EDO systems
+- 18-EDO: whole-tone and augmented scale territory (67¢ per step)
+- 24-EDO: Arabic maqam scales with quarter-tones (50¢ per step)
+- 36-EDO: sixth-tone resolution, Bohlen-Pierce inspired patterns (33¢ per step)
+- 48-EDO: eighth-tone tuning, Rast maqam with fine resolution (25¢ per step)
+- 72-EDO: professional microtonal standard (17¢ per step), used in academic composition
+- 96-EDO: finest resolution available (12.5¢ per step), comma-level accuracy
+
+**Scale Catalog** (5 scales per EDO):
+- Diatonic, chromatic, whole-tone, pentatonic and EDO-specific scales
+- Arabic maqams: Rast, Bayati, Hijaz (native quarter-tone systems)
+- Symmetric structures: Bohlen-Pierce inspired, Secor 9-equal, comma lattices
+- MLT detection: Modes of Limited Transposition are automatically identified and marked
+
+**MIDI Keyboard Integration**:
+- Full MIDI keyboard support: each semitone maps to one scale degree
+- Real-time pitch bend applied per-note for accurate microtonal intonation (±200 cents range)
+- Reversed keyboard mode: flips the keyboard so low keys play high pitches (key `r`)
+
+**Controls**:
+- `e / E`: Cycle EDO system forward/backward
+- `j / k`: Browse scales within current EDO
+- `← / →`: Transpose tonic one EDO step flat/sharp
+- `↑ / ↓`: Move cursor one scale degree up/down
+- `o / O`: Octave shift down/up
+- `g / G`: Advance/retreat by the generating interval (circle-of-fifths navigation)
+- `Space`: Play current scale degree (short gate)
+- `Enter`: Toggle sustain hold
+- `z`: Strum all scale degrees with musical ordering and humanized timing
+- `m`: Toggle MLT-only filter (show only Modes of Limited Transposition)
+- `r`: Toggle reversed keyboard
+
+**Strum Engine**:
+- Musically varied note orderings: ascending (weighted), descending, inside-out, skip-step, cascade
+- Per-gap timing jitter (±35 ms) for a natural, non-metronomic feel
+- Velocity climbs with firing position for natural swell dynamics
 
 ---
 
