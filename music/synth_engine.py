@@ -19,7 +19,7 @@ except ImportError:
     AUDIO_AVAILABLE = False
     sd = None
 
-# Tap count for the anti-aliasing FIR lowpass filter used by the 4× oversampling
+# Tap count for the anti-aliasing FIR lowpass filter used by the 2× oversampling
 # downsampler.  Must be odd (symmetric linear-phase FIR).  Changing this constant
 # automatically resizes both the per-voice history buffers and the filter kernel.
 # 63 taps gives ~-22 dB alias rejection at 24 kHz (the output Nyquist for 48 kHz
@@ -33,7 +33,7 @@ _FIR_N_TAPS: int = 63
 class Voice:
     """Individual synthesizer voice with its own oscillator and envelope."""
 
-    def __init__(self, sample_rate: int, voice_index: int = 0, buffer_size: int = 512):
+    def __init__(self, sample_rate: int, voice_index: int = 0, buffer_size: int = 256):
         self.sample_rate = sample_rate
         self.voice_index = voice_index
         self.midi_note: Optional[int] = None
@@ -246,12 +246,18 @@ class Voice:
             self.osc_peak_neg = 0.0
             self.out_peak     = 0.0
             # Note: self.phase and self.sine_phase are NOT reset here (Free-Running)
-            # Clear FIR history only when starting from true silence.  For voice-steal
-            # or legato transitions (was_silent=False), preserve history so the FIR
-            # filter sees actual past samples and transitions smoothly from the old
-            # frequency rather than jumping from zeros — zeroing history at a non-silent
-            # transition is the primary cause of boundary-delta click artifacts.
-            if was_silent:
+            # Clear FIR history when starting from silence OR when the incoming
+            # frequency differs from the previous note.  The FIR downsampling
+            # filter stores the last 62 samples of the previous oscillator
+            # waveform.  If the new note is at a different frequency, those
+            # history samples are spectrally incompatible with the new output
+            # and the filter produces a boundary-delta click at the splice
+            # point.  Preserving history is only safe for true legato at the
+            # same pitch (portamento, re-trigger of the same MIDI note).
+            _old_freq = self.base_frequency if hasattr(self, 'base_frequency') else 0.0
+            _freq_changed = (_old_freq <= 0.0 or
+                             abs(frequency - _old_freq) / max(frequency, 1.0) > 0.001)
+            if was_silent or _freq_changed:
                 self._oversample_history[:] = 0.0
                 self._oversample_history_r2[:] = 0.0
                 self._oversample_history_sine[:] = 0.0
@@ -475,7 +481,7 @@ class SynthEngine:
         # the bottleneck (160ms callbacks). With the fast path the Pi 4 has
         # enough headroom to run 6 voices comfortably at 2048-sample buffers.
         import platform as _plat
-        self.num_voices = 6 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 8)
+        self.num_voices = 8 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 8)
         # Always use float32 for the sounddevice stream. PortAudio's ALSA backend
         # negotiates format with the driver internally and handles float32->S16_LE
         # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
@@ -1306,7 +1312,7 @@ class SynthEngine:
         return normal_buf, accent_buf
 
     def _create_polyphase_filter(self):
-        """ABOUTME: Create Kaiser-windowed sinc FIR lowpass filter for 4× oversampling downsampler.
+        """ABOUTME: Create Kaiser-windowed sinc FIR lowpass filter for 2× oversampling downsampler.
         ABOUTME: Tap count from _FIR_N_TAPS. Cutoff 22 kHz, Kaiser beta=8: ~-22 dB at 24 kHz alias zone."""
         N = _FIR_N_TAPS  # Tap count (odd for symmetry); driven by module constant
         n = np.arange(N) - N // 2  # Center at 0
@@ -1338,16 +1344,16 @@ class SynthEngine:
         # Normalize so passband gain is ~1.0 at DC
         self._downsample_filter_taps = (h_windowed / np.sum(h_windowed)).astype(np.float32)
 
-    def _downsample_polyphase_signal(self, oversampled: np.ndarray, downsample_factor: int = 4,
+    def _downsample_polyphase_signal(self, oversampled: np.ndarray, downsample_factor: int = 2,
                                      history: np.ndarray = None) -> np.ndarray:
         """ABOUTME: Polyphase downsampling: convolve with lowpass filter, decimate by factor.
-        ABOUTME: Input: oversampled array at 192 kHz, Output: decimated array at 48 kHz."""
+        ABOUTME: Input: oversampled array at 96 kHz, Output: decimated array at 48 kHz."""
         if not self.ENABLE_OVERSAMPLING or self._downsample_filter_taps is None:
             return oversampled[:len(oversampled) // downsample_factor]
 
         expected_len = len(oversampled) // downsample_factor
         n_taps = len(self._downsample_filter_taps)
-        history_len = n_taps - 1   # 30 samples for a 31-tap filter
+        history_len = n_taps - 1   # 62 samples for a 63-tap filter
 
         if history is not None:
             # Prepend the caller-supplied FIR history so each buffer boundary uses
@@ -1439,14 +1445,14 @@ class SynthEngine:
             return samples, start_phase
 
         # Regular pitched waveforms use phase accumulation.
-        # Support 4× oversampling: generate at 192 kHz if oversample_factor=4.
+        # Support 2× oversampling: generate at 96 kHz if oversample_factor=2.
         effective_sample_rate = self.sample_rate * oversample_factor
         effective_num_samples = num_samples * oversample_factor
 
         phase_inc = np.float32(2.0 * np.pi * frequency / effective_sample_rate)
 
         # Phase accumulation — use pre-allocated buffer when supplied to avoid
-        # np.arange + broadcast allocation (~7 KB per call at 4× oversampling).
+        # np.arange + broadcast allocation (~4 KB per call at 2× oversampling).
         if _phases is not None and len(_phases) >= effective_num_samples:
             phases = _phases[:effective_num_samples]
             # Compute phases[i] = start_phase + i * phase_inc in-place using the
@@ -1479,8 +1485,10 @@ class SynthEngine:
                 samples *= np.float32(4.0)
                 samples -= np.float32(1.0)
             elif waveform == "square":
+                # np.where instead of np.sign: sign(0)=0 creates a zero-sample
+                # glitch at exact zero crossings; where(>=0) gives a clean +1/-1.
                 np.sin(phases, out=samples)
-                np.sign(samples, out=samples)
+                np.where(samples >= 0, np.float32(1.0), np.float32(-1.0), out=samples)
             else:
                 # Sawtooth (default)
                 np.multiply(t_norm, np.float32(2.0), out=samples)
@@ -1511,8 +1519,11 @@ class SynthEngine:
         """Apply PolyBLEP (Polynomial BLEP) anti-aliasing correction to sawtooth, square, and triangle."""
         if sample_rate is None:
             sample_rate = self.sample_rate
-        phase_inc = 2 * np.pi * frequency / sample_rate
-        dphi = phase_inc / (2 * np.pi)  # Normalized phase increment
+        # Cast to float32 to match the precision used in _generate_waveform phase
+        # accumulation (line 1452). A float64 phase_inc here would misalign the
+        # PolyBLEP correction window with the actual discontinuity positions.
+        phase_inc = np.float32(2 * np.pi * frequency / sample_rate)
+        dphi = float(phase_inc / (2 * np.pi))  # Normalized phase increment
 
         # Normalized phase 0..1
         t_norm = (phase % (2 * np.pi)) / (2 * np.pi)
@@ -3038,7 +3049,7 @@ class SynthEngine:
                     f1 = v.frequency * vco_lfo if v.frequency else 440.0
                     if self.octave_enabled and self.octave != 0: f1 *= (2.0 ** self.octave)
 
-                    # Generate primary oscillator with optional 4× oversampling.
+                    # Generate primary oscillator with optional 2× oversampling.
                     # Pass pre-allocated voice buffers (_v_osc_buf for waveform output,
                     # _v_phase_arr for phase accumulation) to avoid malloc in hot path.
                     oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
@@ -3047,7 +3058,7 @@ class SynthEngine:
                         oversample_factor=oversample_factor,
                         _out=v._v_osc_buf, _phases=v._v_phase_arr)
 
-                    # Downsample oscillator output from 192 kHz to 48 kHz if oversampling enabled.
+                    # Downsample oscillator output from 96 kHz to 48 kHz if oversampling enabled.
                     # Noise waveforms skip oversampling in _generate_waveform (they return
                     # frame_count samples, not frame_count * oversample_factor), so only
                     # downsample when the signal is actually at the oversampled length.
