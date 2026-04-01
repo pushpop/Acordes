@@ -3810,3 +3810,8 @@ class SynthEngine:
         else:
             self.note_on(60, 1)
             self.note_off(60)
+            # Reset FX tail counter so the audio callback can take the idle
+            # early-return path immediately after warmup. Without this, the
+            # note_on above sets _fx_tail_samples = _FX_TAIL_MAX (10 seconds),
+            # keeping all 4 CPU cores at 40-50% for 10 full seconds post-launch.
+            self._fx_tail_samples = 0
