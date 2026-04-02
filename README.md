@@ -1,4 +1,4 @@
-# Acordes v1.12.1 - Strum Artifacts Fixed: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.2 - Mono Voice Artifacts Fixed: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -16,7 +16,7 @@
 Whether you're a musician exploring synthesis in the terminal, a developer interested in audio DSP, or someone seeking a lightweight alternative to heavyweight DAWs, Acordes offers:
 
 - **Real-time MIDI Playback**: Connect any USB MIDI keyboard and play instantly
-- **Professional Polyphonic Synthesis**: 8-voice synthesis engine with dual-rank architecture, dual filters per voice, and a complete signal chain (VCO → HPF → LPF → Sine Reinforcement → Envelopes → FX)
+- **Professional Polyphonic Synthesis**: 16-voice synthesis engine with dual-rank architecture, dual filters per voice, and a complete signal chain (VCO → HPF → LPF → Sine Reinforcement → Envelopes → FX)
 - **Preset System**: 128 professionally programmed factory presets + unlimited user-saveable presets
 - **Effects Processing**: BBD-style chorus, stereo feedback delay, and parametric filtering
 - **Arpeggiator**: Sample-accurate, audio-thread driven arpeggiator (UP / DOWN / UP+DOWN / RANDOM)
@@ -26,7 +26,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.12.1 - Strum Artifacts Fixed
+**Latest Version**: 1.12.2 - Mono Voice Artifacts Fixed
 
 ---
 

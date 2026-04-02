@@ -476,12 +476,18 @@ class SynthEngine:
         # The user-configured value is respected if it is larger (e.g. 8192).
         # Desktop uses the config value directly (default 480 = 10ms).
         self.buffer_size = max(2048, buffer_size) if self._IS_ARM else buffer_size
+        # Pre-allocation size for all working buffers.  ASIO, WASAPI, and ALSA
+        # drivers may negotiate a different buffer size than requested.  By
+        # allocating at a generous upper bound, the audio callback can handle
+        # any driver-chosen frame_count without reallocation.  The actual
+        # self.buffer_size is updated after the stream opens (see _init_audio).
+        self._alloc_size = max(self.buffer_size, 8192)
         # ARM: 6 voices on armv7l (1GB Pi 4), 6 on aarch64 (64-bit Pi).
         # scipy C-level filters replaced the Python per-sample loops that were
         # the bottleneck (160ms callbacks). With the fast path the Pi 4 has
         # enough headroom to run 6 voices comfortably at 2048-sample buffers.
         import platform as _plat
-        self.num_voices = 8 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 8)
+        self.num_voices = 16 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 16)
         # Always use float32 for the sounddevice stream. PortAudio's ALSA backend
         # negotiates format with the driver internally and handles float32->S16_LE
         # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
@@ -595,7 +601,7 @@ class SynthEngine:
         # All temporary arrays needed by _audio_callback are allocated here
         # at startup and reused in-place each callback. Zero malloc/free in
         # the hot path prevents GC-pause deadline misses that cause clicks.
-        _bs = self.buffer_size
+        _bs = self._alloc_size
         self._cb_mixed_l  = np.zeros(_bs, dtype=np.float32)
         self._cb_mixed_r  = np.zeros(_bs, dtype=np.float32)
         self._cb_cho_l    = np.zeros(_bs, dtype=np.float32)
@@ -623,8 +629,8 @@ class SynthEngine:
         # invocations versus the naive 4-call approach while preserving
         # full independence between L and R channels.  Pre-allocated buffers
         # avoid heap allocation in the audio callback hot path.
-        self._dither_buf_l  = np.zeros(2 * _bs, dtype=np.float32)  # L channel: [r1 | r2]
-        self._dither_buf_r  = np.zeros(2 * _bs, dtype=np.float32)  # R channel: [r1 | r2]
+        self._dither_buf_l  = np.zeros(2 * _bs, dtype=np.float32)  # L: [r1 | r2]
+        self._dither_buf_r  = np.zeros(2 * _bs, dtype=np.float32)  # R: [r1 | r2]
         self._DITHER_AMP: float = 1.0 / 32768.0   # 1 LSB at 16-bit depth
         # Independent seeds for L and R; prefix 0xACC0 = ACCO(rdes)
         self._dither_rng_l  = np.random.default_rng(0xACC05000)
@@ -833,7 +839,7 @@ class SynthEngine:
         self._XFMR_LP_ZI_L = np.zeros(1, dtype=np.float64)  # filter memory L
         self._XFMR_LP_ZI_R = np.zeros(1, dtype=np.float64)  # filter memory R
         self._XFMR_EVEN    = 0.04   # 2nd harmonic coefficient (subtle asymmetry)
-        self._xfmr_sq_buf  = np.zeros(self.buffer_size, dtype=np.float32)  # pre-alloc
+        self._xfmr_sq_buf  = np.zeros(self._alloc_size, dtype=np.float32)  # pre-alloc
 
         # ── Tube compressor ─────────────────────────────────────────────────────
         # Warm RMS compression at the output stage. Per-buffer RMS detection
@@ -920,7 +926,7 @@ class SynthEngine:
         # With only 2 slots, a 5-note chord re-strum forces 3 brutal steals
         # (no ghost available), each producing an audible click from the abrupt
         # filter state reset.  4 slots covers most real-world chord sizes.
-        _ghost_count = 1 if self._IS_ARM else 4
+        _ghost_count = 1 if self._IS_ARM else max(4, self.num_voices // 2)
         self._ghost_voices: List[Voice] = [
             Voice(self.sample_rate, self.num_voices + i, _bs)
             for i in range(_ghost_count)
@@ -975,13 +981,32 @@ class SynthEngine:
                     else:
                         print("[audio] ARM: bcm2835 headphone device not found, using ALSA default", flush=True)
 
-                # ARM: use an explicit numeric latency that matches the buffer
-                # size so PortAudio doesn't add a second layer of buffering on
-                # top of our blocksize.  'high' is vague and driver-dependent.
-                _latency = (self.buffer_size / self.sample_rate) if self._IS_ARM else 'low'
+                # For ASIO, WASAPI, and ALSA backends the audio driver owns
+                # the buffer size.  Requesting a different size forces PortAudio
+                # to insert an adapter layer that doubles the buffer and causes
+                # click/pop artifacts.  Passing blocksize=0 tells PortAudio to
+                # accept whatever the driver is configured for; we then read the
+                # actual size back and update self.buffer_size to match.
+                _DRIVER_OWNED_BACKENDS = {'ASIO', 'Windows WASAPI', 'ALSA'}
+                _backend_name = self._audio_backend or ''
+                _let_driver_choose = any(b in _backend_name for b in _DRIVER_OWNED_BACKENDS)
+
+                if self._IS_ARM:
+                    # ARM: explicit numeric latency matching buffer size so
+                    # PortAudio doesn't add a second buffering layer.
+                    _blocksize = self.buffer_size
+                    _latency = self.buffer_size / self.sample_rate
+                elif _let_driver_choose:
+                    # Let the driver choose its preferred buffer size.
+                    _blocksize = 0
+                    _latency = 'low'
+                else:
+                    _blocksize = self.buffer_size
+                    _latency = 'low'
+
                 self.stream = sd.OutputStream(
                     samplerate=self.sample_rate,
-                    blocksize=self.buffer_size,
+                    blocksize=_blocksize,
                     device=device_index,
                     channels=2,
                     dtype=self._output_dtype,
@@ -993,6 +1018,16 @@ class SynthEngine:
                 self._elevate_audio_priority()
 
                 actual_blocksize = self.stream.blocksize
+                # Adopt the driver's buffer size so all internal processing
+                # (gain ramps, event rate-limits, FX tail counters) matches
+                # the real frame_count delivered to _audio_callback.
+                if actual_blocksize and actual_blocksize != self.buffer_size:
+                    _old = self.buffer_size
+                    self.buffer_size = actual_blocksize
+                    if not self._IS_ARM:
+                        print(f"[audio] Buffer size: driver negotiated {actual_blocksize} "
+                              f"(requested {_old})", flush=True)
+
                 if self._IS_ARM:
                     # Collect startup diagnostics into _startup_info so the
                     # LoadingScreen can display them cleanly instead of having
@@ -1016,10 +1051,11 @@ class SynthEngine:
                         f"Latency : {lat_ms:.1f} ms"
                     )
                 else:
-                    self._startup_info = ""
-                    if actual_blocksize != self.buffer_size:
-                        print(f"Buffer size mismatch: requested {self.buffer_size}, got {actual_blocksize} samples")
-                        print(f"  Latency: {actual_blocksize / self.sample_rate * 1000:.2f}ms")
+                    _be_label = f" ({_backend_name})" if _backend_name else ""
+                    buf_ms = self.buffer_size / self.sample_rate * 1000
+                    self._startup_info = (
+                        f"Buffer  : {self.buffer_size} smp  ({buf_ms:.1f} ms){_be_label}"
+                    )
             except Exception as e:
                 print(f"Audio initialization failed: {e}")
                 self.running = False
@@ -1488,7 +1524,7 @@ class SynthEngine:
                 # np.where instead of np.sign: sign(0)=0 creates a zero-sample
                 # glitch at exact zero crossings; where(>=0) gives a clean +1/-1.
                 np.sin(phases, out=samples)
-                np.where(samples >= 0, np.float32(1.0), np.float32(-1.0), out=samples)
+                samples[:] = np.where(samples >= 0, np.float32(1.0), np.float32(-1.0))
             else:
                 # Sawtooth (default)
                 np.multiply(t_norm, np.float32(2.0), out=samples)
@@ -2408,6 +2444,22 @@ class SynthEngine:
                 # Any frequency-mismatch error decays in ~4.5ms (200 samples at R=0.995).
                 _old_dc_x       = old_v.dc_blocker_x
                 _old_dc_y       = old_v.dc_blocker_y
+                # FIR downsampling history: inherit from outgoing voice so the
+                # polyphase filter has continuous input across the steal boundary.
+                # Zeroing the history (as trigger() does) creates a 62-sample
+                # discontinuity that the FIR reads as a transient click, especially
+                # audible on sine waves during fast monophonic playing.
+                _old_fir_hist      = old_v._oversample_history.copy()
+                _old_fir_hist_r2   = old_v._oversample_history_r2.copy()
+                _old_fir_hist_sine = old_v._oversample_history_sine.copy()
+                # Capacitor simulation and peak detector state: inherit to prevent
+                # sudden jumps in varicap filter modulation and waveshaper state.
+                _old_cap_env       = old_v.cap_env
+                _old_sustain_cap   = old_v.sustain_cap
+                _old_cap_ws_state  = old_v.cap_ws_state
+                _old_osc_peak_pos  = old_v.osc_peak_pos
+                _old_osc_peak_neg  = old_v.osc_peak_neg
+                _old_out_peak      = old_v.out_peak
                 # Onset ramp position: the onset ramp was designed to hide DC blocker
                 # cold-start transients when triggering from silence.  During a live
                 # steal the audio is already playing, the DC blocker state is inherited,
@@ -2450,6 +2502,17 @@ class SynthEngine:
                 new_v.dc_blocker_x  = _old_dc_x
                 new_v.dc_blocker_y  = _old_dc_y
                 new_v.onset_samples = _old_onset
+                # Inherit FIR history so the downsampling filter has continuous input.
+                new_v._oversample_history[:]      = _old_fir_hist
+                new_v._oversample_history_r2[:]   = _old_fir_hist_r2
+                new_v._oversample_history_sine[:] = _old_fir_hist_sine
+                # Inherit capacitor and peak detector state.
+                new_v.cap_env       = _old_cap_env
+                new_v.sustain_cap   = _old_sustain_cap
+                new_v.cap_ws_state  = _old_cap_ws_state
+                new_v.osc_peak_pos  = _old_osc_peak_pos
+                new_v.osc_peak_neg  = _old_osc_peak_neg
+                new_v.out_peak      = _old_out_peak
                 # Portamento glide: if enabled, slide from the old pitch to the new one.
                 # Because v.frequency also drives key-tracking cutoff, the filter cutoff
                 # glides in sync — no sudden coefficient jump at the steal moment.
@@ -2669,6 +2732,18 @@ class SynthEngine:
                     ghost_slot._oversample_history[:]      = best_v._oversample_history
                     ghost_slot._oversample_history_r2[:]   = best_v._oversample_history_r2
                     ghost_slot._oversample_history_sine[:] = best_v._oversample_history_sine
+                    # Capacitor simulation state (varicap, sustain leakage, waveshaper).
+                    ghost_slot.cap_env            = best_v.cap_env
+                    ghost_slot.sustain_cap        = best_v.sustain_cap
+                    ghost_slot.cap_ws_state       = best_v.cap_ws_state
+                    # Peak detector state (oscillator peak-to-peak, output limiter).
+                    ghost_slot.osc_peak_pos       = best_v.osc_peak_pos
+                    ghost_slot.osc_peak_neg       = best_v.osc_peak_neg
+                    ghost_slot.out_peak           = best_v.out_peak
+                    # Smoothed filter parameters (avoid click from sudden cutoff jump).
+                    ghost_slot.smooth_fl_lpf      = best_v.smooth_fl_lpf
+                    ghost_slot.smooth_fl_hpf      = best_v.smooth_fl_hpf
+                    ghost_slot.smooth_resonance   = best_v.smooth_resonance
                     # If the voice was still active (not yet releasing), put the ghost
                     # into release so it fades out naturally.
                     if ghost_slot.note_active and not ghost_slot.is_releasing:
@@ -3262,7 +3337,7 @@ class SynthEngine:
             # Ghost voices run the same signal chain as real voices but output at a
             # reduced gain (0.7×) and are never counted in the gain normalisation.
             # Pan uses centre (ang=π/4) so ghost tails are not spatially distracting.
-            _GHOST_GAIN = 0.7
+            _GHOST_GAIN = 0.5
             _ghost_ang  = np.pi / 4.0   # centre pan
             for g in self._ghost_voices:
                 if g.is_ghost and (g.note_active or g.is_releasing):
@@ -3270,7 +3345,7 @@ class SynthEngine:
                     if self.octave_enabled and self.octave != 0:
                         f_g *= (2.0 ** self.octave)
                     oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
-                    gs, g.phase = self._generate_waveform(self.waveform, f_g, frame_count, g.phase, oversample_factor=oversample_factor)
+                    gs, g.phase = self._generate_waveform(self.waveform, f_g, frame_count, g.phase, oversample_factor=oversample_factor, _out=g._v_osc_buf, _phases=g._v_phase_arr)
                     if self.ENABLE_OVERSAMPLING and len(gs) == frame_count * oversample_factor:
                         gs = self._downsample_polyphase_signal(gs, self.OVERSAMPLE_FACTOR, history=g._oversample_history)
                     gs = self._sanitize_signal(self._apply_filter(g, gs))

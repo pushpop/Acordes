@@ -5,6 +5,28 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.2] - 2026-04-02 - Mono Voice Artifacts Fixed
+
+### Fixed
+
+**Monophonic voice steal artifacts** — Eliminated clicks and transients during fast note playing in MONO voice mode:
+
+- **FIR history inheritance on MONO steal**: The polyphase downsampling FIR filter maintains a 62-sample history buffer per voice. During a MONO steal, the outgoing voice's FIR history is now captured before the steal and restored on the incoming voice after `trigger()`. Previously, `trigger()` zeroed the history on every frequency change, creating a 62-sample discontinuity at the filter input boundary; this was especially audible on sine waves where the FIR is the only anti-alias mechanism (no PolyBLEP on sine).
+- **Capacitor and peak detector state inheritance on MONO steal**: `cap_env`, `sustain_cap`, `cap_ws_state`, `osc_peak_pos`, `osc_peak_neg`, and `out_peak` are now carried across MONO voice steals. Previously they reset to zero on every steal, causing sudden jumps in varicap filter modulation and waveshaper response at each note boundary.
+
+**Ghost voice system fixes** (applies to all voice modes):
+
+- **Ghost count scaled to voice count**: Ghost slot count now scales as `max(4, num_voices // 2)`, giving 8 ghost slots for 16 voices (was hardcoded to 4). With 16 voices and only 4 ghost slots, rapid chord re-strums exhausted the pool and triggered brutal steals (hard amplitude cuts).
+- **Missing ghost promotion state copy**: `cap_env`, `sustain_cap`, `cap_ws_state`, `osc_peak_pos`, `osc_peak_neg`, `out_peak`, `smooth_fl_lpf`, `smooth_fl_hpf`, and `smooth_resonance` are now copied when a voice is promoted to ghost. Missing fields caused audible jumps in filter character at the moment of ghost promotion.
+- **Ghost waveform uses pre-allocated buffers**: Ghost voice waveform generation now passes `_out` and `_phases` pre-allocated buffers to `_generate_waveform`, eliminating per-callback heap allocations in the ghost render path.
+- **Ghost gain adjusted for higher count**: `_GHOST_GAIN` reduced from 0.7 to 0.5 to compensate for the doubled ghost count (keeps total ghost energy similar to before).
+
+### Changed
+
+- **Voice count increased to 16**: Polyphonic synthesis now uses 16 voices on desktop (was 8). ARM/Raspberry Pi retains 16 voices with 1 ghost slot.
+
+---
+
 ## [1.11.0] - 2026-03-27 - Analogue: Analog Capacitor Simulation
 
 ### Added

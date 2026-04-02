@@ -609,7 +609,15 @@ class ConfigMode(Screen):
             else:
                 label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
         else:
-            label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [check console if ASIO4ALL shows different size]")
+            # Check if the current backend is one where the driver owns buffer size.
+            backend = ""
+            if hasattr(self, 'config_manager') and self.config_manager:
+                backend = self.config_manager.get_audio_backend() or ""
+            _driver_owned = any(b in backend for b in ('ASIO', 'WASAPI', 'ALSA'))
+            if _driver_owned:
+                label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [driver auto-matched on {backend}]")
+            else:
+                label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
 
     # ── MIDI Device ──────────────────────────────────────────────────────────
 

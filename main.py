@@ -156,7 +156,12 @@ class LoadingScreen(Screen):
 
             self.query_one("#loading-spinner").update("[#d79b00]ready[/]")
 
-            # Show engine diagnostics if the subprocess populated them (ARM only).
+            # Sync buffer size: the driver may have negotiated a different
+            # size than requested (ASIO/WASAPI/ALSA).  Update the proxy so
+            # all downstream code sees the actual driver-chosen value.
+            self._proxy.sync_actual_buffer_size()
+
+            # Show engine diagnostics if the subprocess populated them.
             info = self._proxy.get_startup_info()
             if info:
                 self.query_one("#loading-info").update(info)
@@ -772,7 +777,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.12.1 - Strum Artifacts Fixed"
+    VERSION = "1.12.2 - Mono Voice Artifacts Fixed"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """

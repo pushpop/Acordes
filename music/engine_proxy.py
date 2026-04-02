@@ -198,8 +198,26 @@ class SynthEngineProxy:
 
     @property
     def buffer_size(self) -> int:
-        """Buffer size the proxy was configured with."""
+        """Actual buffer size in use by the audio engine.
+
+        After the engine starts, this reflects the driver-negotiated size
+        (which may differ from the configured value for ASIO/WASAPI/ALSA).
+        """
         return self._buffer_size
+
+    def sync_actual_buffer_size(self):
+        """Parse the actual buffer size from startup_info and update _buffer_size.
+
+        Called after the engine is ready so the proxy reflects the real
+        driver-negotiated buffer size instead of the originally requested one.
+        """
+        import re
+        info = self.get_startup_info()
+        m = re.search(r'Buffer\s*:\s*(\d+)\s*smp', info)
+        if m:
+            actual = int(m.group(1))
+            if actual != self._buffer_size:
+                self._buffer_size = actual
 
     def is_available(self) -> bool:
         return self._ready_event.is_set() and self._process.is_alive()
