@@ -311,7 +311,7 @@ class SynthMode(Widget):
     # Each entry: display label for the param row.
     # nav_up/down steps through these; dispatch in _adjust_focused_param uses the name.
     _SECTION_PARAMS = {
-        "oscillator": ["Wave", "Noise", "Octave", "Drive"],
+        "oscillator": ["Wave", "Noise", "Octave", "Drive", "P.Decay"],
         "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "KTrack"],
         "amp_eg":     ["Attack", "Decay", "Sustain", "Release", "Route"],
         "filter_eg":  ["Atk", "Dcy", "Sus", "Rel", "Amount"],
@@ -328,8 +328,9 @@ class SynthMode(Widget):
     # Discrete range: ("DISCRETE_RANGE", min_int, max_int, attribute_name)
     # Discrete list: ("DISCRETE_LIST", [values_list], attribute_name, None)
     _PARAM_METADATA = {
-        "Wave": ("DISCRETE_LIST", ["pure_sine", "sine", "square", "sawtooth", "triangle"], "waveform", None),
+        "Wave": ("DISCRETE_LIST", ["pure_sine", "sine", "square", "sawtooth", "triangle", "semicircle", "pointy", "piano_string"], "waveform", None),
         "Noise": ("noise_level", 0.0, 1.0, False),
+        "P.Decay": ("partial_decay", 0.0, 1.0, False),
         "Octave": ("DISCRETE_RANGE", -2, 2, "octave"),
         "Drive": ("filter_drive", 0.5, 8.0, False),
         "HPF Cut": ("hpf_cutoff", 20.0, 5000.0, True),
@@ -346,7 +347,7 @@ class SynthMode(Widget):
         "Dcy": ("feg_decay", 0.001, 3.0, False),
         "Sus": ("feg_sustain", 0.0, 1.0, False),
         "Rel": ("feg_release", 0.001, 3.0, False),
-        "Amount": ("feg_amount", 0.0, 1.0, False),
+        "Amount": ("feg_amount", -1.0, 1.0, False),
         "Rate": ("lfo_freq", 0.1, 20.0, True),  # In lfo section
         "Depth": ("lfo_depth", 0.0, 1.0, False),  # In lfo section
         "Shape": ("DISCRETE_LIST", ["sine", "triangle", "square", "sample_hold"], "lfo_shape", None),
@@ -400,7 +401,8 @@ class SynthMode(Widget):
 
         params = self._load_initial_params()
         self.waveform   = params["waveform"]
-        self.noise_level = params.get("noise_level", 0.0)
+        self.noise_level   = params.get("noise_level",   0.0)
+        self.partial_decay = params.get("partial_decay", 0.5)
         self.sine_mix   = params.get("sine_mix", 0.0)
         self.octave     = params["octave"]
         self.amp_level  = params["amp_level"]
@@ -499,6 +501,7 @@ class SynthMode(Widget):
         self.waveform_display       = None
         self.waveform_shape_display = None
         self.noise_display          = None
+        self.partial_decay_display  = None
         self.octave_display         = None
         self.amp_display            = None
         self.master_volume_display  = None
@@ -654,6 +657,9 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Drive", ""), classes="control-label", id="lbl-oscillator-3")
                     self.filter_drive_display = Label(self._fmt_filter_drive(), classes="control-value", id="filter-drive-display")
                     yield self.filter_drive_display
+                    yield Label(self._row_label("P.Decay", ""), classes="control-label", id="lbl-oscillator-4")
+                    self.partial_decay_display = Label(self._fmt_knob(self.partial_decay, 0.0, 1.0, f"{int(self.partial_decay * 100)}%"), classes="control-value", id="partial-decay-display")
+                    yield self.partial_decay_display
                     yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── FILTER ───────────────────────────────────────────────
@@ -739,11 +745,6 @@ class SynthMode(Widget):
                     yield Label("", classes="video-art", id="video-art-10")
                     yield Label("", classes="video-art", id="video-art-11")
                     yield Label(self._section_bottom(), classes="section-bottom")
-
-            # ── SPACING ───────────────────────────────────────────────────
-            yield Label("")
-            yield Label("")
-            yield Label("")
 
             # ── ROW 2: LFO · CHORUS · FX · ARPEGGIO · MIXER ────────────
             with Horizontal(id="synth-container-bottom"):
@@ -1479,6 +1480,8 @@ class SynthMode(Widget):
                 self._do_adjust_octave(direction)
             elif name == "Drive":
                 self._do_adjust_filter_drive(direction)
+            elif name == "P.Decay":
+                self._do_adjust_partial_decay(direction)
         # FILTER
         elif sec == "filter":
             if name == "HPF Cut":   self._do_adjust_hpf_cutoff(direction)
@@ -1534,7 +1537,7 @@ class SynthMode(Widget):
     # ── Core param mutators (no focus guard — used by focus dispatch) ─────────
 
     def _do_toggle_waveform(self, way: str = "forward"):
-        order = ["pure_sine", "sine", "square", "sawtooth", "triangle"]
+        order = ["pure_sine", "sine", "square", "sawtooth", "triangle", "semicircle", "pointy", "piano_string"]
         delta = 1 if way == "forward" else -1
         self.waveform = order[(order.index(self.waveform) + delta) % len(order)]
         self.synth_engine.update_parameters(waveform=self.waveform)
@@ -1569,6 +1572,18 @@ class SynthMode(Widget):
         self.synth_engine.update_parameters(noise_level=self.noise_level)
         if self.noise_display:
             self.noise_display.update(self._fmt_knob(self.noise_level, 0.0, 1.0, f"{int(self.noise_level * 100)}%"))
+        self._mark_dirty()
+        self._autosave_state()
+
+    def _do_adjust_partial_decay(self, direction: str = "up"):
+        step = 0.05
+        if direction == "up":
+            self.partial_decay = min(1.0, self.partial_decay + step)
+        else:
+            self.partial_decay = max(0.0, self.partial_decay - step)
+        self.synth_engine.update_parameters(partial_decay=self.partial_decay)
+        if self.partial_decay_display:
+            self.partial_decay_display.update(self._fmt_knob(self.partial_decay, 0.0, 1.0, f"{int(self.partial_decay * 100)}%"))
         self._mark_dirty()
         self._autosave_state()
 
@@ -1892,7 +1907,9 @@ class SynthMode(Widget):
         self._mark_dirty(); self._autosave_state()
 
     def _do_adjust_feg_sustain(self, direction: str):
-        self.feg_sustain = max(0.0, min(1.0, self.feg_sustain + (0.05 if direction == "up" else -0.05)))
+        # 1% steps with focus-mode acceleration, matching amp sustain behaviour.
+        step = 0.01 * self._focus_accel_mult
+        self.feg_sustain = max(0.0, min(1.0, self.feg_sustain + (step if direction == "up" else -step)))
         self.synth_engine.update_parameters(feg_sustain=self.feg_sustain)
         if self.feg_sustain_display: self.feg_sustain_display.update(self._fmt_knob(self.feg_sustain, 0.0, 1.0, f"{int(self.feg_sustain * 100)}%"))
         self._mark_dirty(); self._autosave_state()
@@ -1906,7 +1923,12 @@ class SynthMode(Widget):
         self._mark_dirty(); self._autosave_state()
 
     def _do_adjust_feg_amount(self, direction: str):
-        self.feg_amount = max(-1.0, min(1.0, self.feg_amount + (0.05 if direction == "up" else -0.05)))
+        # Adaptive steps: 1% near zero for fine control, 5% for sweeping.
+        # Threshold at ±20% so precise zero-crossing edits are easy.
+        # Focus-mode acceleration applies on top so held keys sweep quickly.
+        step = 0.01 if abs(self.feg_amount) < 0.20 else 0.05
+        step *= self._focus_accel_mult
+        self.feg_amount = max(-1.0, min(1.0, self.feg_amount + (step if direction == "up" else -step)))
         self.synth_engine.update_parameters(feg_amount=self.feg_amount)
         if self.feg_amount_display: self.feg_amount_display.update(self._fmt_feg_amount())
         self._mark_dirty(); self._autosave_state()
@@ -2012,7 +2034,20 @@ class SynthMode(Widget):
             return
         self._current_preset = preset
         params = self.preset_manager.extract_params(preset)
-        self._apply_params(params)
+        # Apply params locally so the UI reflects the new preset immediately,
+        # but skip pushing to the engine (engine_push=False) — the engine will
+        # receive the params via the preset_change event below once the fade-out
+        # completes and all old voices have been reset.
+        self._apply_params(params, engine_push=False)
+        # Send a preset_change event with the full engine param set: the engine
+        # fades out, resets all voices so old envelopes cannot bleed into the new
+        # sound, applies the params, then fades back in — clean, click-free.
+        # Using _engine_params() (same key set as _push_params_to_engine) ensures
+        # sine_mix, arp_bpm, and other engine-only fields are included.
+        self.synth_engine.midi_event_queue.put({
+            'type': 'preset_change',
+            'params': self._engine_params(),
+        })
         self._dirty = False
         self._suggested_preset_name = None  # Clear suggested name when loading a preset
         self.config_manager.set_last_preset(preset.filename)
@@ -2020,10 +2055,11 @@ class SynthMode(Widget):
 
     # ── Parameter helpers ────────────────────────────────────────
 
-    def _apply_params(self, params: dict):
+    def _apply_params(self, params: dict, engine_push: bool = True):
         self.waveform   = params.get("waveform",  self.waveform)
         self.octave     = params.get("octave",    self.octave)
-        self.noise_level = params.get("noise_level", self.noise_level)
+        self.noise_level   = params.get("noise_level",   self.noise_level)
+        self.partial_decay = params.get("partial_decay", self.partial_decay)
         self.amp_level  = params.get("amp_level", self.amp_level)
         self.cutoff        = params.get("cutoff",        self.cutoff)
         self.hpf_cutoff    = params.get("hpf_cutoff",    self.hpf_cutoff)
@@ -2067,15 +2103,23 @@ class SynthMode(Widget):
         self.arp_range   = params.get("arp_range",   self.arp_range)
         # Voice Type
         self.voice_type  = params.get("voice_type",  self.voice_type)
-        self._push_params_to_engine()
+        if engine_push:
+            self._push_params_to_engine()
         self._display_cache.clear()  # All params changed — force full redraw
         self._refresh_all_displays()
 
-    def _push_params_to_engine(self):
-        self.synth_engine.update_parameters(
+    def _engine_params(self) -> dict:
+        """Return all parameters needed by the synth engine as a flat dict.
+
+        This is the canonical source for anything that goes to update_parameters()
+        or needs to be sent via a preset_change event.  Keeping it in one place
+        prevents _push_params_to_engine and preset_change from diverging.
+        """
+        return dict(
             waveform=self.waveform,
             octave=self.octave,
             noise_level=self.noise_level,
+            partial_decay=self.partial_decay,
             sine_mix=self.sine_mix,
             amp_level=self.amp_level,
             master_volume=self.master_volume,
@@ -2119,11 +2163,15 @@ class SynthMode(Widget):
             voice_type=self.voice_type,
         )
 
+    def _push_params_to_engine(self):
+        self.synth_engine.update_parameters(**self._engine_params())
+
     def _current_params(self) -> dict:
         return {
             "waveform":        self.waveform,
             "octave":          self.octave,
             "noise_level":     self.noise_level,
+            "partial_decay":   self.partial_decay,
             "amp_level":       self.amp_level,
             "master_volume":   self.master_volume,
             "cutoff":          self.cutoff,
@@ -2979,7 +3027,7 @@ class SynthMode(Widget):
 
     def action_randomize(self):
         """Roll the dice — generate musically useful random synth parameters."""
-        self.waveform = random.choice(["pure_sine", "sine", "square", "sawtooth", "triangle"])
+        self.waveform = random.choice(["pure_sine", "sine", "square", "sawtooth", "triangle", "semicircle", "pointy"])
         self.octave = random.choices([-2, -1, 0, 1, 2], weights=[1, 2, 4, 2, 1])[0]
         self.amp_level = 0.95  # Always set to 95% (not randomized)
         self.cutoff = round(10 ** random.uniform(math.log10(200), math.log10(18000)), 1)
@@ -3049,7 +3097,7 @@ class SynthMode(Widget):
         # ── Oscillator ────────────────────────────────────────────
         if sec == "oscillator":
             if name == "Wave":
-                self.waveform = random.choice(["pure_sine", "sine", "square", "sawtooth", "triangle"])
+                self.waveform = random.choice(["pure_sine", "sine", "square", "sawtooth", "triangle", "semicircle", "pointy"])
                 self.synth_engine.update_parameters(waveform=self.waveform)
                 if self.waveform_display: self.waveform_display.update(self._fmt_waveform())
                 if self.waveform_shape_display: self.waveform_shape_display.update(self._fmt_waveform_shape())
@@ -3237,6 +3285,7 @@ class SynthMode(Widget):
         u("waveform",       self.waveform_display,        self._fmt_waveform())
         u("waveform_shape", self.waveform_shape_display,   self._fmt_waveform_shape())
         u("noise",          self.noise_display,            self._fmt_knob(self.noise_level, 0.0, 1.0, f"{int(self.noise_level * 100)}%"))
+        u("partial_decay",  self.partial_decay_display,    self._fmt_knob(self.partial_decay, 0.0, 1.0, f"{int(self.partial_decay * 100)}%"))
         u("octave",         self.octave_display,           self._fmt_octave())
         u("hpf_cutoff",     self.hpf_cutoff_display,       self._fmt_hpf_cutoff())
         u("hpf_resonance",  self.hpf_resonance_display,    self._fmt_hpf_resonance())
@@ -3433,33 +3482,37 @@ class SynthMode(Widget):
     # ── Waveform selector and shape display ───────────────────────
 
     def _fmt_waveform(self) -> str:
-        entries = [
-            ("pure_sine", "PSIN"),
-            ("sine",      "SIN"),
-            ("square",    "SQR"),
-            ("sawtooth",  "SAW"),
-            ("triangle",  "TRI"),
+        # Split into two rows so all tags fit within the section width.
+        rows = [
+            [("pure_sine", "PSIN"), ("sine", "SIN"), ("square", "SQR"), ("sawtooth", "SAW")],
+            [("triangle", "TRI"), ("semicircle", "SC"), ("pointy", "PT"), ("piano_string", "PSTR")],
         ]
-        parts = []
-        for key, tag in entries:
-            if self.waveform == key:
-                parts.append(f"[bold #d79b00 reverse]{tag}[/]")
-            else:
-                parts.append(f"[#443300]{tag}[/]")
-        line  = " ".join(parts)
-        plain = " ".join(tag for _, tag in entries)
-        pad   = max(0, self._W - len(plain))
-        lp    = pad // 2
-        rp    = pad - lp
-        return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
+        lines = []
+        for row in rows:
+            parts = []
+            for key, tag in row:
+                if self.waveform == key:
+                    parts.append(f"[bold #d79b00 reverse]{tag}[/]")
+                else:
+                    parts.append(f"[#443300]{tag}[/]")
+            line  = " ".join(parts)
+            plain = " ".join(tag for _, tag in row)
+            pad   = max(0, self._W - len(plain))
+            lp    = pad // 2
+            rp    = pad - lp
+            lines.append(f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]")
+        return "\n".join(lines)
 
     def _fmt_waveform_shape(self) -> str:
         shapes = {
-            "pure_sine": ("∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿", "#005500"),
-            "sine":      ("∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿", "#005500"),
-            "square":    ("⌐▀▀▀▀▀▀▀▀▀¬_________", "#005500"),
-            "sawtooth":  ("/|/|/|/|/|/|/|/|/|/|", "#005500"),
-            "triangle":  ("/\\/\\/\\/\\/\\/\\/\\/\\/\\/\\", "#005500"),
+            "pure_sine":  ("∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿", "#005500"),
+            "sine":       ("∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿∿", "#005500"),
+            "square":     ("⌐▀▀▀▀▀▀▀▀▀¬_________", "#005500"),
+            "sawtooth":   ("/|/|/|/|/|/|/|/|/|/|", "#005500"),
+            "triangle":   ("/\\/\\/\\/\\/\\/\\/\\/\\/\\/\\", "#005500"),
+            "semicircle": ("⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢⌢", "#005500"),
+            "pointy":        ("∧_∧_∧_∧_∧_∧_∧_∧_∧_∧_", "#005500"),
+            "piano_string":  ("♩ ♪ ♫ ♬ ♩ ♪ ♫ ♬ ♩ ♪ ", "#005500"),
         }
         shape_str, color = shapes.get(self.waveform, ("~~~~~~~~~~~~~~~~~~~~", "#005500"))
         inner = self._W

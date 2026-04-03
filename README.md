@@ -1,4 +1,4 @@
-# Acordes v1.12.2 - Mono Voice Artifacts Fixed: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.3 - Piano String Synthesis & Partial Decay: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -26,7 +26,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.12.2 - Mono Voice Artifacts Fixed
+**Latest Version**: 1.12.3 - Piano String Synthesis & Partial Decay
 
 ---
 
@@ -52,13 +52,13 @@ A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 
 **Synthesis Architecture**:
 - **Dual Rank per Voice**: Two independent synthesis paths per note (Rank I & II)
-- **Oscillators**: Sine, Square, Sawtooth, Triangle waveforms with PolyBLEP anti-aliasing and 4× internal oversampling
+- **Oscillators**: Sine, Square, Sawtooth, Triangle, Semi-Circle, Pointy, and Piano String waveforms with PolyBLEP anti-aliasing and 4× internal oversampling
 - **Dual-Filter Architecture**: MS-20 inspired HPF → LPF series (per rank) with selectable filter routing, soft saturation, per-stage resonance
 - **Sine Reinforcement**: Post-filter sine wave for low-end solidity
 - **Global LFO**: Modulates VCO (pitch), VCF (filter), and VCA (amplitude)
 
 **Synthesis Parameters** (8 sections):
-- **Oscillator**: Waveform, Octave (-2 to +2), Noise Level
+- **Oscillator**: Waveform (7 types), Octave (-2 to +2), Noise Level, Partial Decay (Piano String only)
 - **Filter**: HPF/LPF Cutoff & Resonance, Filter Drive (0.5–8.0× pre-filter gain), Filter Routing (HP+LP / BP+LP / NT+LP / LP+LP), Key Tracking
 - **Filter EG**: Independent envelope for filter modulation
 - **Amp EG**: Amplitude envelope (ADSR)
@@ -96,6 +96,15 @@ A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 - **Anti-Aliasing FIR Upgrade**: 63-tap Kaiser β=8 lowpass filter replaces 31-tap Hamming; cutoff corrected from 44 kHz to 22 kHz; alias rejection at 24 kHz improved from ~0 dB to −22.5 dB
 - **Strum Timer Bug Fix**: Orphaned note-on timers from rapid strum re-triggering are now fully cancelled, eliminating the accumulation of stuck voices that caused digital artifacts
 - **Acknowledgments**: The FIR filter analysis and FrFT background used in the DSP review draws on Gutiérrez E., Cádiz R.F., Sing Long C., Font F., Serra X. — "Fractional Fourier Sound Synthesis" (arXiv:2506.09189v1, 2025, Music Technology Group / Universitat Pompeu Fabra and Pontificia Universidad Católica de Chile)
+
+**v1.12.3 Piano String Synthesis — What's New**:
+- **Piano String Waveform**: Inharmonic additive synthesis modeling real piano string partials with frequency-dependent inharmonicity (B-coefficient varies by MIDI register for authentic piano tone)
+- **Partial Decay Parameter**: S-curve control (0-100%) for differential partial amplitude decay, enabling warm, realistic piano character or bright harmonic string effects
+- **8 Partials Architecture**: Tuned amplitude ratios (1.0, 0.6, 0.38, 0.25, 0.16, 0.11, 0.075, 0.05) matched to real piano harmonic series
+- **Automatic Inharmonicity**: B-coefficient lookup table spanning MIDI register 21-108, with smooth interpolation for authentic pitch bending and frequency-dependent overtone behavior
+- **Vectorized DSP**: Full NumPy matrix acceleration over (8 partials, frame_count) for ultra-low CPU cost
+- **MONO Steal Continuity**: Partial phases inherit on MONO voice stealing to prevent legato discontinuities
+- **Focus Mode Integration**: Fully navigable in WASD focus mode with all standard key bindings (↑↓ adjust, ← → fine-step, Q/E randomize)
 
 **Preset System**:
 - **Factory Presets**: 128 professionally programmed presets across 8 categories (Bass, Leads, Pads, Plucked, Seq, FX, Misc, Synth)

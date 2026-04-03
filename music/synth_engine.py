@@ -29,6 +29,29 @@ except ImportError:
 # ARM builds skip oversampling entirely so this constant has no effect there.
 _FIR_N_TAPS: int = 63
 
+# ── Piano string additive synthesis constants ────────────────────────────────
+# Partial amplitudes from Weinreich acoustic measurements of Steinway strings.
+# 8 partials give realistic piano timbre without excessive CPU cost.
+# Indices 0–7 correspond to harmonics 1–8.
+_PIANO_PARTIAL_AMPS: np.ndarray = np.array(
+    [1.000, 0.600, 0.380, 0.250, 0.160, 0.110, 0.075, 0.050], dtype=np.float32
+)
+# Normalisation: scale so RMS with all partials at E=1 matches a sawtooth (~0.57).
+# sqrt(sum of amp_n^2) = sqrt(1.6128) ≈ 1.27 → factor 0.45 gives RMS ≈ 0.57.
+_PIANO_NORM: float = 0.45
+_PIANO_N_PARTIALS: int = 8
+
+# Inharmonicity coefficient B by MIDI note — from acoustic piano measurements.
+# f_n = n × f₁ × √(1 + B × n²).  Interpolated linearly between anchors.
+_PIANO_B_MIDI: np.ndarray = np.array(
+    [21,  36,    48,    60,    72,    84,    96,    108], dtype=np.float32)
+_PIANO_B_VALS: np.ndarray = np.array(
+    [2e-4, 3e-4, 8e-4, 1e-3, 3e-3, 8e-3, 1.5e-2, 2.5e-2], dtype=np.float32)
+
+# Partial indices as a float32 array [1, 2, 3, … 8] — used inside the vectorised
+# generator to avoid allocating a new arange on every callback.
+_PIANO_NS: np.ndarray = np.arange(1, _PIANO_N_PARTIALS + 1, dtype=np.float32)
+
 
 class Voice:
     """Individual synthesizer voice with its own oscillator and envelope."""
@@ -67,10 +90,33 @@ class Voice:
         # outward in symmetric pairs so the full-polyphony image stays balanced.
         # pan=0.5 → ang=π/4 → cos=sin=0.707 → equal power L and R (correct centre).
         # Layout: 0=C, 1=C, 2=slight-L, 3=slight-R, 4=mid-L, 5=mid-R, 6=wide-L, 7=wide-R
-        _pan_table = [0.5, 0.5, 0.44, 0.56, 0.38, 0.62, 0.32, 0.68]
+        # 32 entries: centre pair, then symmetric L/R pairs spreading outward.
+        # Voices beyond 32 fall back to centre (0.5).
+        _pan_table = [
+            0.50, 0.50,  # 0-1: centre
+            0.44, 0.56,  # 2-3: slight spread
+            0.38, 0.62,  # 4-5
+            0.32, 0.68,  # 6-7
+            0.27, 0.73,  # 8-9
+            0.22, 0.78,  # 10-11
+            0.18, 0.82,  # 12-13
+            0.15, 0.85,  # 14-15
+            0.47, 0.53,  # 16-17: inner fill (avoids hole in centre)
+            0.41, 0.59,  # 18-19
+            0.35, 0.65,  # 20-21
+            0.29, 0.71,  # 22-23
+            0.24, 0.76,  # 24-25
+            0.20, 0.80,  # 26-27
+            0.16, 0.84,  # 28-29
+            0.13, 0.87,  # 30-31: widest spread
+        ]
         self.pan = _pan_table[voice_index] if voice_index < len(_pan_table) else 0.5
         # Dedicated phase accumulator for the sine-reinforcement sub-oscillator
         self.sine_phase = 0.0
+        # Phase accumulators for the 8 inharmonic partials used by "piano_string".
+        # Each element tracks the running phase (radians) of partial n so buffers
+        # connect smoothly end-to-end without restarts.
+        self.partial_phases: np.ndarray = np.zeros(_PIANO_N_PARTIALS, dtype=np.float32)
 
         # Ladder filter states — 4 integrator stages per rank
         self.filter_state_ladder1: list = [0.0, 0.0, 0.0, 0.0]  # rank 1
@@ -216,8 +262,12 @@ class Voice:
         self.midi_note = midi_note
         self.base_frequency = frequency
         self.frequency = frequency
-        # Use velocity_target for smoothing; velocity_current will ramp toward it
+        # Use velocity_target for smoothing; velocity_current will ramp toward it.
+        # On a fresh (silent) trigger, snap velocity_current immediately so there
+        # is no wrong-direction ramp from the stale starting value (1.0 by default).
         self.velocity_target = velocity
+        if was_silent:
+            self.velocity_current = velocity
         self.note_active = True
         self.is_releasing = False
         self.envelope_time = 0.0
@@ -238,6 +288,18 @@ class Voice:
             self.filter_state_svf1_lp = self.filter_state_svf1_bp = 0.0
             self.filter_state_svf2_lp = self.filter_state_svf2_bp = 0.0
             self.dc_blocker_x = self.dc_blocker_y = 0.0
+            # Reset scipy sosfilt LPF and HPF zi states so a new note does not
+            # inherit delay-line energy from a previous note at a different pitch.
+            # The LPF zi is pitch-dependent (stores energy at the old fundamental),
+            # so carrying it forward into a new note causes wrong-frequency ringing
+            # amplified by resonance.  The HPF zi is also cleared here so that
+            # poly-mode new-voice allocation starts clean; MONO steal re-applies the
+            # outgoing HPF state explicitly in _trigger_note (see steal path).
+            self._arm_lpf_zi_r1 = None
+            self._arm_lpf_zi_r2 = None
+            self._arm_hpf_zi_r1 = None
+            self._arm_hpf_zi_r2 = None
+            self._arm_dcblock_zi = None
             # Reset capacitor simulation states on every new trigger.
             self.cap_env      = 0.0
             self.sustain_cap  = 1.0
@@ -261,6 +323,7 @@ class Voice:
                 self._oversample_history[:] = 0.0
                 self._oversample_history_r2[:] = 0.0
                 self._oversample_history_sine[:] = 0.0
+                self.partial_phases[:] = 0.0
 
     def release(self, attack: float, decay: float, sustain: float, intensity: float, release_velocity: float = 0.5):
         if self.note_active:
@@ -288,6 +351,7 @@ class Voice:
         self.dc_blocker_x = self.dc_blocker_y = 0.0
         self.last_envelope_level = 0.0
         self.sine_phase = 0.0
+        self.partial_phases[:] = 0.0
         self.onset_samples = 0
         self.feg_time = 0.0
         self.feg_is_releasing = False
@@ -487,7 +551,7 @@ class SynthEngine:
         # the bottleneck (160ms callbacks). With the fast path the Pi 4 has
         # enough headroom to run 6 voices comfortably at 2048-sample buffers.
         import platform as _plat
-        self.num_voices = 16 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 16)
+        self.num_voices = 16 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 32)
         # Always use float32 for the sounddevice stream. PortAudio's ALSA backend
         # negotiates format with the driver internally and handles float32->S16_LE
         # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
@@ -499,10 +563,11 @@ class SynthEngine:
         # Import scipy signal functions once at init time so the audio callback
         # never pays the import cost. Falls back gracefully if scipy is not installed.
         #
-        # _scipy_sosfilt: ARM only. Replaces the 4-pole Moog ladder + SVF with a
-        #   2nd-order biquad approximation. Necessary on ARM because the Python
-        #   per-sample ladder loop cannot run in real-time. On desktop the Moog
-        #   ladder runs fine and must not be bypassed (would be a quality regression).
+        # _scipy_sosfilt: Replaces the 4-pole Moog ladder + SVF with a
+        #   2nd-order biquad approximation via scipy sosfilt (C code, ~100x faster).
+        #   Controlled by filter_quality: "analog" uses the per-sample Python Moog
+        #   ladder (preserves tanh saturation character), "fast" uses scipy sosfilt
+        #   (enables higher voice counts). On ARM, always "fast" for real-time safety.
         #
         # _scipy_lfilter: All platforms. Used only for the DC blocker — an exact
         #   implementation (not an approximation), gives ~100x speedup with zero
@@ -511,11 +576,15 @@ class SynthEngine:
         self._scipy_lfilter = None
         try:
             from scipy.signal import sosfilt as _sosfilt, lfilter as _lfilter
-            if self._IS_ARM:
-                self._scipy_sosfilt = _sosfilt
+            self._scipy_sosfilt = _sosfilt
             self._scipy_lfilter = _lfilter
         except ImportError:
             pass
+        # Filter quality mode: "analog" = per-sample Moog ladder with tanh saturation,
+        # "fast" = scipy sosfilt biquad (C code). ARM always forces "fast".
+        # Default to "fast" on all platforms for maximum voice headroom.
+        # Users can switch to "analog" for tanh saturation character at lower voice counts.
+        self.filter_quality = "fast"
         self.stream = None
         # -1 = No Audio mode (engine runs silently, no audio stream opened)
         # -2 = System Default (None passed to sounddevice — OS chooses the output)
@@ -552,7 +621,23 @@ class SynthEngine:
         self.feg_sustain = 0.0
         self.feg_release = 0.3
         self.feg_amount  = 0.0
+        # Smoothed feg_amount: target is set immediately on param update;
+        # current tracks it with a ~40 ms lag so mid-note knob turns do not
+        # cause an instant jump in feg_cutoff_offset (audible as a click).
+        self.feg_amount_target   = 0.0
+        self.feg_amount_current  = 0.0
+        self.feg_amount_smoothing = 0.88  # ~40 ms at 1024/48kHz
         self._FEG_MAX_SWEEP_HZ = 8000.0  # maximum cutoff shift at amount=±1.0
+
+        # ── Piano string synthesis parameters ────────────────────────────────
+        # partial_decay controls how fast higher harmonics decay relative to the
+        # fundamental (α exponent in amp_n = base_n × E^(1 + (n-1)×α)).
+        # Range 0.0 (all partials decay together) → 2.0 (upper partials vanish fast).
+        # Default 0.5 gives a natural piano-like brightness loss on release.
+        self.partial_decay         = 0.5
+        self.partial_decay_target  = 0.5
+        self.partial_decay_current = 0.5
+        self.partial_decay_smoothing = 0.85  # ~33 ms lag — matches filter drive feel
 
         self.cutoff = 2000.0
         self.hpf_cutoff = 20.0
@@ -635,6 +720,17 @@ class SynthEngine:
         # Independent seeds for L and R; prefix 0xACC0 = ACCO(rdes)
         self._dither_rng_l  = np.random.default_rng(0xACC05000)
         self._dither_rng_r  = np.random.default_rng(0xACC05001)
+        # Thermal noise floor: pre-allocated buffer and dedicated RNG.
+        # Fills once per callback (not once per voice per callback) and is
+        # reused by all voices — eliminates heap allocation in the hot path.
+        # The same buffer is safe to share across voices because thermal noise
+        # is uncorrelated with pitch or phase; each voice reads the same
+        # random sequence offset by voice index in the oscillator output.
+        # Uses a dedicated RNG (not numpy's global state) for thread safety and
+        # to avoid first-call initialization overhead on the very first buffer.
+        self._thermal_noise_buf = np.zeros(_bs, dtype=np.float32)
+        self._thermal_rng = np.random.default_rng(0xACC05002)
+        self._THERMAL_AMP = np.float32(1e-5)
         # Float index array reused for vectorized ring-buffer index math
         self._cb_indices  = np.arange(_bs, dtype=np.float32)
         # Oversample-length index array: covers up to 4× oversampling so
@@ -773,6 +869,10 @@ class SynthEngine:
         # When True, the mute ramp will reset all voices at its bottom instead
         # of arming a fade-in. Used by soft_all_notes_off() for click-free mode switches.
         self._pending_all_notes_off = False
+        # Holds a params dict from a preset_change event. When the mute fade-out
+        # completes, all voices are reset, these params are applied, and a fade-in
+        # is armed. None means no preset change is pending.
+        self._pending_preset_params = None
 
         # Engine-level inter-buffer crossfade: eliminates clicks when MONO/UNISON
         # note transitions change frequency mid-buffer.  The FIR downsampler sees a
@@ -822,10 +922,14 @@ class SynthEngine:
         self._metro_click_buf: Optional[np.ndarray] = None  # currently playing click
         self._metro_click_pos: int = 0                      # read position in click buf
 
-        # Startup silence counter — outputs zero samples for first ~1s after stream starts.
+        # Startup silence counter — outputs zero samples briefly after stream starts.
         # Eliminates click artifacts from filter/DC blocker transients during warm-up.
-        # 1 second allows all DSP state (filters, DC blockers, LFO, arpeggiator) to fully settle.
-        self._startup_silence_samples = int(self.sample_rate * 1.0)  # 1 second of silence
+        # Desktop: 50 ms is sufficient; filter state starts zeroed and per-note zi resets
+        # prevent any residual ringing. ARM: keep 1 s for scipy/numpy first-use overhead.
+        if self._IS_ARM:
+            self._startup_silence_samples = int(self.sample_rate * 1.0)  # 1 s on ARM
+        else:
+            self._startup_silence_samples = int(self.sample_rate * 0.05) # 50 ms on desktop
 
         # ── Output transformer simulation ──────────────────────────────────────
         # Models the subtle tonal shaping of an analog output transformer:
@@ -856,6 +960,15 @@ class SynthEngine:
         self._COMP_GAIN_REL  = 0.04   # gain recovers slowly (tube pumping character)
         self._COMP_MAKEUP    = 1.15   # +1.2 dB makeup gain
         self._COMP_HARMONIC  = 0.12   # 2nd harmonic depth during compression
+
+        # ── Brickwall true-peak limiter ─────────────────────────────────────────
+        # Final safety net after compressor: catches per-buffer peak transients
+        # (note-onset spikes, voice-steal jumps) that slip past the RMS-based
+        # compressor. Attack is instantaneous (one buffer); release is slow so the
+        # gain reduction sounds like gentle ducking rather than a click.
+        self._limiter_gain  = 1.0    # current gain scalar (1.0 = pass-through)
+        self._LIMITER_THRESH = 0.93  # peak ceiling before gain reduction kicks in
+        self._LIMITER_REL   = 0.0015 # per-buffer gain recovery (~50 buffers / ~1.1s)
 
         # ── Analog capacitor simulation constants ──────────────────────────────
         # Varicap: maximum fractional cutoff reduction at full signal level (10%).
@@ -1525,6 +1638,27 @@ class SynthEngine:
                 # glitch at exact zero crossings; where(>=0) gives a clean +1/-1.
                 np.sin(phases, out=samples)
                 samples[:] = np.where(samples >= 0, np.float32(1.0), np.float32(-1.0))
+            elif waveform == "semicircle":
+                # Semicircle ("W3") waveform: sqrt(1 - ft²) where ft is phase in [-1, 1].
+                # Produces a smooth dome shape — warmer and fatter than sine.
+                # Formula adapted from irmen/synthesizer (LGPL v3): Irmen de Jong,
+                # https://github.com/irmen/synthesizer/blob/master/synthplayer/oscillators.py
+                ft = (phases % np.float32(2.0 * np.pi)) / np.float32(np.pi) - np.float32(1.0)
+                np.clip(ft, -1.0, 1.0, out=ft)
+                np.multiply(ft, ft, out=samples)
+                np.subtract(np.float32(1.0), samples, out=samples)
+                np.sqrt(np.abs(samples), out=samples)
+            elif waveform == "pointy":
+                # Pointy ("W2" / inverted cosine) waveform: (1 - |cos(t)|)² with polarity
+                # flip at each half-cycle. Creates sharp peaks with a plucked character.
+                # Formula adapted from irmen/synthesizer (LGPL v3): Irmen de Jong,
+                # https://github.com/irmen/synthesizer/blob/master/synthplayer/oscillators.py
+                cos_t = np.cos(phases)
+                vv = np.float32(1.0) - np.abs(cos_t)
+                vv = vv * vv
+                # Polarity: negative in the second half of each cycle (phases % 2π > π)
+                half = (phases % np.float32(2.0 * np.pi)) > np.float32(np.pi)
+                samples[:] = np.where(half, -vv, vv)
             else:
                 # Sawtooth (default)
                 np.multiply(t_norm, np.float32(2.0), out=samples)
@@ -1539,6 +1673,16 @@ class SynthEngine:
                 samples = 4.0 * np.abs(t_norm - 0.5) - 1.0
             elif waveform == "square":
                 samples = np.where(np.sin(phases) >= 0, 1.0, -1.0)
+            elif waveform == "semicircle":
+                # Semicircle ("W3") waveform — see _out path above for full comment.
+                ft = (phases % (2.0 * np.pi)) / np.pi - 1.0
+                ft = np.clip(ft, -1.0, 1.0)
+                samples = np.sqrt(np.abs(1.0 - ft * ft))
+            elif waveform == "pointy":
+                # Pointy ("W2") waveform — see _out path above for full comment.
+                vv = (1.0 - np.abs(np.cos(phases))) ** 2
+                half = (phases % (2.0 * np.pi)) > np.pi
+                samples = np.where(half, -vv, vv)
             else:
                 # Sawtooth (default)
                 samples = 2.0 * t_norm - 1.0
@@ -1759,6 +1903,77 @@ class SynthEngine:
 
         return filtered, state, state_b
 
+    # ── Piano string additive synthesis ──────────────────────────────────────
+
+    def _get_inharmonicity(self, midi_note: int) -> float:
+        """Return inharmonicity coefficient B for a MIDI note.
+
+        Interpolated from acoustic measurements of a Steinway grand piano.
+        Higher B means wider partial stretch (short, stiff treble strings).
+        """
+        return float(np.interp(float(midi_note), _PIANO_B_MIDI, _PIANO_B_VALS))
+
+    def _generate_piano_string(
+        self,
+        voice,
+        frame_count: int,
+        partial_decay_alpha: float,
+    ) -> np.ndarray:
+        """Generate one buffer of inharmonic additive synthesis.
+
+        Produces the sum of 8 partials whose frequencies follow the real-piano
+        inharmonicity formula: f_n = n × f₁ × √(1 + B × n²).
+
+        Differential decay weights amplitude of partial n by
+        envelope_level^(1 + (n-1) × α) so upper harmonics fade faster on
+        release — matches how real piano strings lose brightness over time.
+
+        Phases are accumulated back into voice.partial_phases so every buffer
+        starts exactly where the previous one ended.
+        """
+        f1 = voice.frequency if voice.frequency else 440.0
+        if self.octave_enabled and self.octave != 0:
+            f1 *= 2.0 ** self.octave
+
+        B = self._get_inharmonicity(
+            voice.midi_note if voice.midi_note is not None else 60)
+
+        # Inharmonic partial frequencies: f_n = n × f₁ × √(1 + B·n²)
+        freqs = _PIANO_NS * f1 * np.sqrt(
+            np.float32(1.0) + np.float32(B) * _PIANO_NS * _PIANO_NS)
+
+        # Phase increment per sample for each partial
+        phase_incs = (2.0 * np.pi * freqs / self.sample_rate).astype(np.float32)
+
+        # Build phase arrays: (8, frame_count)
+        t = np.arange(frame_count, dtype=np.float32)
+        phases = (voice.partial_phases[:, np.newaxis]
+                  + phase_incs[:, np.newaxis] * t[np.newaxis, :])
+
+        # Differential decay: amp_n = base_n × E^(1 + (n-1)×α)
+        # Uses last_envelope_level (one buffer lag) — acceptable since envelopes
+        # change slowly relative to the buffer period.
+        E = float(np.clip(voice.last_envelope_level, 0.0, 1.0))
+        exponents = (np.float32(1.0) + (_PIANO_NS - np.float32(1.0))
+                     * np.float32(partial_decay_alpha))
+        if E > 0.001:
+            decay_weights = E ** exponents
+        else:
+            decay_weights = np.zeros(_PIANO_N_PARTIALS, dtype=np.float32)
+        amps = _PIANO_PARTIAL_AMPS * decay_weights
+
+        # Sum partials and normalise to target loudness
+        partials = np.sin(phases) * amps[:, np.newaxis]  # (8, frame_count)
+        signal = partials.sum(axis=0) * np.float32(_PIANO_NORM)
+
+        # Advance partial phases (mod 2π avoids float precision loss on long notes)
+        voice.partial_phases = np.mod(
+            voice.partial_phases + phase_incs * frame_count,
+            np.float32(2.0 * np.pi),
+        )
+
+        return signal.astype(np.float32)
+
     def _filter_ladder_process(self, samples: np.ndarray, cutoff: float,
                                prev_states: list, res: float = 0.0,
                                _out: Optional[np.ndarray] = None) -> tuple:
@@ -1804,7 +2019,12 @@ class SynthEngine:
             s3 = math.tanh(a1 * s3 + alpha * s2)
             out[i] = s3
 
-        out *= 1.3
+        # Resonance-adaptive makeup gain: at low k the 4-pole rolloff reduces
+        # passband level, so 1.3× restores it.  At high k the resonant peak
+        # already provides compensation; applying 1.3× on top over-amplifies
+        # the peak and increases the resonant noise floor.  Taper to 1.0 as
+        # k → 1.0 so the gain only compensates what resonance doesn't cover.
+        out *= 1.0 + 0.3 * (1.0 - k)
         return out, [s0, s1, s2, s3]
 
     def _filter_svf_process(self, samples: np.ndarray, cutoff: float,
@@ -1957,19 +2177,31 @@ class SynthEngine:
         # Per-voice coefficient smoothing: interpolate from previous buffer's value to the
         # new target.  Sudden jumps (FEG restart, key-tracking note change, high EG amount)
         # would otherwise create a state/coefficient mismatch that high-resonance filters
-        # amplify into audible spikes.  Coefficient 0.65 → reaches ~94% of a step change
-        # within ~6 buffers (~63ms) — still responsive enough to track LFO/EG sweeps
-        # without perceptible lag, but slow enough to protect high-Q filters (k≈0.77,
-        # feedback≈3.1) from state/coefficient mismatch transients.
+        # amplify into audible spikes.
         # This smoothing is intentionally preserved on MONO/UNISON legato note changes:
         # snapping the coefficient while the filter has stored resonant energy causes
         # the same spike it is designed to prevent.  The few-buffer lag is imperceptible
         # in musical legato playing and is preferable to a resonant click.
-        _SMOOTH_K = 0.65
-        if voice.smooth_fl_lpf < 0.0:   # first use: initialise to current value
-            voice.smooth_fl_lpf = fl_lpf
-            voice.smooth_fl_hpf = fl_hpf
-            voice.smooth_resonance = self.resonance_current
+        #
+        # Resonance-adaptive speed: at zero resonance, K=0.65 (~63ms to 94% of a step),
+        # fast enough to track LFO/EG sweeps.  At full resonance, K=0.88 (~250ms),
+        # matching the ring-down time of a high-Q filter so the coefficient never
+        # outruns the delay-line state.  Mismatch between coefficient and state is what
+        # a resonant filter amplifies into the audible "fuzzy" onset artifact.
+        _SMOOTH_K = 0.65 + self.resonance_current * 0.23
+        if voice.smooth_fl_lpf < 0.0:   # first use: initialise smoothers
+            voice.smooth_fl_lpf  = fl_lpf
+            voice.smooth_fl_hpf  = fl_hpf
+            # Start smooth_resonance at 0 rather than snapping to the current
+            # value.  A fresh voice starts with filter states at 0; if k is
+            # already at its full value in the first buffer, the resonant peak
+            # immediately begins amplifying the noise floor before the onset
+            # ramp has any chance to mask it.  Ramping from 0 via the normal
+            # per-buffer smoother (K=0.65–0.88) brings resonance to ~80% of
+            # target within ~40ms — well within the note's attack phase — while
+            # the onset ramp (3–27ms) keeps the output silent during the first
+            # few buffers where resonance is lowest.
+            voice.smooth_resonance = 0.0
         else:
             voice.smooth_fl_lpf = voice.smooth_fl_lpf * _SMOOTH_K + fl_lpf * (1.0 - _SMOOTH_K)
             voice.smooth_fl_hpf = voice.smooth_fl_hpf * _SMOOTH_K + fl_hpf * (1.0 - _SMOOTH_K)
@@ -1996,7 +2228,8 @@ class SynthEngine:
         # ── scipy fast path: biquad IIR (C code, GIL-free, ~100x faster) ───────
         # Replaces the per-sample Python loops for both HPF and LPF stages.
         # Uses RBJ cookbook 2nd-order IIR with sosfilt state continuity across buffers.
-        if self._scipy_sosfilt is not None:
+        # Active when filter_quality == "fast" and scipy is available.
+        if self.filter_quality == "fast" and self._scipy_sosfilt is not None:
             _sosfilt = self._scipy_sosfilt
             # HPF stage (only if cutoff is meaningfully above DC — > 30 Hz)
             if fl_hpf > 30.0:
@@ -2041,7 +2274,10 @@ class SynthEngine:
         # Thermal noise floor — ~-100 dBFS (amplitude 1e-5), inaudible in isolation
         # but prevents filter dead-zone lock when self-oscillating at max resonance,
         # and adds a subtle analog "air" that's felt rather than heard in the mix.
-        samples = samples + np.random.randn(len(samples)).astype(np.float32) * 1e-5
+        # Uses the pre-filled _thermal_noise_buf (filled once per callback in
+        # _audio_callback before the voice loop) to avoid per-voice heap allocation
+        # and to avoid numpy's global random state in the audio hot path.
+        samples = samples + self._thermal_noise_buf[:len(samples)]
 
         ladder_s = voice.filter_state_ladder1 if rank == 1 else voice.filter_state_ladder2
         filtered, ladder_s = self._filter_ladder_process(
@@ -2078,7 +2314,7 @@ class SynthEngine:
         cutoff/resonance smoothing throughout the engine.  Fast-path returns
         0.0 immediately when feg_amount==0.0 so existing presets pay zero cost.
         """
-        if self.feg_amount == 0.0:
+        if self.feg_amount_current == 0.0 and self.feg_amount_target == 0.0:
             return 0.0
 
         dt = num_samples / self.sample_rate
@@ -2112,6 +2348,12 @@ class SynthEngine:
     def _apply_dc_blocker(self, voice: Voice, samples: np.ndarray) -> np.ndarray:
         """First-order HPF DC blocker with frequency-adaptive pole.
 
+        Sine and pure_sine waveforms are bypassed entirely: they have zero DC
+        content by definition, and the blocker's differentiator is the primary
+        source of onset clicks on sine waves (it turns the first non-zero sample
+        into a high-frequency transient). Bypassing eliminates this artifact
+        without any downside.
+
         Standard coeff=0.999 places the pole at 2.4 Hz — fine for mid/high notes
         but produces an 87.5° phase shift at 55 Hz (octave=-2 sine), causing the
         blocker to differentiate the onset waveform into a visible/audible thump.
@@ -2128,6 +2370,10 @@ class SynthEngine:
           f0 = 50 Hz  : 0.9997  (pole 0.7 Hz)
           f0 < 50 Hz  : 0.9997  (clamped — already very low pole)
         """
+        # Sine, semicircle, and pointy bypass: all are AC-symmetric with no DC content.
+        # The blocker's differentiator only adds onset click artifacts for these waveforms.
+        if self.waveform in ("sine", "pure_sine", "semicircle", "pointy"):
+            return samples
         f0 = voice.frequency or 440.0
         if f0 >= 100.0:
             coeff = 0.9990
@@ -2214,13 +2460,24 @@ class SynthEngine:
                         elif k == 'hpf_resonance':   self.hpf_resonance_target   = v
                         elif k == 'noise_level':     self.noise_level_target     = v
                         elif k == 'key_tracking':    self.key_tracking_target    = v
+                        elif k == 'partial_decay':
+                            self.partial_decay        = float(v)
+                            self.partial_decay_target = float(v)
                         elif k == 'filter_drive':    self.filter_drive_target    = float(v)
                         elif k == 'filter_routing':  self.filter_routing         = v
                         elif k == 'feg_attack':      self.feg_attack  = float(v)
                         elif k == 'feg_decay':       self.feg_decay   = float(v)
                         elif k == 'feg_sustain':     self.feg_sustain = float(v)
                         elif k == 'feg_release':     self.feg_release = float(v)
-                        elif k == 'feg_amount':      self.feg_amount  = float(v)
+                        elif k == 'feg_amount':
+                            self.feg_amount        = float(v)
+                            self.feg_amount_target = float(v)
+                        elif k == 'filter_quality':
+                            # Only allow "fast" if scipy sosfilt is available
+                            if v == "fast" and self._scipy_sosfilt is not None:
+                                self.filter_quality = "fast"
+                            elif v == "analog":
+                                self.filter_quality = "analog"
                         elif k == 'voice_type':      self.voice_type             = v
                         elif k == 'filter_mode':     pass  # kept for preset backward-compat; ignored
                         else:
@@ -2276,6 +2533,14 @@ class SynthEngine:
                 # from the current ramp position so rapid randomize presses stay clean.
                 self._mute_ramp_remaining = self._MUTE_RAMP_LEN
                 self._mute_ramp_fadein    = 0
+            elif e['type'] == 'preset_change':
+                # Clean preset switch: fade out, reset all voices, apply new params,
+                # fade back in. This prevents old voices/envelopes bleeding into the
+                # new preset and avoids click artifacts from instant parameter jumps.
+                self._pending_preset_params = e.get('params', {})
+                self._mute_ramp_remaining   = self._MUTE_RAMP_LEN
+                self._mute_ramp_fadein      = 0
+                self._pending_all_notes_off = False  # preset_change owns the ramp bottom
             elif e['type'] == 'metronome_tick':
                 # Restart the pre-generated click playback from the beginning.
                 # Choosing accent vs. normal click is decided by the sender.
@@ -2412,7 +2677,18 @@ class SynthEngine:
                 if i != old_idx and i != new_idx:
                     v.release(self.attack, self.decay, self.sustain, 1.0)
 
-            has_amplitude = old_v.last_envelope_level > 0.001
+            # Check for audible output using both the last rendered level AND the
+            # note_active/is_releasing flags.  last_envelope_level is only valid
+            # AFTER the voice has been rendered for at least one buffer.  When two
+            # note-ons arrive in the same audio buffer (common at fast tempos), all
+            # MIDI events are drained before any rendering, so the second note-on
+            # sees last_envelope_level == 0.0 even though the first trigger already
+            # set note_active=True.  Without this guard the second trigger falls
+            # through to the "from silence" path, which resets phase to 0.0 and
+            # pre_gate_progress to 0.0 on the CURRENTLY PLAYING voice — a guaranteed
+            # click and 30ms stutter from the gate re-opening.
+            has_amplitude = (old_v.note_active or old_v.is_releasing
+                             or old_v.last_envelope_level > 0.001)
             if has_amplitude:
                 # Capture oscillator phase and filter coefficient smoothers from the
                 # outgoing voice.  Phase inheritance prevents destructive interference
@@ -2422,19 +2698,31 @@ class SynthEngine:
                 # tracking or the FEG leaves the cutoff at a different value than the
                 # new voice's starting point.
                 #
-                # Ladder and SVF delay-line states are intentionally NOT inherited.
-                # Each transfer introduces frequency-mismatch error: the filter
-                # "remembers" energy at the old pitch, and when the new oscillator
-                # drives it at a different pitch that stored energy rings at the wrong
-                # frequency.  With high resonance (Q≈9) this is clearly audible on
-                # pure-sine waveforms.  The DC blocker state IS inherited (see below)
-                # because its settling error is small (~6% amplitude, decays in 4.5ms)
-                # whereas not inheriting it causes a hard first-sample click.
+                # LPF ladder delay-line states are intentionally NOT inherited.
+                # The ladder remembers energy at the old pitch; driving it at a new
+                # pitch causes that stored energy to ring at the wrong frequency, which
+                # is audible at high resonance.  Resetting to zero is cleaner: the onset
+                # ramp and coefficient smoother hide the cold-start settling.
+                #
+                # HPF SVF/scipy states ARE inherited (both analog SVF and fast sosfilt zi).
+                # The HPF resonant peak is at hpf_cutoff — a fixed value independent of
+                # note pitch — so inheriting state carries no frequency-mismatch risk.
+                # Resetting HPF state to zero causes the filter to produce its own impulse
+                # response (ringing at hpf_cutoff) on every note trigger, amplified by
+                # high Q into the audible "fuzzy/noisy" onset artifact.
+                # DC blocker state IS inherited (see below) for the same reason.
                 _old_phase      = old_v.phase
                 _old_pre_gate   = old_v.pre_gate_progress
                 _old_smooth_lpf = old_v.smooth_fl_lpf
                 _old_smooth_hpf = old_v.smooth_fl_hpf
                 _old_smooth_res = old_v.smooth_resonance
+                # HPF filter delay-line states (analog SVF and scipy zi).
+                _old_svf_hpf_lp = old_v.filter_state_svf1_lp
+                _old_svf_hpf_bp = old_v.filter_state_svf1_bp
+                _old_zi_hpf_r1  = (old_v._arm_hpf_zi_r1.copy()
+                                   if old_v._arm_hpf_zi_r1 is not None else None)
+                _old_zi_hpf_r2  = (old_v._arm_hpf_zi_r2.copy()
+                                   if old_v._arm_hpf_zi_r2 is not None else None)
                 # DC blocker state: inherit so the first output sample of the new
                 # voice has no discontinuity.  The blocker computes y[n] = x[n] -
                 # x[n-1] + R*y[n-1]; resetting x[n-1] and y[n-1] to zero causes
@@ -2452,6 +2740,9 @@ class SynthEngine:
                 _old_fir_hist      = old_v._oversample_history.copy()
                 _old_fir_hist_r2   = old_v._oversample_history_r2.copy()
                 _old_fir_hist_sine = old_v._oversample_history_sine.copy()
+                # Piano string partial phases: inherit so legato steal has no
+                # phase discontinuity in the additive synthesis output.
+                _old_partial_phases = old_v.partial_phases.copy()
                 # Capacitor simulation and peak detector state: inherit to prevent
                 # sudden jumps in varicap filter modulation and waveshaper state.
                 _old_cap_env       = old_v.cap_env
@@ -2470,10 +2761,13 @@ class SynthEngine:
 
                 # Dissolve: send outgoing voice into ADSR release (it fades naturally),
                 # trigger incoming voice fresh (it attacks naturally).
-                # Cap stolen voice release to 15ms so two simultaneous pure-sine voices
-                # at different pitches do not beat long enough to produce audible AM.
+                # Cap stolen voice release to prevent two simultaneous sine voices at
+                # different pitches from beating long enough to produce audible AM.
+                # Sine/pure_sine use a tighter 8ms cap: pure tones beat very cleanly
+                # (no harmonics to mask AM) so even 15ms is perceptible at close intervals.
+                # Harmonic-rich waveforms use 15ms for a smoother crossfade.
                 old_v.release(self.attack, self.decay, self.sustain, 1.0)
-                old_v.release_time_cap = 0.015
+                old_v.release_time_cap = 0.008 if self.waveform in ("sine", "pure_sine") else 0.015
                 old_v.feg_release_level = self._feg_level_snapshot(old_v)
                 old_v.feg_is_releasing = True
                 old_v.feg_release_start = old_v.feg_time
@@ -2498,14 +2792,44 @@ class SynthEngine:
                 new_v.smooth_fl_lpf = _old_smooth_lpf
                 new_v.smooth_fl_hpf = _old_smooth_hpf
                 new_v.smooth_resonance = _old_smooth_res
-                # Inherit DC blocker state and onset position (see capture comments above).
+                # Inherit HPF delay-line states so the high-pass filter does not
+                # restart from zero (which would ring at its resonant frequency).
+                new_v.filter_state_svf1_lp = _old_svf_hpf_lp
+                new_v.filter_state_svf1_bp = _old_svf_hpf_bp
+                if _old_zi_hpf_r1 is not None:
+                    new_v._arm_hpf_zi_r1 = _old_zi_hpf_r1
+                if _old_zi_hpf_r2 is not None:
+                    new_v._arm_hpf_zi_r2 = _old_zi_hpf_r2
+                # Inherit DC blocker state (see capture comments above).
                 new_v.dc_blocker_x  = _old_dc_x
                 new_v.dc_blocker_y  = _old_dc_y
-                new_v.onset_samples = _old_onset
-                # Inherit FIR history so the downsampling filter has continuous input.
-                new_v._oversample_history[:]      = _old_fir_hist
-                new_v._oversample_history_r2[:]   = _old_fir_hist_r2
-                new_v._oversample_history_sine[:] = _old_fir_hist_sine
+                # FIR history and onset position handling differ by waveform:
+                #
+                # Non-sine: inherit the outgoing voice's FIR history so the
+                # polyphase downsampler sees continuous input across the steal
+                # boundary.  The frequency mismatch between old and new note
+                # rings for ~8 base-rate samples, but harmonic-rich waveforms
+                # (saw, square, triangle) mask this brief transient.
+                #
+                # Sine / pure_sine: inheriting a FIR history tuned for the OLD
+                # note's frequency produces an audible chirp artifact — the filter
+                # delay line contains old-frequency samples that bleed into the
+                # new-frequency output for ~8 samples.  With pure sinusoids there
+                # are no harmonics to mask the chirp.  Instead: zero the history
+                # and reset onset_samples to 0 so the onset ramp (3-27ms RC curve)
+                # covers the FIR warm-up window before the new voice becomes audible.
+                if self.waveform in ("sine", "pure_sine"):
+                    new_v._oversample_history[:]      = 0.0
+                    new_v._oversample_history_r2[:]   = 0.0
+                    new_v._oversample_history_sine[:] = 0.0
+                    new_v.onset_samples = 0  # restart onset ramp to mask FIR settling
+                else:
+                    new_v._oversample_history[:]      = _old_fir_hist
+                    new_v._oversample_history_r2[:]   = _old_fir_hist_r2
+                    new_v._oversample_history_sine[:] = _old_fir_hist_sine
+                    new_v.onset_samples = _old_onset
+                # Inherit piano string partial phases for legato continuity.
+                new_v.partial_phases[:] = _old_partial_phases
                 # Inherit capacitor and peak detector state.
                 new_v.cap_env       = _old_cap_env
                 new_v.sustain_cap   = _old_sustain_cap
@@ -2562,7 +2886,10 @@ class SynthEngine:
                 # Soft trigger whenever voice has amplitude (playing OR releasing).
                 # A voice that just entered release this buffer still has amplitude —
                 # hard trigger would drop it to 0 next sample → click.
-                if v.last_envelope_level > 0.001:
+                # Also check note_active/is_releasing directly: if two note-ons arrive
+                # in the same buffer, last_envelope_level is still 0.0 at the second
+                # trigger even though note_active=True from the first trigger.
+                if v.note_active or v.is_releasing or v.last_envelope_level > 0.001:
                     # True legato: envelope continues from its current position.
                     # feg_time and envelope_time are NOT reset — resetting them causes
                     # sudden filter coefficient jumps (high resonance → spike) and a
@@ -2581,7 +2908,23 @@ class SynthEngine:
                     if not _legato_phase_set:
                         _legato_base_phase = v.phase
                         _legato_phase_set  = True
-                    v.phase = _legato_base_phase + i / n
+                    if self.waveform in ("sine", "pure_sine"):
+                        # Sine: do NOT re-anchor phase.  Setting v.phase = new_value is
+                        # an instant discontinuity — sin(old) jumps to sin(new) in one
+                        # sample — which is an audible click with a pure-tone waveform.
+                        # PolyBLEP (used by sawtooth/square/triangle) corrects phase-wrap
+                        # discontinuities but cannot fix arbitrary mid-note phase jumps.
+                        # Letting sine phases free-run avoids the click.  The detuned
+                        # voices naturally develop their chorus spread within one beat
+                        # period, and amplitude unpredictability (voices at random phases)
+                        # is less objectionable than a discrete pop on every retrigger.
+                        pass
+                    else:
+                        # Non-sine: re-anchor to evenly-spaced phases relative to the
+                        # first soft-triggered voice so every legato trigger starts from
+                        # a deterministic, balanced interference state.
+                        # Phase unit: (i/n) * 2π maps voice index to a full 360° spread.
+                        v.phase = (_legato_base_phase + (i / n) * 2.0 * math.pi) % (2.0 * math.pi)
                     # Gate bypass on legato retrigger: same reasoning as MONO steal.
                     # The envelope does NOT reset here (legato), so the gate ramp would
                     # sit at whatever low progress it had (e.g. 0.1 from a recent steal)
@@ -2616,13 +2959,16 @@ class SynthEngine:
                     # Hard trigger from true silence: full reset, no glide.
                     v._glide_from_freq = 0.0
                     v.trigger(note, detuned_freq, vel)
-                    # Distribute phases evenly across one cycle instead of all-zero.
-                    # All-zero phases create a brief phase-coherent comb filter on attack
-                    # (voices start aligned, then drift apart) — audible as a metallic
-                    # hollow artifact in the first 10-20ms of every hard note onset.
-                    # Evenly distributing phases 0/N, 1/N, ... (N-1)/N means voices
-                    # enter with full decorrelation: the comb filter never forms.
-                    v.phase = i / n
+                    # Distribute phases evenly across one full cycle (0 to 2π).
+                    # All-zero phases create a brief phase-coherent burst on attack
+                    # (voices start aligned, then drift apart) — audible as a momentary
+                    # strong "single sine" that transitions to the chorus spread over
+                    # the first 10-20ms.  Evenly distributing phases 0, 2π/N, 4π/N, ...
+                    # means voices enter already decorrelated: the sum has balanced
+                    # interference from sample 0, identical to steady-state chorus.
+                    # BUG NOTE: the previous code used i/n (radians not cycles), which
+                    # placed all voices within a ~57° arc instead of a full 360° spread.
+                    v.phase = (i / n) * 2.0 * math.pi
                     v.pre_gate_progress = 0.0
                     v.onset_ms = onset_ms_for_note
 
@@ -2646,8 +2992,18 @@ class SynthEngine:
                     # Only applied when the voice was truly silent (phase was
                     # last advanced by a different note or is at init=0.0).
                     # The onset_ramp fade-in makes the phase offset inaudible.
-                    _phase_spread = (note * 3.883222) % (2.0 * math.pi)
-                    v.phase = (v.phase + _phase_spread) % (2.0 * math.pi)
+                    #
+                    # Sine/pure_sine: force phase=0.0 so sin(0)=0 and the DC
+                    # blocker sees no startup step. Sine has zero DC content,
+                    # so phase spread provides no benefit and only causes
+                    # transient artifacts.
+                    if self.waveform in ("sine", "pure_sine", "semicircle", "pointy"):
+                        # These waveforms evaluate to 0.0 at phase=0, so starting
+                        # there avoids any DC blocker startup transient.
+                        v.phase = 0.0
+                    else:
+                        _phase_spread = (note * 3.883222) % (2.0 * math.pi)
+                        v.phase = (v.phase + _phase_spread) % (2.0 * math.pi)
                     return
             # Voice stealing — three-tier strategy:
             #
@@ -2894,9 +3250,24 @@ class SynthEngine:
                                               + self.hpf_resonance_target * (1.0 - self.hpf_resonance_smoothing))
             else:
                 self.hpf_resonance_current = self.hpf_resonance_target
+            # FEG amount smoothing: prevents audible clicks when the knob is turned
+            # mid-note while the filter EG is active.  Same pattern as cutoff/resonance.
+            if abs(self.feg_amount_current - self.feg_amount_target) > 0.001:
+                self.feg_amount_current = (self.feg_amount_current * self.feg_amount_smoothing
+                                           + self.feg_amount_target * (1.0 - self.feg_amount_smoothing))
+            else:
+                self.feg_amount_current = self.feg_amount_target
             # Drive is a character knob — no smoothing needed.  Instant update
             # means the user hears the effect the moment they change the value.
             self.filter_drive_current = self.filter_drive_target
+            # partial_decay: gentle smoothing so sweeping the knob during a held
+            # piano_string note does not cause an abrupt timbre jump.
+            if abs(self.partial_decay_current - self.partial_decay_target) > 0.001:
+                self.partial_decay_current = (
+                    self.partial_decay_current * self.partial_decay_smoothing
+                    + self.partial_decay_target * (1.0 - self.partial_decay_smoothing))
+            else:
+                self.partial_decay_current = self.partial_decay_target
 
             # ── LFO (shape-aware, single depth + target routing) ────────────
             lfo_phase_prev = self.lfo_phase
@@ -3093,6 +3464,20 @@ class SynthEngine:
             np.multiply(self._cb_indices[:frame_count], _gr_step, out=gain_ramp)
             gain_ramp += gain_prev
 
+            # Fill the shared thermal noise buffer once per callback.
+            # All voices read the same buffer — avoids per-voice heap allocation
+            # and uses a dedicated RNG instead of numpy's global random state.
+            # Resonance-adaptive amplitude: at high resonance the filter's resonant
+            # peak amplifies broadband noise significantly.  For sine/pure_sine this
+            # is especially audible because there are no harmonics to mask the ring
+            # at the cutoff frequency.  Scale noise down with resonance so the peak
+            # has less to amplify.  At res=0.0: full 1e-5; at res=1.0: ~8% (8e-7).
+            _tn_buf = self._thermal_noise_buf[:frame_count]
+            self._thermal_rng.standard_normal(frame_count, dtype=np.float32, out=_tn_buf)
+            _res_noise_scale = max(np.float32(0.08),
+                                   np.float32(1.0) - self.resonance_current * np.float32(0.92))
+            _tn_buf *= self._THERMAL_AMP * _res_noise_scale
+
             for vi, v in enumerate(self.voices):
                 if v.note_active or v.is_releasing:
                     # Smooth velocity to prevent attack peaks when notes change
@@ -3124,21 +3509,32 @@ class SynthEngine:
                     f1 = v.frequency * vco_lfo if v.frequency else 440.0
                     if self.octave_enabled and self.octave != 0: f1 *= (2.0 ** self.octave)
 
-                    # Generate primary oscillator with optional 2× oversampling.
-                    # Pass pre-allocated voice buffers (_v_osc_buf for waveform output,
-                    # _v_phase_arr for phase accumulation) to avoid malloc in hot path.
-                    oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
-                    s1, v.phase = self._generate_waveform(
-                        self.waveform, f1, frame_count, p1_s,
-                        oversample_factor=oversample_factor,
-                        _out=v._v_osc_buf, _phases=v._v_phase_arr)
+                    if self.waveform == "piano_string":
+                        # Additive inharmonic synthesis — partials are explicitly
+                        # band-limited (all f_n < Nyquist by construction), so the
+                        # 4× FIR oversampling stage is unnecessary and is skipped.
+                        # _generate_piano_string updates voice.partial_phases in place.
+                        s1 = self._generate_piano_string(
+                            v, frame_count, self.partial_decay_current)
+                        # Keep v.phase in sync so any crossfade / transition logic
+                        # that reads it doesn't see a stale value.
+                        v.phase = float(v.partial_phases[0])
+                    else:
+                        # Generate primary oscillator with optional 2× oversampling.
+                        # Pass pre-allocated voice buffers (_v_osc_buf for waveform output,
+                        # _v_phase_arr for phase accumulation) to avoid malloc in hot path.
+                        oversample_factor = self.OVERSAMPLE_FACTOR if self.ENABLE_OVERSAMPLING else 1
+                        s1, v.phase = self._generate_waveform(
+                            self.waveform, f1, frame_count, p1_s,
+                            oversample_factor=oversample_factor,
+                            _out=v._v_osc_buf, _phases=v._v_phase_arr)
 
-                    # Downsample oscillator output from 96 kHz to 48 kHz if oversampling enabled.
-                    # Noise waveforms skip oversampling in _generate_waveform (they return
-                    # frame_count samples, not frame_count * oversample_factor), so only
-                    # downsample when the signal is actually at the oversampled length.
-                    if self.ENABLE_OVERSAMPLING and len(s1) == frame_count * oversample_factor:
-                        s1 = self._downsample_polyphase_signal(s1, self.OVERSAMPLE_FACTOR, history=v._oversample_history)
+                        # Downsample oscillator output from 96 kHz to 48 kHz if oversampling enabled.
+                        # Noise waveforms skip oversampling in _generate_waveform (they return
+                        # frame_count samples, not frame_count * oversample_factor), so only
+                        # downsample when the signal is actually at the oversampled length.
+                        if self.ENABLE_OVERSAMPLING and len(s1) == frame_count * oversample_factor:
+                            s1 = self._downsample_polyphase_signal(s1, self.OVERSAMPLE_FACTOR, history=v._oversample_history)
 
                     # Pre-gate: S-curve fade-in for MONO/UNISON.  Applied between oscillator
                     # and filter so the filter sees a smoothly changing input level.
@@ -3190,13 +3586,24 @@ class SynthEngine:
                     # signal path of a real analog circuit.
                     if v.frequency:
                         _alpha_ws = min(0.92, 2.0 * math.pi * v.frequency / self.sample_rate * self._CAP_WS_RC)
-                        _cap_s    = v.cap_ws_state
-                        _ws_out   = v._v_cap_ws_buf[:frame_count]
-                        for _k in range(frame_count):
-                            _cap_s    += _alpha_ws * (float(s1[_k]) - _cap_s)
-                            _ws_out[_k] = _cap_s
-                        v.cap_ws_state = _cap_s
-                        s1 = s1 * (1.0 - self._CAP_WS_BLEND) + _ws_out * self._CAP_WS_BLEND
+                        if self._scipy_lfilter is not None:
+                            # scipy lfilter: mathematically exact IIR replacement
+                            # y[n] = alpha*x[n] + (1-alpha)*y[n-1]
+                            _ws_zi = np.array([v.cap_ws_state * (1.0 - _alpha_ws)], dtype=np.float64)
+                            _ws_out, _ws_zi = self._scipy_lfilter(
+                                [_alpha_ws], [1.0, -(1.0 - _alpha_ws)],
+                                s1.astype(np.float64), zi=_ws_zi)
+                            v.cap_ws_state = float(_ws_out[-1])
+                            s1 = s1 * (1.0 - self._CAP_WS_BLEND) + _ws_out.astype(np.float32) * self._CAP_WS_BLEND
+                        else:
+                            # Fallback: per-sample Python loop
+                            _cap_s    = v.cap_ws_state
+                            _ws_out   = v._v_cap_ws_buf[:frame_count]
+                            for _k in range(frame_count):
+                                _cap_s    += _alpha_ws * (float(s1[_k]) - _cap_s)
+                                _ws_out[_k] = _cap_s
+                            v.cap_ws_state = _cap_s
+                            s1 = s1 * (1.0 - self._CAP_WS_BLEND) + _ws_out * self._CAP_WS_BLEND
 
                     # Feature B: Peak-to-peak detector — models soft saturation of an
                     # analog oscillator stage exceeding its linear range. Positive and
@@ -3225,7 +3632,7 @@ class SynthEngine:
                     # to the base cutoff inside _apply_filter via cutoff_mod offset.
                     # When feg_amount==0.0 _compute_feg_value fast-paths to 0.0 with no overhead.
                     feg_val = self._compute_feg_value(v, frame_count)
-                    feg_cutoff_offset = self.feg_amount * self._FEG_MAX_SWEEP_HZ * feg_val
+                    feg_cutoff_offset = self.feg_amount_current * self._FEG_MAX_SWEEP_HZ * feg_val
                     # Pass as a combined modulator: vcf_lfo handles LFO ratio, FEG adds Hz offset.
                     # _apply_filter receives cutoff_mod as a multiplier; we encode the offset by
                     # adjusting the target cutoff temporarily per-voice via a local variable.
@@ -3511,6 +3918,26 @@ class SynthEngine:
                         self._arp_note_playing = None; self._arp_sample_counter = 0
                         self._fx_tail_samples = 0
                         self._pending_all_notes_off = False
+                    elif self._pending_preset_params is not None:
+                        # Preset-change path: reset all voices so old envelopes/waveforms
+                        # cannot bleed into the new preset, apply the new params on this
+                        # buffer, then arm the fade-in so the new sound comes up cleanly.
+                        for v in self.voices:
+                            v.reset()
+                        for g in self._ghost_voices:
+                            g.reset()
+                        self._arp_held_notes.clear(); self._arp_sequence.clear()
+                        self._arp_note_playing = None; self._arp_sample_counter = 0
+                        self._fx_tail_samples = 0
+                        # Re-queue params as a param_update so _process_midi_events
+                        # applies them at the top of the next buffer, exactly as if
+                        # the UI had called update_parameters() directly.
+                        self.midi_event_queue.put({
+                            'type': 'param_update',
+                            'params': self._pending_preset_params,
+                        })
+                        self._pending_preset_params = None
+                        self._mute_ramp_fadein = self._MUTE_RAMP_LEN  # arm fade-in
                     else:
                         self._mute_ramp_fadein = self._MUTE_RAMP_LEN  # arm fade-in
 
@@ -3529,7 +3956,7 @@ class SynthEngine:
             # give sine a marginally softer saturation knee, while staying close enough
             # in level that the difference is inaudible at normal drive settings.
             # Saw and triangle are at unity (1.0); same RMS, same saturation character.
-            comp = 0.95 if self.waveform in ["sine", "pure_sine"] else (0.75 if self.waveform == "square" else 1.0)
+            comp = 0.95 if self.waveform in ["sine", "pure_sine", "semicircle", "pointy"] else (0.75 if self.waveform == "square" else 1.0)
 
             # Perceptual loudness compensation for octave position.
             # Low octaves (32', 16') lose perceived punch due to the ear's reduced
@@ -3708,6 +4135,26 @@ class SynthEngine:
                 clipped_r[:_fc] += _k2 * _sq
                 np.clip(clipped_l[:_fc], -1.0, 1.0, out=clipped_l[:_fc])
                 np.clip(clipped_r[:_fc], -1.0, 1.0, out=clipped_r[:_fc])
+
+            # --- Brickwall true-peak limiter ---
+            # Runs after the compressor. Finds the per-buffer peak; if it
+            # exceeds the threshold, the gain is snapped down immediately (one
+            # buffer attack) to bring the peak within bounds. Gain recovers
+            # slowly buffer-by-buffer so the reduction sounds like a soft duck,
+            # not a click. Keeps any transient that survived earlier processing
+            # from reaching the DAC above ±0.93 FS.
+            _lim_peak = max(float(np.max(np.abs(clipped_l[:_fc]))),
+                            float(np.max(np.abs(clipped_r[:_fc]))))
+            if _lim_peak > self._LIMITER_THRESH:
+                # Instantaneous attack: snap gain to just below threshold.
+                self._limiter_gain = min(self._limiter_gain,
+                                         self._LIMITER_THRESH / max(_lim_peak, 1e-6))
+            else:
+                # Slow release: recover toward 1.0 one step per buffer.
+                self._limiter_gain = min(1.0, self._limiter_gain + self._LIMITER_REL)
+            if self._limiter_gain < 0.999:
+                clipped_l[:_fc] *= self._limiter_gain
+                clipped_r[:_fc] *= self._limiter_gain
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
@@ -3935,8 +4382,20 @@ class SynthEngine:
             self.all_notes_off()
             _time.sleep(0.08)   # let release tails drain
         else:
-            self.note_on(60, 1)
-            self.note_off(60)
+            import time as _time
+            # Desktop warm_up: trigger one inaudible note (velocity=1) on all
+            # waveforms to force numpy and scipy to finish any first-call overhead
+            # before the user's first real note. The 80 ms sleep guarantees that
+            # the startup_silence_samples period (50 ms) has expired, so events
+            # are drained and the DSP paths actually execute.
+            for _wf in ("sine", "sawtooth", "square", "triangle", "semicircle", "pointy"):
+                self.update_parameters(waveform=_wf)
+                self.note_on(60, 1)
+                _time.sleep(0.005)
+                self.note_off(60)
+            _time.sleep(0.085)  # outlast 50 ms startup silence + small margin
+            # Restore default waveform so the UI preset loads on top cleanly.
+            self.update_parameters(waveform="sine")
             # Reset FX tail counter so the audio callback can take the idle
             # early-return path immediately after warmup. Without this, the
             # note_on above sets _fx_tail_samples = _FX_TAIL_MAX (10 seconds),

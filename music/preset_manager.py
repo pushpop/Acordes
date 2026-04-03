@@ -69,6 +69,7 @@ DEFAULT_PARAMS: dict = {
     "waveform": "sine",
     "octave": 0,
     "noise_level": 0.0,
+    "partial_decay": 0.5,
     "amp_level": 0.95,
     "cutoff": 2000.0,
     "hpf_cutoff": 20.0,
