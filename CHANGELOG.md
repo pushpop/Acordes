@@ -5,6 +5,25 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.4] - 2026-04-05 - MONO/UNISON Note Transition Smoothing
+
+### Fixed
+
+**MONO voice steal crackle** — LPF biquad initial conditions now inherited from old voice:
+- Previously, `trigger()` reset `_arm_lpf_zi_r1/r2 = None`, causing the new voice's LPF to cold-start from zero amplitude
+- With inherited DC blocker state (`dc_blocker_x` at old voice level), the DC blocker formula `y[n] = x[n] - x[n-1] + R*y[n-1]` produced a large negative spike (x[n]≈0 minus x[n-1] at full amplitude)
+- Inheriting zi keeps LPF output continuous across the steal boundary, eliminating the DC blocker spike and crackle
+
+**UNISON note transition crackle** — Removed phase re-anchoring for all waveforms:
+- Previously, non-sine waveforms had their phases re-anchored to evenly-spaced values on legato re-trigger
+- Phase jumps cause discontinuities in oscillator output that PolyBLEP cannot fix (it only corrects phase-wrap discontinuities at 0/2π boundaries)
+- The filter sees phase jumps as step-change inputs; the DC blocker amplifies the mismatch between inherited x[n-1] and the new x[n] into audible spikes
+- All waveforms now free-run (phases continue from their current values), keeping oscillator output continuous
+
+---
+
+## [1.12.3] - 2026-04-02 - Piano String Synthesis & Partial Decay
+
 ## [1.12.2] - 2026-04-02 - Mono Voice Artifacts Fixed
 
 ### Fixed

@@ -777,7 +777,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.12.3 - Piano String Synthesis & Partial Decay"
+    VERSION = "1.12.4 - MONO/UNISON Note Transition Smoothing"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
