@@ -5,6 +5,16 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.5] - 2026-04-05 - MONO True Legato Note Transitions
+
+### Fixed
+
+**MONO mode digital artifacts on note switching** — replaced 2-voice dissolve with true single-voice legato:
+- Root cause: the old MONO steal created two simultaneous voices (old into 8ms capped release, new triggered fresh). Three artifact sources combined: (1) two voices at different pitches beating during the 8ms overlap, producing amplitude irregularities; (2) the new voice's Moog ladder filter cold-starting from zero state, creating a ~12-sample transient ramp-up; (3) the HPF SVF inheriting old filter states but receiving near-zero LPF input during the cold-start, producing a ringing transient at `hpf_cutoff`.
+- Fix: the playing voice is now updated in-place on every note steal. ADSR restarts from zero with the existing CROSS crossfade blending from the current envelope level (no amplitude discontinuity). FEG restarts from zero for a fresh filter sweep. All filter states (Moog ladder, HPF SVF, DC blocker) are kept — no cold start, no transient. The oscillator phase free-runs (continuous, no jump). One voice, no beating.
+
+---
+
 ## [1.12.4] - 2026-04-05 - MONO/UNISON Note Transition Smoothing
 
 ### Fixed

@@ -1,4 +1,4 @@
-# Acordes v1.12.4 - MONO/UNISON Note Transition Smoothing: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.5 - MONO True Legato Note Transitions: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 

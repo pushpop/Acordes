@@ -2795,14 +2795,13 @@ class SynthEngine:
         self._fx_tail_samples = self._FX_TAIL_MAX
 
         if self.voice_type == "mono":
-            # MONO with ADSR-overlap note dissolve.
-            # Two voice slots (indices 0 and 1) alternate as primary/outgoing.
+            # MONO with true single-voice legato for live note transitions.
             # When a new note arrives while the current voice has amplitude, the
-            # outgoing voice is put into release and the incoming voice is triggered
-            # fresh.  Both voices play simultaneously during release/attack, producing
-            # a natural cross-dissolve identical in character to the Compendium chord
-            # transition.  When the note arrives from silence, a single hard trigger
-            # fires with no crossfade needed.
+            # same voice is updated in-place: pitch changes, ADSR restarts with
+            # an 8ms crossfade from the current level, FEG restarts from 0.
+            # No second voice is involved, so there is no two-voice beating or
+            # cold-start filter transient.  When the note arrives from silence,
+            # a standard hard trigger fires with no crossfade needed.
             old_idx = self._mono_primary
             new_idx = 1 - self._mono_primary
             old_v = self.voices[old_idx]
@@ -2826,193 +2825,73 @@ class SynthEngine:
             has_amplitude = (old_v.note_active or old_v.is_releasing
                              or old_v.last_envelope_level > 0.001)
             if has_amplitude:
-                # Capture oscillator phase and filter coefficient smoothers from the
-                # outgoing voice.  Phase inheritance prevents destructive interference
-                # during the dissolve overlap (two pure-sine voices at different phases
-                # cancel and create a click at the steal moment).  Smooth variable
-                # inheritance prevents a sudden jump in filter coefficients when key
-                # tracking or the FEG leaves the cutoff at a different value than the
-                # new voice's starting point.
+                # True single-voice legato: update the playing voice in-place rather
+                # than triggering a second voice alongside the outgoing one.
+                # The previous two-voice dissolve approach caused crackle artifacts:
+                #   1. Old and new voices overlapped for 8ms, beating at their
+                #      different frequencies and producing amplitude irregularities.
+                #   2. The new voice's LPF (Moog ladder) started cold (zi=0); the
+                #      first samples were near-silent, then the filter warmed up
+                #      suddenly — an audible transient step.
+                #   3. The HPF inherited old-voice SVF states but received near-zero
+                #      LPF input, producing a ringing transient at hpf_cutoff.
+                # Updating the same voice eliminates all three sources: no overlap,
+                # no cold-start LPF, no HPF/SVF ringing transient.
                 #
-                # LPF ladder delay-line states are intentionally NOT inherited.
-                # The ladder remembers energy at the old pitch; driving it at a new
-                # pitch causes that stored energy to ring at the wrong frequency, which
-                # is audible at high resonance.  Resetting to zero is cleaner: the onset
-                # ramp and coefficient smoother hide the cold-start settling.
+                # Amplitude: restart ADSR from zero, but steal_start_level carries
+                # the old note's level into _apply_envelope's 8ms CROSS crossfade
+                # so the envelope begins at the old amplitude and blends smoothly
+                # into the new attack — no step discontinuity in output.
                 #
-                # HPF SVF/scipy states ARE inherited (both analog SVF and fast sosfilt zi).
-                # The HPF resonant peak is at hpf_cutoff — a fixed value independent of
-                # note pitch — so inheriting state carries no frequency-mismatch risk.
-                # Resetting HPF state to zero causes the filter to produce its own impulse
-                # response (ringing at hpf_cutoff) on every note trigger, amplified by
-                # high Q into the audible "fuzzy/noisy" onset artifact.
-                # DC blocker state IS inherited (see below) for the same reason.
-                _old_phase      = old_v.phase
-                _old_pre_gate   = old_v.pre_gate_progress
-                _old_smooth_lpf     = old_v.smooth_fl_lpf
-                _old_smooth_hpf     = old_v.smooth_fl_hpf
-                _old_smooth_res     = old_v.smooth_resonance
-                _old_smooth_hpf_res = old_v.smooth_hpf_resonance
-                # HPF filter delay-line states (analog SVF and scipy zi).
-                _old_svf_hpf_lp = old_v.filter_state_svf1_lp
-                _old_svf_hpf_bp = old_v.filter_state_svf1_bp
-                _old_zi_hpf_r1  = (old_v._arm_hpf_zi_r1.copy()
-                                   if old_v._arm_hpf_zi_r1 is not None else None)
-                _old_zi_hpf_r2  = (old_v._arm_hpf_zi_r2.copy()
-                                   if old_v._arm_hpf_zi_r2 is not None else None)
-                # LPF biquad zi: inherit to prevent cold-start crackle.
-                # trigger() resets _arm_lpf_zi to None (zero initial conditions).
-                # With zi=0 and the DC blocker inheriting old-voice dc_blocker_x,
-                # the first LPF output sample (~0) creates a large negative spike
-                # in the DC blocker: y[n] = x[n] - x[n-1] + R*y[n-1] with
-                # x[n]≈0 and x[n-1] at the old voice's amplitude.
-                # Inheriting zi ensures the LPF output is continuous from the
-                # old voice's level, eliminating the DC blocker spike.
-                _old_zi_lpf_r1  = (old_v._arm_lpf_zi_r1.copy()
-                                   if old_v._arm_lpf_zi_r1 is not None else None)
-                _old_zi_lpf_r2  = (old_v._arm_lpf_zi_r2.copy()
-                                   if old_v._arm_lpf_zi_r2 is not None else None)
-                # DC blocker state: inherit so the first output sample of the new
-                # voice has no discontinuity.  The blocker computes y[n] = x[n] -
-                # x[n-1] + R*y[n-1]; resetting x[n-1] and y[n-1] to zero causes
-                # a step equal to the oscillator's current amplitude at sample 0,
-                # producing an audible click with pure-sine waveforms.  Inheriting
-                # the old voice's last x/y values eliminates that first-sample jump.
-                # Any frequency-mismatch error decays in ~4.5ms (200 samples at R=0.995).
-                _old_dc_x       = old_v.dc_blocker_x
-                _old_dc_y       = old_v.dc_blocker_y
-                # FIR downsampling history: inherit from outgoing voice so the
-                # polyphase filter has continuous input across the steal boundary.
-                # Zeroing the history (as trigger() does) creates a 62-sample
-                # discontinuity that the FIR reads as a transient click, especially
-                # audible on sine waves during fast monophonic playing.
-                _old_fir_hist      = old_v._oversample_history.copy()
-                _old_fir_hist_r2   = old_v._oversample_history_r2.copy()
-                _old_fir_hist_sine = old_v._oversample_history_sine.copy()
-                # Piano string partial phases: inherit so legato steal has no
-                # phase discontinuity in the additive synthesis output.
-                _old_partial_phases = old_v.partial_phases.copy()
-                # Capacitor simulation and peak detector state: inherit to prevent
-                # sudden jumps in varicap filter modulation and waveshaper state.
-                _old_cap_env       = old_v.cap_env
-                _old_sustain_cap   = old_v.sustain_cap
-                _old_cap_ws_state  = old_v.cap_ws_state
-                _old_osc_peak_pos  = old_v.osc_peak_pos
-                _old_osc_peak_neg  = old_v.osc_peak_neg
-                _old_out_peak      = old_v.out_peak
-                # Onset ramp position: the onset ramp was designed to hide DC blocker
-                # cold-start transients when triggering from silence.  During a live
-                # steal the audio is already playing, the DC blocker state is inherited,
-                # and there is no cold start — so the onset ramp must NOT reset to 0.
-                # Resetting creates a hard dip to near-zero amplitude at every steal,
-                # audible as a stutter on rapid playing regardless of attack time.
-                _old_onset      = old_v.onset_samples
+                # Filter: all states (Moog ladder, HPF SVF, scipy zi, DC blocker)
+                # are kept.  The filter was warm; the new pitch drives it cleanly
+                # with no cold-start artifact.  The LPF settles to the new pitch
+                # in ~0.2 ms — inaudible under the crossfade.
+                #
+                # Oscillator: phase free-runs (unchanged).
+                # FEG: restart from 0 for a fresh filter envelope sweep on each note.
 
-                # Dissolve: send outgoing voice into ADSR release (it fades naturally),
-                # trigger incoming voice fresh (it attacks naturally).
-                # Cap stolen voice release to prevent two simultaneous sine voices at
-                # different pitches from beating long enough to produce audible AM.
-                # Sine/pure_sine use a tighter 8ms cap: pure tones beat very cleanly
-                # (no harmonics to mask AM) so even 15ms is perceptible at close intervals.
-                # Harmonic-rich waveforms use 15ms for a smoother crossfade.
-                old_v.release(self.attack, self.decay, self.sustain, 1.0)
-                old_v.release_time_cap = 0.008 if self.waveform in ("sine", "pure_sine") else 0.015
-                old_v.feg_release_level = self._feg_level_snapshot(old_v)
-                old_v.feg_is_releasing = True
-                old_v.feg_release_start = old_v.feg_time
-                new_v.trigger(note, freq, vel)
-                new_v.onset_ms = onset_ms_for_note
-                # Phase continuity: match outgoing oscillator to prevent destructive
-                # interference during the dissolve overlap period.
-                new_v.phase = _old_phase
-                # Gate bypass on steal: set gate fully open regardless of the outgoing
-                # voice's gate position.  The pre-gate S-curve was designed to hide
-                # the DC blocker cold-start transient on a fresh note from silence.
-                # During a steal the DC blocker state IS inherited (see above), so
-                # that transient is already handled — re-applying the gate ramp only
-                # compounds the envelope attack with a second fade-in, producing a
-                # 20-30ms near-silence window whenever the old voice was still in its
-                # gate ramp (e.g. rapid staccato playing, half-pressed key bounces).
-                # With gate=1.0, ADSR is the sole amplitude shaper and the CROSS
-                # crossfade provides the click-free onset.  _old_pre_gate is kept for
-                # reference in the portamento block above but not applied to the gate.
-                new_v.pre_gate_progress = 1.0
-                # Inherit coefficient smoothers so the filter cutoff does not jump.
-                new_v.smooth_fl_lpf       = _old_smooth_lpf
-                new_v.smooth_fl_hpf       = _old_smooth_hpf
-                new_v.smooth_resonance    = _old_smooth_res
-                new_v.smooth_hpf_resonance = _old_smooth_hpf_res
-                # Inherit HPF delay-line states so the high-pass filter does not
-                # restart from zero (which would ring at its resonant frequency).
-                new_v.filter_state_svf1_lp = _old_svf_hpf_lp
-                new_v.filter_state_svf1_bp = _old_svf_hpf_bp
-                if _old_zi_hpf_r1 is not None:
-                    new_v._arm_hpf_zi_r1 = _old_zi_hpf_r1
-                if _old_zi_hpf_r2 is not None:
-                    new_v._arm_hpf_zi_r2 = _old_zi_hpf_r2
-                # Inherit LPF biquad zi for continuous filter output (see capture above).
-                if _old_zi_lpf_r1 is not None:
-                    new_v._arm_lpf_zi_r1 = _old_zi_lpf_r1
-                if _old_zi_lpf_r2 is not None:
-                    new_v._arm_lpf_zi_r2 = _old_zi_lpf_r2
-                # Inherit DC blocker state (see capture comments above).
-                new_v.dc_blocker_x  = _old_dc_x
-                new_v.dc_blocker_y  = _old_dc_y
-                # FIR history and onset position handling differ by waveform:
-                #
-                # Non-sine: inherit the outgoing voice's FIR history so the
-                # polyphase downsampler sees continuous input across the steal
-                # boundary.  The frequency mismatch between old and new note
-                # rings for ~8 base-rate samples, but harmonic-rich waveforms
-                # (saw, square, triangle) mask this brief transient.
-                #
-                # Sine / pure_sine: inheriting a FIR history tuned for the OLD
-                # note's frequency produces an audible chirp artifact — the filter
-                # delay line contains old-frequency samples that bleed into the
-                # new-frequency output for ~8 samples.  With pure sinusoids there
-                # are no harmonics to mask the chirp.  Instead: zero the history
-                # and reset onset_samples to 0 so the onset ramp (3-27ms RC curve)
-                # covers the FIR warm-up window before the new voice becomes audible.
-                if self.waveform in ("sine", "pure_sine"):
-                    # Sine/pure_sine bypass oversampling entirely so there is no FIR
-                    # delay-line to clear or warm up.  Inherit onset_samples from the
-                    # outgoing voice so rapid re-triggers do not restart the onset ramp
-                    # from zero and produce a brief amplitude dip at fast velocities.
-                    new_v._oversample_history[:]      = 0.0
-                    new_v._oversample_history_r2[:]   = 0.0
-                    new_v._oversample_history_sine[:] = 0.0
-                    new_v.onset_samples = _old_onset
+                # Capture old pitch before overwriting (needed for portamento).
+                _old_freq = (old_v.base_frequency if old_v._glide_from_freq > 0.0
+                             else old_v.frequency)
+
+                # Store current amplitude for the CROSS crossfade.
+                old_v.steal_start_level = old_v.last_envelope_level
+
+                # Update note identity and pitch.
+                old_v.midi_note       = note
+                old_v.base_frequency  = freq
+                old_v.frequency       = freq
+                old_v.velocity_target = vel
+
+                # Restart amplitude envelope; CROSS crossfade in _apply_envelope
+                # bridges from steal_start_level to the new attack over 8ms.
+                old_v.is_releasing      = False
+                old_v.note_active       = True
+                old_v.envelope_time     = 0.0
+                old_v.age               = 0.0
+                old_v.sustain_cap       = 1.0
+                old_v.pre_gate_progress = 1.0  # gate fully open — no onset dip
+                old_v.onset_ms          = onset_ms_for_note
+
+                # FEG restarts from zero so the filter envelope sweeps fresh.
+                old_v.feg_time          = 0.0
+                old_v.feg_is_releasing  = False
+                old_v.feg_release_start = 0.0
+                old_v.feg_offset_smooth = 0.0
+
+                # Portamento: slide from old pitch to new pitch if enabled.
+                # Use the captured _old_freq (not old_v.base_frequency which is
+                # already overwritten above) to prevent portamento accumulation.
+                if self.portamento_time > 0.0 and _old_freq and _old_freq != freq:
+                    old_v._glide_from_freq = _old_freq
+                    old_v._glide_elapsed   = 0
                 else:
-                    new_v._oversample_history[:]      = _old_fir_hist
-                    new_v._oversample_history_r2[:]   = _old_fir_hist_r2
-                    new_v._oversample_history_sine[:] = _old_fir_hist_sine
-                    new_v.onset_samples = _old_onset
-                # Inherit piano string partial phases for legato continuity.
-                new_v.partial_phases[:] = _old_partial_phases
-                # Inherit capacitor and peak detector state.
-                new_v.cap_env       = _old_cap_env
-                new_v.sustain_cap   = _old_sustain_cap
-                new_v.cap_ws_state  = _old_cap_ws_state
-                new_v.osc_peak_pos  = _old_osc_peak_pos
-                new_v.osc_peak_neg  = _old_osc_peak_neg
-                new_v.out_peak      = _old_out_peak
-                # Portamento glide: if enabled, slide from the old pitch to the new one.
-                # Because v.frequency also drives key-tracking cutoff, the filter cutoff
-                # glides in sync — no sudden coefficient jump at the steal moment.
-                # Use base_frequency (target pitch) not frequency (mid-glide position) as
-                # the glide source to prevent portamento accumulation at fast tempos: if we
-                # used mid-glide position, each rapid steal would inherit the drifted frequency
-                # and the pitch would never converge to any actual note.
-                _glide_src = (old_v.base_frequency if old_v._glide_from_freq > 0.0
-                              else old_v.frequency)
-                if self.portamento_time > 0.0 and _glide_src and _glide_src != freq:
-                    new_v._glide_from_freq = _glide_src
-                    new_v._glide_elapsed   = 0
-                else:
-                    new_v._glide_from_freq = 0.0
-                self._mono_primary = new_idx
-                self.mono_voice_index = new_idx
-                # Engine crossfade to hide any residual FIR boundary transient.
+                    old_v._glide_from_freq = 0.0
+
+                # _mono_primary stays as old_idx — the same voice continues.
+                self.mono_voice_index = old_idx
+                # Engine crossfade hides any residual transient at the steal boundary.
                 self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
             else:
                 # From silence: hard trigger on the primary slot, no glide.
