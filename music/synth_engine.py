@@ -929,7 +929,7 @@ class SynthEngine:
         self._last_output_L: float = 0.0
         self._last_output_R: float = 0.0
         self._transition_xf_remaining: int = 0   # samples left in active crossfade
-        self._TRANSITION_XF_SAMPLES:  int = 48  # 48 smp ≈ 1.1ms: inaudible, covers UNISON freq-step artifact
+        self._TRANSITION_XF_SAMPLES:  int = 192  # 192 smp ≈ 4ms: masks filter cold-start at note steal
 
         # Subsonic high-pass filter on the stereo output bus (20 Hz, 1-pole IIR).
         # Removes residual DC and very-low-frequency energy that the per-voice DC
@@ -2887,6 +2887,51 @@ class SynthEngine:
                 old_v.feg_is_releasing  = False
                 old_v.feg_release_start = 0.0
 
+                # Filter clean-start: reset all filter states so old-frequency
+                # energy does not persist into the new note.  The engine crossfade
+                # (_TRANSITION_XF_SAMPLES = 192 smp, ~4ms) masks the brief cold-start
+                # period while the filter re-warms at the new pitch.  Preserving warm
+                # states was intended to prevent cold-start clicks, but those states
+                # carry old-frequency energy that produces a narrow-band transient
+                # 5-10ms into the new note — beyond the original 48-sample crossfade.
+                # The extended crossfade now covers that entire settling window.
+                old_v.filter_state_ladder1        = [0.0, 0.0, 0.0, 0.0]
+                old_v.filter_state_ladder2        = [0.0, 0.0, 0.0, 0.0]
+                old_v.filter_state_svf1_lp        = old_v.filter_state_svf1_bp = 0.0
+                old_v.filter_state_svf2_lp        = old_v.filter_state_svf2_bp = 0.0
+                old_v.dc_blocker_x                = old_v.dc_blocker_y = 0.0
+                old_v._arm_lpf_zi_r1              = None
+                old_v._arm_lpf_zi_r2              = None
+                old_v._arm_hpf_zi_r1              = None
+                old_v._arm_hpf_zi_r2              = None
+                old_v._arm_dcblock_zi             = None
+                old_v._oversample_history[:]      = 0.0
+                old_v._oversample_history_r2[:]   = 0.0
+                old_v._oversample_history_sine[:] = 0.0
+                # Snap the per-voice coefficient smoother to the new note's
+                # key-tracking target.  With states zeroed, the coefficient must
+                # also start at the correct value — otherwise the first buffer
+                # computes filter output for the old frequency target while all
+                # states are at zero, producing a wrong-frequency transient.
+                _oct_m = ((2.0 ** self.octave)
+                          if (self.octave_enabled and self.octave != 0) else 1.0)
+                _f_s   = freq * _oct_m
+                _r_f   = 261.63 * _oct_m
+                _tm    = float(np.clip(
+                    1.0 + self.key_tracking_current * (_f_s / _r_f - 1.0),
+                    0.01, 20.0))
+                _nfl   = float(np.clip(self.cutoff_current * _tm, 20.0, 20000.0))
+                _nfh   = float(np.clip(self.hpf_cutoff_current * _tm, 20.0,
+                                       _nfl * 0.9))
+                old_v.smooth_fl_lpf = _nfl
+                old_v.smooth_fl_hpf = _nfh
+                # Reset waveshaper / dynamics accumulators: old-note coloring
+                # should not bleed into the new note's attack.
+                old_v.cap_ws_state  = 0.0
+                old_v.osc_peak_pos  = 0.0
+                old_v.osc_peak_neg  = 0.0
+                old_v.out_peak      = 0.0
+
                 # Portamento: slide from old pitch to new pitch if enabled.
                 # Use the captured _old_freq (not old_v.base_frequency which is
                 # already overwritten above) to prevent portamento accumulation.
@@ -2975,6 +3020,36 @@ class SynthEngine:
                     v.is_releasing = False
                     v.age = 0.0
                     v.onset_ms = onset_ms_for_note
+                    # Filter clean-start: same reasoning as MONO steal path above.
+                    v.filter_state_ladder1        = [0.0, 0.0, 0.0, 0.0]
+                    v.filter_state_ladder2        = [0.0, 0.0, 0.0, 0.0]
+                    v.filter_state_svf1_lp        = v.filter_state_svf1_bp = 0.0
+                    v.filter_state_svf2_lp        = v.filter_state_svf2_bp = 0.0
+                    v.dc_blocker_x                = v.dc_blocker_y = 0.0
+                    v._arm_lpf_zi_r1              = None
+                    v._arm_lpf_zi_r2              = None
+                    v._arm_hpf_zi_r1              = None
+                    v._arm_hpf_zi_r2              = None
+                    v._arm_dcblock_zi             = None
+                    v._oversample_history[:]      = 0.0
+                    v._oversample_history_r2[:]   = 0.0
+                    v._oversample_history_sine[:] = 0.0
+                    _oct_m_u = ((2.0 ** self.octave)
+                                if (self.octave_enabled and self.octave != 0) else 1.0)
+                    _f_s_u   = detuned_freq * _oct_m_u
+                    _r_f_u   = 261.63 * _oct_m_u
+                    _tm_u    = float(np.clip(
+                        1.0 + self.key_tracking_current * (_f_s_u / _r_f_u - 1.0),
+                        0.01, 20.0))
+                    _nfl_u   = float(np.clip(self.cutoff_current * _tm_u, 20.0, 20000.0))
+                    _nfh_u   = float(np.clip(self.hpf_cutoff_current * _tm_u, 20.0,
+                                             _nfl_u * 0.9))
+                    v.smooth_fl_lpf = _nfl_u
+                    v.smooth_fl_hpf = _nfh_u
+                    v.cap_ws_state  = 0.0
+                    v.osc_peak_pos  = 0.0
+                    v.osc_peak_neg  = 0.0
+                    v.out_peak      = 0.0
                     # Arm engine-level crossfade (same as MONO).
                     self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
                 else:
