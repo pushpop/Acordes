@@ -2874,11 +2874,18 @@ class SynthEngine:
                 old_v.pre_gate_progress = 1.0  # gate fully open — no onset dip
                 old_v.onset_ms          = onset_ms_for_note
 
-                # FEG restarts from zero so the filter envelope sweeps fresh.
+                # FEG restarts from zero so the filter envelope sweeps fresh on the new note.
+                # feg_offset_smooth is intentionally NOT zeroed here.  It holds the smoothed
+                # cutoff offset from the outgoing note's FEG.  Zeroing it causes a step of up
+                # to feg_amount * _FEG_MAX_SWEEP_HZ in the smooth_fl_lpf target in a single
+                # sample — for feg_amount=0.84 that is ~6720 Hz — producing an audible filter
+                # transient even through the per-voice coefficient smoother.  Leaving it at its
+                # current value lets the exponential lag (coeff 0.82) decay it smoothly toward
+                # the new FEG attack curve over ~25 ms, keeping the filter coefficient and its
+                # delay-line states in agreement throughout the transition.
                 old_v.feg_time          = 0.0
                 old_v.feg_is_releasing  = False
                 old_v.feg_release_start = 0.0
-                old_v.feg_offset_smooth = 0.0
 
                 # Portamento: slide from old pitch to new pitch if enabled.
                 # Use the captured _old_freq (not old_v.base_frequency which is
