@@ -533,7 +533,7 @@ class SynthEngine:
     # of a Raspberry Pi or similar single-board computer.
     _IS_ARM = platform.machine() in ("armv7l", "aarch64")
 
-    def __init__(self, output_device_index=None, buffer_size=480, audio_backend=None,
+    def __init__(self, output_device_index=None, buffer_size=256, audio_backend=None,
                  enable_oversampling=True, level_shm_name=None):
         # Sample rate default: 48000 Hz. Override with ACORDES_SAMPLE_RATE env var
         # for quick testing without touching code, e.g.:
@@ -548,7 +548,7 @@ class SynthEngine:
         # sound like a tremolo/LFO wobble on every note. 4096 gives the kernel
         # scheduler enough slack to let the callback always finish in time.
         # The user-configured value is respected if it is larger (e.g. 8192).
-        # Desktop uses the config value directly (default 480 = 10ms).
+        # Desktop uses the config value directly (default 256 = 5.3ms at 48kHz).
         self.buffer_size = max(2048, buffer_size) if self._IS_ARM else buffer_size
         # Pre-allocation size for all working buffers.  ASIO, WASAPI, and ALSA
         # drivers may negotiate a different buffer size than requested.  By
@@ -929,7 +929,7 @@ class SynthEngine:
         self._last_output_L: float = 0.0
         self._last_output_R: float = 0.0
         self._transition_xf_remaining: int = 0   # samples left in active crossfade
-        self._TRANSITION_XF_SAMPLES:  int = 192  # 192 smp ≈ 4ms: masks filter cold-start at note steal
+        self._TRANSITION_XF_SAMPLES:  int = 480  # 480 smp ≈ 10ms at 48kHz: spans ~2 buffers at 256 buffer size
 
         # Subsonic high-pass filter on the stereo output bus (20 Hz, 1-pole IIR).
         # Removes residual DC and very-low-frequency energy that the per-voice DC
@@ -2437,32 +2437,47 @@ class SynthEngine:
         per-sample array — consistent with the per-buffer approach used for
         cutoff/resonance smoothing throughout the engine.  Fast-path returns
         0.0 immediately when feg_amount==0.0 so existing presets pay zero cost.
+
+        Uses the buffer midpoint time for level evaluation rather than the
+        start-of-buffer time.  This eliminates the "invisible attack" bug where
+        feg_attack <= buffer_duration causes buffer 0 to return 0.0 and buffer 1
+        to return the full decay peak — a one-buffer step of up to feg_amount *
+        _FEG_MAX_SWEEP_HZ in the smooth_fl_lpf target, producing an audible
+        filter transient even through the per-voice coefficient smoother.
+        Midpoint sampling distributes the FEG ramp correctly across both buffers.
+        For phase transitions within a buffer (attack→decay boundary), midpoint
+        sampling naturally reflects whichever phase occupies the larger portion.
         """
         if self.feg_amount_current == 0.0 and self.feg_amount_target == 0.0:
             return 0.0
 
         dt = num_samples / self.sample_rate
-        t = voice.feg_time
+        t_start = voice.feg_time
+        # Evaluate at midpoint of the buffer, not the start.  For linear segments
+        # (attack, decay) this gives the exact average level across the buffer.
+        # For the exponential release it is a close approximation (error < 0.1%
+        # for release times greater than 50ms, which covers all practical presets).
+        t_mid = t_start + dt * 0.5
 
         if voice.feg_is_releasing:
             # Exponential release from feg_release_level (the actual level at note-off).
             # Decaying from 1.0 unconditionally was wrong: if the FEG had already reached
             # sustain=0% before key release, the release would jump to 1.0 then decay —
             # a sudden large cutoff step that high-resonance filters amplify into a spike.
-            t_rel = max(0.0, t - voice.feg_release_start)
+            t_rel_mid = max(0.0, t_mid - voice.feg_release_start)
             time_const = max(0.001, self.feg_release)
-            level = voice.feg_release_level * np.exp(-t_rel / time_const)
+            level = voice.feg_release_level * np.exp(-t_rel_mid / time_const)
             voice.feg_time += dt
             return float(np.clip(level, 0.0, 1.0))
         else:
-            # Attack → Decay → Sustain
+            # Attack → Decay → Sustain, evaluated at buffer midpoint.
             atk = max(0.001, self.feg_attack)
             dcy = max(0.001, self.feg_decay)
             sus = float(np.clip(self.feg_sustain, 0.0, 1.0))
-            if t < atk:
-                level = t / atk
-            elif t < atk + dcy:
-                p = (t - atk) / dcy
+            if t_mid < atk:
+                level = t_mid / atk
+            elif t_mid < atk + dcy:
+                p = (t_mid - atk) / dcy
                 level = 1.0 - p * (1.0 - sus)
             else:
                 level = sus
@@ -2838,10 +2853,14 @@ class SynthEngine:
                 # Updating the same voice eliminates all three sources: no overlap,
                 # no cold-start LPF, no HPF/SVF ringing transient.
                 #
-                # Amplitude: restart ADSR from zero, but steal_start_level carries
-                # the old note's level into _apply_envelope's 8ms CROSS crossfade
-                # so the envelope begins at the old amplitude and blends smoothly
-                # into the new attack — no step discontinuity in output.
+                # Amplitude: envelope continues from its current position (true
+                # legato, same as UNISON steal).  Restarting envelope_time to 0
+                # forces the ADSR back to the attack floor, requiring an 8ms CROSS
+                # crossfade to bridge from steal_start_level down to near-zero.
+                # With a 170ms attack that drop is audible as a harsh snap — exactly
+                # the artifact reported.  Keeping envelope_time running eliminates
+                # the amplitude discontinuity entirely.  The note pitch changes, the
+                # envelope and FEG continue smoothly from where they were.
                 #
                 # Filter: all states (Moog ladder, HPF SVF, scipy zi, DC blocker)
                 # are kept.  The filter was warm; the new pitch drives it cleanly
@@ -2855,76 +2874,69 @@ class SynthEngine:
                 _old_freq = (old_v.base_frequency if old_v._glide_from_freq > 0.0
                              else old_v.frequency)
 
-                # Store current amplitude for the CROSS crossfade.
-                old_v.steal_start_level = old_v.last_envelope_level
-
                 # Update note identity and pitch.
-                old_v.midi_note       = note
-                old_v.base_frequency  = freq
-                old_v.frequency       = freq
-                old_v.velocity_target = vel
-
-                # Restart amplitude envelope; CROSS crossfade in _apply_envelope
-                # bridges from steal_start_level to the new attack over 8ms.
-                old_v.is_releasing      = False
-                old_v.note_active       = True
-                old_v.envelope_time     = 0.0
-                old_v.age               = 0.0
-                old_v.sustain_cap       = 1.0
-                old_v.pre_gate_progress = 1.0  # gate fully open — no onset dip
+                old_v.midi_note         = note
+                old_v.base_frequency    = freq
+                old_v.frequency         = freq
+                old_v.pre_gate_progress = 1.0
                 old_v.onset_ms          = onset_ms_for_note
 
-                # FEG restarts from zero so the filter envelope sweeps fresh on the new note.
-                # feg_offset_smooth is intentionally NOT zeroed here.  It holds the smoothed
-                # cutoff offset from the outgoing note's FEG.  Zeroing it causes a step of up
-                # to feg_amount * _FEG_MAX_SWEEP_HZ in the smooth_fl_lpf target in a single
-                # sample — for feg_amount=0.84 that is ~6720 Hz — producing an audible filter
-                # transient even through the per-voice coefficient smoother.  Leaving it at its
-                # current value lets the exponential lag (coeff 0.82) decay it smoothly toward
-                # the new FEG attack curve over ~25 ms, keeping the filter coefficient and its
-                # delay-line states in agreement throughout the transition.
-                old_v.feg_time          = 0.0
-                old_v.feg_is_releasing  = False
-                old_v.feg_release_start = 0.0
+                # Amplitude continuity: behaviour depends on the voice state.
+                #
+                # Case A — voice is in RELEASE (is_releasing=True):
+                #   Setting is_releasing=False while envelope_time is already
+                #   past attack+decay makes _apply_envelope compute the SUSTAIN
+                #   level instead of the release level — an amplitude jump that
+                #   is audible as a hard snap.  Fix: back-calculate the attack
+                #   phase position that produces the current release amplitude so
+                #   the new note's attack ramps up from exactly that level.
+                #
+                # Case B — voice is active (sustain or attack, is_releasing=False):
+                #   envelope_time already maps to the correct amplitude — keep it
+                #   unchanged for true legato continuation (no dip, no snap).
+                if old_v.is_releasing:
+                    # Compute v_int using the EXACT same formula as _apply_envelope so
+                    # the back-calculated envelope_time produces precisely last_envelope_level
+                    # on the first sample of the new attack (no amplitude step).
+                    _VEL_C, _VEL_F = 1.3, 0.15
+                    _v_scaled = _VEL_F + (1.0 - _VEL_F) * (old_v.velocity ** _VEL_C)
+                    _v_int = max(0.001, 1.0 - self.vel_depth_current * (1.0 - _v_scaled))
+                    _atk   = max(0.001, self.attack_current)
+                    _lvl   = old_v.last_envelope_level
+                    _t_eq  = _atk * _lvl / _v_int
+                    old_v.envelope_time = min(float(_t_eq), _atk * 0.9999)
+                    # FEG restarts fresh on the new note when triggered from release.
+                    old_v.feg_time          = 0.0
+                    old_v.feg_is_releasing  = False
+                    old_v.feg_release_start = 0.0
+                # Case B: envelope_time and feg_time continue unchanged.
 
-                # Filter clean-start: reset all filter states so old-frequency
-                # energy does not persist into the new note.  The engine crossfade
-                # (_TRANSITION_XF_SAMPLES = 192 smp, ~4ms) masks the brief cold-start
-                # period while the filter re-warms at the new pitch.  Preserving warm
-                # states was intended to prevent cold-start clicks, but those states
-                # carry old-frequency energy that produces a narrow-band transient
-                # 5-10ms into the new note — beyond the original 48-sample crossfade.
-                # The extended crossfade now covers that entire settling window.
-                old_v.filter_state_ladder1        = [0.0, 0.0, 0.0, 0.0]
-                old_v.filter_state_ladder2        = [0.0, 0.0, 0.0, 0.0]
-                old_v.filter_state_svf1_lp        = old_v.filter_state_svf1_bp = 0.0
-                old_v.filter_state_svf2_lp        = old_v.filter_state_svf2_bp = 0.0
-                old_v.dc_blocker_x                = old_v.dc_blocker_y = 0.0
-                old_v._arm_lpf_zi_r1              = None
-                old_v._arm_lpf_zi_r2              = None
-                old_v._arm_hpf_zi_r1              = None
-                old_v._arm_hpf_zi_r2              = None
-                old_v._arm_dcblock_zi             = None
-                old_v._oversample_history[:]      = 0.0
-                old_v._oversample_history_r2[:]   = 0.0
-                old_v._oversample_history_sine[:] = 0.0
-                # Snap the per-voice coefficient smoother to the new note's
-                # key-tracking target.  With states zeroed, the coefficient must
-                # also start at the correct value — otherwise the first buffer
-                # computes filter output for the old frequency target while all
-                # states are at zero, producing a wrong-frequency transient.
-                _oct_m = ((2.0 ** self.octave)
-                          if (self.octave_enabled and self.octave != 0) else 1.0)
-                _f_s   = freq * _oct_m
-                _r_f   = 261.63 * _oct_m
-                _tm    = float(np.clip(
-                    1.0 + self.key_tracking_current * (_f_s / _r_f - 1.0),
-                    0.01, 20.0))
-                _nfl   = float(np.clip(self.cutoff_current * _tm, 20.0, 20000.0))
-                _nfh   = float(np.clip(self.hpf_cutoff_current * _tm, 20.0,
-                                       _nfl * 0.9))
-                old_v.smooth_fl_lpf = _nfl
-                old_v.smooth_fl_hpf = _nfh
+                old_v.is_releasing = False
+                old_v.note_active  = True
+
+                # Filter state preservation: keep all filter and oversample states
+                # warm across the steal.  Zeroing states causes a cold-start impulse:
+                # the oscillator (at steal_start_level amplitude) suddenly feeds a
+                # zeroed Moog ladder, producing a 2-6 sample cascade audible even
+                # through the 480-sample crossfade.  Zeroing _oversample_history adds
+                # a second impulse in the downsampled oscillator output feeding the
+                # ladder.  The old-frequency energy in warm states decays in under 1ms
+                # at typical cutoff values (tau ~= 1/(2*pi*fc)), fully covered by the
+                # 480-sample crossfade window.  ARM scipy zi objects are still reset
+                # because they encode the filter coefficient and must be rebuilt when
+                # the cutoff target changes at the new pitch.
+                old_v._arm_lpf_zi_r1  = None
+                old_v._arm_lpf_zi_r2  = None
+                old_v._arm_hpf_zi_r1  = None
+                old_v._arm_hpf_zi_r2  = None
+                old_v._arm_dcblock_zi = None
+                # smooth_fl_lpf / smooth_fl_hpf intentionally NOT snapped to the
+                # new note's key-tracking target.  Snapping the coefficient while
+                # filter states are warm causes a one-buffer mismatch transient:
+                # states carry old-pitch energy, new alpha produces a sudden shift
+                # in the filter's operating point.  Leaving the coefficient at its
+                # current value lets the per-buffer smoother (_SMOOTH_K ~= 0.70)
+                # glide it to the new key-tracking target over ~15ms — seamless.
                 # Reset waveshaper / dynamics accumulators: old-note coloring
                 # should not bleed into the new note's attack.
                 old_v.cap_ws_state  = 0.0
@@ -2943,8 +2955,12 @@ class SynthEngine:
 
                 # _mono_primary stays as old_idx — the same voice continues.
                 self.mono_voice_index = old_idx
-                # Engine crossfade hides any residual transient at the steal boundary.
-                self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+                # Engine crossfade NOT armed for legato steal.  The oscillator
+                # phase is continuous (free-running), filter states are preserved,
+                # and all amplitude state is unchanged — there is no discontinuity
+                # to hide.  Arming the crossfade blends _last_output_L (a constant
+                # scalar from the old pitch) with the new pitch output for 480
+                # samples, creating a 10ms false fade-in that is audible as a snap.
             else:
                 # From silence: hard trigger on the primary slot, no glide.
                 old_v._glide_from_freq = 0.0
@@ -3015,43 +3031,45 @@ class SynthEngine:
                     v.midi_note = note
                     v.base_frequency = detuned_freq
                     v.frequency = detuned_freq
-                    v.velocity_target = vel
                     v.note_active = True
+                    # Amplitude continuity: same Case A / Case B logic as MONO steal.
+                    # Case A — voice is in RELEASE: back-calculate attack phase position
+                    # that produces the current release amplitude so the new attack starts
+                    # from exactly that level with no jump.
+                    # Case B — voice is active: envelope_time continues unchanged.
+                    if v.is_releasing:
+                        _VEL_C, _VEL_F = 1.3, 0.15
+                        _v_scaled = _VEL_F + (1.0 - _VEL_F) * (v.velocity ** _VEL_C)
+                        _v_int = max(0.001, 1.0 - self.vel_depth_current * (1.0 - _v_scaled))
+                        _atk   = max(0.001, self.attack_current)
+                        _lvl   = v.last_envelope_level
+                        _t_eq  = _atk * _lvl / _v_int
+                        v.envelope_time = min(float(_t_eq), _atk * 0.9999)
+                        # FEG restarts fresh on the new note when triggered from release.
+                        v.feg_time          = 0.0
+                        v.feg_is_releasing  = False
+                        v.feg_release_start = 0.0
+                    # Case B: envelope_time and feg_time continue unchanged.
                     v.is_releasing = False
-                    v.age = 0.0
                     v.onset_ms = onset_ms_for_note
-                    # Filter clean-start: same reasoning as MONO steal path above.
-                    v.filter_state_ladder1        = [0.0, 0.0, 0.0, 0.0]
-                    v.filter_state_ladder2        = [0.0, 0.0, 0.0, 0.0]
-                    v.filter_state_svf1_lp        = v.filter_state_svf1_bp = 0.0
-                    v.filter_state_svf2_lp        = v.filter_state_svf2_bp = 0.0
-                    v.dc_blocker_x                = v.dc_blocker_y = 0.0
-                    v._arm_lpf_zi_r1              = None
-                    v._arm_lpf_zi_r2              = None
-                    v._arm_hpf_zi_r1              = None
-                    v._arm_hpf_zi_r2              = None
-                    v._arm_dcblock_zi             = None
-                    v._oversample_history[:]      = 0.0
-                    v._oversample_history_r2[:]   = 0.0
-                    v._oversample_history_sine[:] = 0.0
-                    _oct_m_u = ((2.0 ** self.octave)
-                                if (self.octave_enabled and self.octave != 0) else 1.0)
-                    _f_s_u   = detuned_freq * _oct_m_u
-                    _r_f_u   = 261.63 * _oct_m_u
-                    _tm_u    = float(np.clip(
-                        1.0 + self.key_tracking_current * (_f_s_u / _r_f_u - 1.0),
-                        0.01, 20.0))
-                    _nfl_u   = float(np.clip(self.cutoff_current * _tm_u, 20.0, 20000.0))
-                    _nfh_u   = float(np.clip(self.hpf_cutoff_current * _tm_u, 20.0,
-                                             _nfl_u * 0.9))
-                    v.smooth_fl_lpf = _nfl_u
-                    v.smooth_fl_hpf = _nfh_u
+                    # velocity_target NOT updated on legato steal — same reasoning
+                    # as MONO: avoids the 64ms velocity-smoothing amplitude ramp.
+                    # Filter state preservation: same reasoning as MONO steal path above.
+                    # Keep all filter and oversample states warm; reset only ARM scipy
+                    # zi objects which encode the filter coefficient for the new pitch.
+                    # smooth_fl_lpf / smooth_fl_hpf also NOT snapped — same reasoning
+                    # as MONO: let per-buffer smoother glide coefficient to new target.
+                    v._arm_lpf_zi_r1  = None
+                    v._arm_lpf_zi_r2  = None
+                    v._arm_hpf_zi_r1  = None
+                    v._arm_hpf_zi_r2  = None
+                    v._arm_dcblock_zi = None
                     v.cap_ws_state  = 0.0
                     v.osc_peak_pos  = 0.0
                     v.osc_peak_neg  = 0.0
                     v.out_peak      = 0.0
-                    # Arm engine-level crossfade (same as MONO).
-                    self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+                    # Engine crossfade NOT armed for legato steal — same reasoning
+                    # as MONO: no discontinuity exists, crossfade creates a snap.
                 else:
                     # Hard trigger from true silence: full reset, no glide.
                     v._glide_from_freq = 0.0
@@ -3770,11 +3788,12 @@ class SynthEngine:
                     # When feg_amount==0.0 _compute_feg_value fast-paths to 0.0 with no overhead.
                     # Per-voice exponential lag on the FEG offset: prevents the discrete
                     # per-buffer ADSR steps from creating zipper noise on the filter cutoff.
-                    # Coefficient 0.82 ≈ 25ms settling at 256/48kHz — fast enough to track
-                    # FEG sweeps accurately while smoothing out buffer-boundary stairstepping.
+                    # Coefficient 0.88 ≈ 41ms settling at 256/48kHz — slower lag reduces
+                    # per-buffer filter sweep rate, smoothing FEG-induced transients on
+                    # MONO/UNISON note steals without killing fast FEG sweeps entirely.
                     feg_val = self._compute_feg_value(v, frame_count)
                     _feg_target = self.feg_amount_current * self._FEG_MAX_SWEEP_HZ * feg_val
-                    v.feg_offset_smooth = v.feg_offset_smooth * 0.82 + _feg_target * 0.18
+                    v.feg_offset_smooth = v.feg_offset_smooth * 0.88 + _feg_target * 0.12
                     feg_cutoff_offset = v.feg_offset_smooth
                     # Pass as a combined modulator: vcf_lfo handles LFO ratio, FEG adds Hz offset.
                     # _apply_filter receives cutoff_mod as a multiplier; we encode the offset by
