@@ -2,12 +2,13 @@
 # ABOUTME: Provides real-time pitch exploration, scale browsing, MLT detection, and strum chords.
 import math
 import random
+import re
 from typing import TYPE_CHECKING, List, Tuple, Optional
 
 from textual.binding import Binding
 from textual.widget import Widget
 from textual.widgets import Static
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 
 from components.header_widget import HeaderWidget
 from gamepad.actions import GP
@@ -130,11 +131,37 @@ def _edo_step_to_midi_and_bend(total_edo_steps: int, edo: int) -> Tuple[int, int
 class MicrotonalMode(Widget):
     """μTonalidade — microtonal scale explorer using EDO systems."""
 
-    # Width of panel interior (excluding │ borders).
-    # 5 panels × (W+2) chars must fit the terminal; 20 = 110 chars total, comfortable at 130+.
-    _W = 20
+    # Width of panel interior (excluding │ borders) for wide (left/center) and narrow (right) panels.
+    _W_WIDE = 48
+    _W_NARROW = 22
 
-    CSS = """
+    # 5-row ASCII block art for numbers and note letters (same pattern as metronome).
+    _ASCII_NUMS = {
+        '0': ["███", "█ █", "█ █", "█ █", "███"],
+        '1': [" █ ", "██ ", " █ ", " █ ", "███"],
+        '2': ["███", "  █", "███", "█  ", "███"],
+        '3': ["███", "  █", "███", "  █", "███"],
+        '4': ["█ █", "█ █", "███", "  █", "  █"],
+        '5': ["███", "█  ", "███", "  █", "███"],
+        '6': ["███", "█  ", "███", "█ █", "███"],
+        '7': ["███", "  █", "  █", "  █", "  █"],
+        '8': ["███", "█ █", "███", "█ █", "███"],
+        '9': ["███", "█ █", "███", "  █", "███"],
+        '/': ["  █", " █ ", " █ ", " █ ", "█  "],
+    }
+    _ASCII_LETTERS = {
+        'C': ["███", "█  ", "█  ", "█  ", "███"],
+        'D': ["██ ", "█ █", "█ █", "█ █", "██ "],
+        'E': ["███", "█  ", "██ ", "█  ", "███"],
+        'F': ["███", "█  ", "██ ", "█  ", "█  "],
+        'G': ["███", "█  ", "█ █", "█ █", "███"],
+        'A': [" █ ", "█ █", "███", "█ █", "█ █"],
+        'B': ["██ ", "█ █", "██ ", "█ █", "██ "],
+        '#': ["█ █", "███", "█ █", "███", "█ █"],
+        'b': ["█  ", "█  ", "██ ", "█ █", "██ "],
+    }
+
+    DEFAULT_CSS = """
     MicrotonalMode {
         layout: vertical;
         height: 100%;
@@ -144,49 +171,51 @@ class MicrotonalMode(Widget):
     #utonal-panels {
         layout: horizontal;
         width: 100%;
-        height: 13;
+        height: 18;
         padding: 0;
         margin: 0;
     }
-    #utonal-edo-panel {
-        width: 1fr;
+    #utonal-left-wrap {
+        width: 2fr;
         height: 100%;
         background: #0d0d0d;
+        align: center top;
         padding: 0;
         margin: 0;
     }
-    #utonal-scale-panel {
-        width: 1fr;
+    #utonal-center-wrap {
+        width: 2fr;
         height: 100%;
         background: #0d0d0d;
+        align: center top;
         padding: 0;
         margin: 0;
     }
-    #utonal-tonic-panel {
+    #utonal-right-wrap {
         width: 1fr;
         height: 100%;
         background: #0d0d0d;
+        align: center top;
         padding: 0;
         margin: 0;
     }
-    #utonal-step-panel {
-        width: 1fr;
-        height: 100%;
-        background: #0d0d0d;
+    #utonal-left-panel, #utonal-center-panel, #utonal-right-panel {
+        width: auto;
+        height: auto;
         padding: 0;
         margin: 0;
     }
-    #utonal-status-panel {
-        width: 1fr;
-        height: 100%;
+    #utonal-ring-wrap {
+        width: 100%;
+        height: 1fr;
         background: #0d0d0d;
+        align: center top;
         padding: 0;
         margin: 0;
     }
     #utonal-ring-panel {
-        width: 100%;
-        height: 1fr;
-        background: #0d0d0d;
+        width: auto;
+        height: auto;
         padding: 0;
         margin: 0;
     }
@@ -252,11 +281,9 @@ class MicrotonalMode(Widget):
         self._strum_fire_timers: List = []
 
         # Panel widget references (set in on_mount after compose)
-        self._panel_edo:    Optional[Static] = None
-        self._panel_scale:  Optional[Static] = None
-        self._panel_tonic:  Optional[Static] = None
-        self._panel_step:   Optional[Static] = None
-        self._panel_status: Optional[Static] = None
+        self._panel_left:   Optional[Static] = None
+        self._panel_center: Optional[Static] = None
+        self._panel_right:  Optional[Static] = None
         self._panel_ring:   Optional[Static] = None
 
     # ── Properties ───────────────────────────────────────────────────────────
@@ -294,7 +321,7 @@ class MicrotonalMode(Widget):
     # ── Compose ──────────────────────────────────────────────────────────────
 
     def compose(self):
-        """Build the μTonalidade layout: 5 info panels on top, large ring below."""
+        """Build the μTonalidade layout: 3 info panels on top, large ring below."""
         yield HeaderWidget(
             title="μ T O N A L I D A D E",
             subtitle=self._get_subtitle(),
@@ -302,20 +329,20 @@ class MicrotonalMode(Widget):
             id="utonal-header",
         )
         with Horizontal(id="utonal-panels"):
-            yield Static("", id="utonal-edo-panel")
-            yield Static("", id="utonal-scale-panel")
-            yield Static("", id="utonal-tonic-panel")
-            yield Static("", id="utonal-step-panel")
-            yield Static("", id="utonal-status-panel")
-        yield Static("", id="utonal-ring-panel")
+            with Vertical(id="utonal-left-wrap"):
+                yield Static("", id="utonal-left-panel")
+            with Vertical(id="utonal-center-wrap"):
+                yield Static("", id="utonal-center-panel")
+            with Vertical(id="utonal-right-wrap"):
+                yield Static("", id="utonal-right-panel")
+        with Vertical(id="utonal-ring-wrap"):
+            yield Static("", id="utonal-ring-panel")
 
     def on_mount(self):
         """Initialise display, wire MIDI, and register gamepad callbacks."""
-        self._panel_edo    = self.query_one("#utonal-edo-panel",    Static)
-        self._panel_scale  = self.query_one("#utonal-scale-panel",  Static)
-        self._panel_tonic  = self.query_one("#utonal-tonic-panel",  Static)
-        self._panel_step   = self.query_one("#utonal-step-panel",   Static)
-        self._panel_status = self.query_one("#utonal-status-panel", Static)
+        self._panel_left   = self.query_one("#utonal-left-panel",   Static)
+        self._panel_center = self.query_one("#utonal-center-panel", Static)
+        self._panel_right  = self.query_one("#utonal-right-panel",  Static)
         self._panel_ring   = self.query_one("#utonal-ring-panel",   Static)
         self._refresh_display()
         self.focus()
@@ -746,166 +773,163 @@ class MicrotonalMode(Widget):
     def _get_subtitle(self) -> str:
         return f"EDO-{self._current_edo}  |  {self._current_mode_name}"
 
-    # -- Synth-style panel box helpers --
+    # -- Panel box helpers (parameterized width) --
 
-    def _sec_top(self, title: str) -> str:
+    def _box_top(self, title: str, w: int) -> str:
         """Top border: ╭─ TITLE ──╮  matching synth mode visual language."""
         t = f" {title} "
-        W = self._W + 2
-        dashes = max(0, W - len(t))
+        dashes = max(0, w + 2 - len(t))
         lp = max(1, dashes // 2)
         rp = max(1, dashes - lp)
-        return f"[bold #a06000]╭{'─'*lp}{t}{'─'*rp}╮[/]"
+        return f"[bold #a06000]╭{'─' * lp}{t}{'─' * rp}╮[/]"
 
-    def _sec_bot(self) -> str:
+    def _box_bot(self, w: int) -> str:
         """Bottom border: ╰──╯"""
-        return f"[bold #a06000]╰{'─'*(self._W+2)}╯[/]"
+        return f"[bold #a06000]╰{'─' * (w + 2)}╯[/]"
 
-    def _sec_line(self, text: str, color: str = "#888888") -> str:
-        """One interior row, content padded to _W visible chars."""
-        W = self._W
-        # Truncate to _W visible chars (text is plain, no embedded markup).
-        display = text[:W].ljust(W)
+    def _box_line(self, text: str, w: int, color: str = "#888888") -> str:
+        """One interior row, content centered to w visible chars."""
+        display = text[:w].center(w)
         return f"[bold #a06000]│[/][{color}] {display} [/][bold #a06000]│[/]"
 
-    def _sec_big(self, text: str, color: str = "#00ffff") -> str:
-        """Two-line large value: spaced chars on one line + blank line below.
-
-        Produces two rendered lines so callers count 2 rows from this call.
-        """
-        W = self._W
-        spaced = " ".join(text)     # e.g. "24" → "2 4", "Rast" → "R a s t"
-        spaced = spaced[:W].ljust(W)
-        value_row = f"[bold #a06000]│[/][bold {color}] {spaced} [/][bold #a06000]│[/]"
-        blank_row = self._sec_line("")
-        return value_row + "\n" + blank_row
-
-    def _sec_tag(self, label: str, active: bool) -> str:
-        """Inline status tag: active = bright amber reverse, inactive = dim."""
-        if active:
-            return f"[bold #d79b00 reverse] {label} [/]"
-        return f"[dim #444444] {label} [/]"
-
-    def _sec_divider(self) -> str:
+    def _box_divider(self, w: int) -> str:
         """Thin horizontal divider row inside a panel."""
-        return f"[bold #a06000]│{'─'*(self._W+2)}│[/]"
+        return f"[bold #a06000]│{'─' * (w + 2)}│[/]"
 
-    # -- Top panel renderers (each produces exactly 13 lines: 1 top + 11 content + 1 bot) --
+    def _render_block_text(self, text: str, charset: dict, color: str = "#00ffff") -> list:
+        """Render text as 5-row ASCII block art. Returns list of (raw, markup) tuples.
 
-    def _render_edo_panel(self) -> str:
-        """EDO selector panel — large EDO number, step size, nav hints."""
+        raw is the plain text (for measuring width), markup is the Rich-tagged version.
+        """
+        rows = [""] * 5
+        for ch in text:
+            glyph = charset.get(ch)
+            if glyph:
+                for i in range(5):
+                    if rows[i]:
+                        rows[i] += " "
+                    rows[i] += glyph[i]
+        return [(r, f"[bold {color}]{r}[/]") for r in rows]
+
+    def _box_block_row(self, raw: str, markup: str, w: int) -> str:
+        """Wrap a block-art row inside panel borders, centered to w visible chars."""
+        pad = max(0, w - len(raw))
+        lpad = pad // 2
+        rpad = pad - lpad
+        return f"[bold #a06000]\u2502[/] {' ' * lpad}{markup}{' ' * rpad} [bold #a06000]\u2502[/]"
+
+    # -- Three-panel renderers (each produces exactly 18 lines: 1 top + 16 content + 1 bot) --
+
+    def _render_left_panel(self) -> str:
+        """Left panel: EDO (block numbers) + Scale (spaced name, MLT badge)."""
+        W = self._W_WIDE
         edo = self._current_edo
         idx = self._edo_index
         step_cents = int(round(1200.0 / edo))
-        lines = [
-            self._sec_top("E D O"),
-            self._sec_line(""),
-            self._sec_big(str(edo), "#00ffff"),   # 2 rows (value + blank)
-            self._sec_line(f"equal divisions", "#555555"),
-            self._sec_divider(),
-            self._sec_line(f"{idx+1} / {len(_EDO_CYCLE)}", "#888888"),
-            self._sec_line(f"1 step = {step_cents}¢", "#666666"),
-            self._sec_line(""),
-            self._sec_line("[e] next  [E] prev", "#444444"),
-            self._sec_line(""),
-            self._sec_line(""),
-            self._sec_bot(),
-        ]
-        return "\n".join(lines)
 
-    def _render_scale_panel(self) -> str:
-        """Scale / mode selector panel — scale name large, degree count, MLT badge."""
+        # 5-row ASCII block art for EDO number
+        block_rows = self._render_block_text(str(edo), self._ASCII_NUMS, "#00ffff")
+
         catalog = self._catalog
         name = self._current_mode_name
         mlt = _is_mlt(self._current_steps)
         mlt_c = "#d79b00" if mlt else "#555555"
         mlt_label = "★ M L T" if mlt else "· · ·"
-        # Shorten name to _W if long before spacing
-        short = name[:self._W]
+        spaced_name = " ".join(name[:18])
+
         lines = [
-            self._sec_top("S C A L E"),
-            self._sec_line(""),
-            self._sec_big(short, "#00ffff"),       # 2 rows (value + blank)
-            self._sec_line(f"{self._num_scale_notes} notes", "#888888"),
-            self._sec_divider(),
-            self._sec_line(f"{self._mode_index+1} / {len(catalog)} modes", "#666666"),
-            self._sec_line(mlt_label, mlt_c),
-            self._sec_line(""),
-            self._sec_line("[j] prev  [k] next", "#444444"),
-            self._sec_line(""),
-            self._sec_line(""),
-            self._sec_bot(),
+            self._box_top("E D O", W),
         ]
+        # 5 rows of block art, each inside box borders
+        for raw, markup in block_rows:
+            lines.append(self._box_block_row(raw, markup, W))
+        lines.append(self._box_line(
+            f"EDO-{edo}  equal divisions  1 step={step_cents}\u00a2  ({idx+1}/{len(_EDO_CYCLE)})",
+            W, "#555555"))
+        lines.append(self._box_divider(W))
+        lines.append(self._box_line(f"S C A L E :   {spaced_name}", W, "#00ffff"))
+        lines.append(self._box_line("", W))
+        lines.append(self._box_line(
+            f"{self._num_scale_notes} notes    {mlt_label}    mode {self._mode_index + 1}/{len(catalog)}",
+            W, mlt_c if mlt else "#666666"))
+        lines.append(self._box_divider(W))
+        lines.append(self._box_line("[e/E] EDO    [j/k] mode    [m] MLT filter", W, "#444444"))
+        # Pad remaining rows to reach 18 total (1 top + 16 + 1 bot)
+        while len(lines) < 17:
+            lines.append(self._box_line("", W))
+        lines.append(self._box_bot(W))
         return "\n".join(lines)
 
-    def _render_tonic_panel(self) -> str:
-        """Tonic transposition panel — note name large, cents, nav hints."""
+    def _render_center_panel(self) -> str:
+        """Center panel: Tonic (block letters) + Degree (block numbers)."""
+        W = self._W_WIDE
         edo = self._current_edo
         tonic_cents = int(round(1200.0 * self._tonic_step / edo))
-        note_names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+        note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
         semitone = int(round(tonic_cents / 100)) % 12
         tonic_name = note_names[semitone]
-        lines = [
-            self._sec_top("T O N I C"),
-            self._sec_line(""),
-            self._sec_big(tonic_name, "#00ffff"),  # 2 rows (value + blank)
-            self._sec_line(f"{tonic_cents}¢  from C", "#888888"),
-            self._sec_divider(),
-            self._sec_line(f"step {self._tonic_step} / {edo}", "#666666"),
-            self._sec_line(f"gen: [g/G]", "#555555"),
-            self._sec_line(""),
-            self._sec_line("[◄] flat  [►] sharp", "#444444"),
-            self._sec_line(""),
-            self._sec_line(""),
-            self._sec_bot(),
-        ]
-        return "\n".join(lines)
 
-    def _render_step_panel(self) -> str:
-        """Current degree / cursor panel — degree number large, cents, octave."""
+        # 5-row block art for tonic note name
+        tonic_rows = self._render_block_text(tonic_name, self._ASCII_LETTERS, "#00ffff")
+
         degrees = self._scale_degrees
         step = self._scale_step
         n = self._num_scale_notes
-        cents = int(round(1200.0 * degrees[step] / self._current_edo)) if degrees else 0
+        cents = int(round(1200.0 * degrees[step] / edo)) if degrees else 0
         oct_str = f"{self._octave:+d}" if self._octave != 0 else " 0"
-        lines = [
-            self._sec_top("D E G R E E"),
-            self._sec_line(""),
-            self._sec_big(f"{step+1}/{n}", "#00ffff"),  # 2 rows (value + blank)
-            self._sec_line(f"{cents}¢ above tonic", "#888888"),
-            self._sec_divider(),
-            self._sec_line(f"octave: {oct_str}", "#666666"),
-            self._sec_line("[o] down  [O] up", "#555555"),
-            self._sec_line(""),
-            self._sec_line("[▲] up  [▼] down", "#444444"),
-            self._sec_line(""),
-            self._sec_line(""),
-            self._sec_bot(),
-        ]
+
+        # 5-row block art for degree fraction
+        deg_text = f"{step + 1}/{n}"
+        deg_rows = self._render_block_text(deg_text, self._ASCII_NUMS, "#d79b00")
+
+        lines = [self._box_top("T O N I C", W)]
+        for raw, markup in tonic_rows:
+            lines.append(self._box_block_row(raw, markup, W))
+        lines.append(self._box_line(
+            f"{tonic_name}  {tonic_cents}\u00a2 from C  step {self._tonic_step}/{edo}  gen:[g/G]",
+            W, "#888888"))
+        lines.append(self._box_divider(W))
+        lines.append(self._box_line(f"D E G R E E :   {cents}\u00a2 above tonic    oct: {oct_str}", W, "#888888"))
+        # Degree block art (5 rows)
+        for raw, markup in deg_rows:
+            lines.append(self._box_block_row(raw, markup, W))
+        lines.append(self._box_divider(W))
+        lines.append(self._box_line("[< >] tonic    [^ v] degree    [o/O] octave", W, "#444444"))
+        while len(lines) < 17:
+            lines.append(self._box_line("", W))
+        lines.append(self._box_bot(W))
         return "\n".join(lines)
 
-    def _render_status_panel(self) -> str:
-        """Hold / MLT / Reverse / strum controls panel — flags as large toggle tags."""
-        hold_c  = "#d79b00" if self._hold_on    else "#333333"
-        mlt_c   = "#d79b00" if self._mlt_filter else "#333333"
-        rev_c   = "#d79b00" if self._reversed   else "#333333"
-        hold_label = "H O L D" if self._hold_on    else "h o l d"
-        mlt_label  = "M L T"   if self._mlt_filter else "m l t"
-        rev_label  = "R E V"   if self._reversed   else "r e v"
-        lines = [
-            self._sec_top("S T A T U S"),
-            self._sec_line(""),
-            self._sec_line(hold_label, hold_c),
-            self._sec_line(mlt_label,  mlt_c),
-            self._sec_line(rev_label,  rev_c),
-            self._sec_divider(),
-            self._sec_line("[spc] play note", "#555555"),
-            self._sec_line("[↵] toggle hold", "#555555"),
-            self._sec_line("[z] strum  [r] rev", "#444444"),
-            self._sec_line("[m] MLT filter", "#444444"),
-            self._sec_line(""),
-            self._sec_bot(),
-        ]
+    def _render_right_panel(self) -> str:
+        """Right panel: Status toggles as block indicators + control hints."""
+        W = self._W_NARROW
+
+        def _toggle_row(label: str, active: bool) -> str:
+            """Toggle indicator row inside outer │ borders."""
+            c = "#d79b00" if active else "#333333"
+            iw = W - len(label) - 1  # space for fill chars after label+space
+            if active:
+                inner = f"{label} {'█' * max(1, iw)}"
+            else:
+                inner = f"{label} {'·' * max(1, iw)}"
+            inner = inner[:W].center(W)
+            return f"[bold #a06000]│[/][bold {c}] {inner} [/][bold #a06000]│[/]"
+
+        lines = [self._box_top("S T A T U S", W)]
+        lines.append(self._box_line("", W))
+        lines.append(_toggle_row("HOLD", self._hold_on))
+        lines.append(self._box_line("", W))
+        lines.append(_toggle_row("M L T", self._mlt_filter))
+        lines.append(self._box_line("", W))
+        lines.append(_toggle_row("R E V", self._reversed))
+        lines.append(self._box_line("", W))
+        lines.append(self._box_divider(W))
+        lines.append(self._box_line("[spc] play note", W, "#555555"))
+        lines.append(self._box_line("[enter] hold", W, "#555555"))
+        lines.append(self._box_line("[z] strum  [r] rev", W, "#444444"))
+        while len(lines) < 17:
+            lines.append(self._box_line("", W))
+        lines.append(self._box_bot(W))
         return "\n".join(lines)
 
     # -- Ring / bottom panel renderer --
@@ -915,31 +939,58 @@ class MicrotonalMode(Widget):
         edo = self._current_edo
         degrees_set = set(self._scale_degrees)
         selected_abs = self._scale_degrees[self._scale_step] if self._scale_degrees else 0
-        note_names = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+        note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
-        # ── Pitch ring ────────────────────────────────────────────────────
-        # Small EDOs: each step is one symbol + space.
-        # Large EDOs (>48): group by semitone boundaries with │ dividers.
-        use_spaces = edo <= 48
-        sep_every  = 12 if edo > 48 else 0
+        # ── Pitch ring (multi-row blocks for small EDOs, compact for large) ──
+        # ring_vis_w = visual (non-markup) width of a single ring row.
+        # Block style used up to EDO-48; EDO-72 and EDO-96 use compact dots.
+        if edo <= 48:
+            # Multi-row block ring: 3 rows per step with colored boxes.
+            top_parts, mid_parts, bot_parts = [], [], []
+            steps = self._current_steps
+            for i in range(edo):
+                step_rel = (i - self._tonic_step) % edo
+                if step_rel == 0:
+                    sym, clr = "\u25c9", "#00ffff"   # tonic
+                elif step_rel == selected_abs:
+                    sym, clr = "\u2666", "#d79b00"   # selected
+                elif step_rel in degrees_set:
+                    sym, clr = "\u25cf", "#00cc44"   # in scale
+                else:
+                    sym, clr = "\u00b7", "#2a2a2a"   # non-scale
 
-        ring_parts = []
-        for i in range(edo):
-            step_rel = (i - self._tonic_step) % edo
-            if step_rel == 0:
-                ch = "[bold #00ffff]◉[/]"
-            elif step_rel == selected_abs:
-                ch = "[bold #d79b00]♦[/]"
-            elif step_rel in degrees_set:
-                ch = "[bold #00cc44]●[/]"
-            else:
-                ch = "[#2a2a2a]·[/]"
-            if sep_every and i > 0 and i % sep_every == 0:
-                ring_parts.append("[#444444] │ [/]")
-            ring_parts.append(ch)
-            if use_spaces:
-                ring_parts.append(" ")
-        ring_str = "".join(ring_parts).rstrip()
+                top_parts.append(f"[{clr}]\u256d\u2500\u256e[/]")
+                mid_parts.append(f"[{clr}]\u2502[/][bold {clr}]{sym}[/][{clr}]\u2502[/]")
+                bot_parts.append(f"[{clr}]\u2570\u2500\u256f[/]")
+            # Each cell is 3 chars + 1 space separator; raw width = edo*4-1
+            ring_vis_w = edo * 4 - 1
+            ring_str = (
+                " ".join(top_parts) + "\n"
+                + " ".join(mid_parts) + "\n"
+                + " ".join(bot_parts)
+            )
+        else:
+            # Compact linear ring for large EDOs
+            use_spaces = edo <= 48
+            sep_every = 12 if edo > 48 else 0
+            ring_parts = []
+            for i in range(edo):
+                step_rel = (i - self._tonic_step) % edo
+                if step_rel == 0:
+                    ch = "[bold #00ffff]\u25c9[/]"
+                elif step_rel == selected_abs:
+                    ch = "[bold #d79b00]\u2666[/]"
+                elif step_rel in degrees_set:
+                    ch = "[bold #00cc44]\u25cf[/]"
+                else:
+                    ch = "[#2a2a2a]\u00b7[/]"
+                if sep_every and i > 0 and i % sep_every == 0:
+                    ring_parts.append("[#444444] \u2502 [/]")
+                ring_parts.append(ch)
+                if use_spaces:
+                    ring_parts.append(" ")
+            ring_str = "".join(ring_parts).rstrip()
+            ring_vis_w = len(re.sub(r'\[/?[^\]]*\]', '', ring_str))
 
         # ── Degree name table ─────────────────────────────────────────────
         degrees_list = self._scale_degrees
@@ -950,7 +1001,7 @@ class MicrotonalMode(Widget):
             name = note_names[midi_note % 12]
             oct_num = (midi_note // 12) - 1
             bend_cents = int(round((bend - 8192) / 8192.0 * _BEND_RANGE_SEMITONES * 100))
-            bend_tag = f"{bend_cents:+d}¢" if abs(bend_cents) > 2 else ""
+            bend_tag = f"{bend_cents:+d}\u00a2" if abs(bend_cents) > 2 else ""
             label = f"{name}{oct_num}{bend_tag}"
             if i == self._scale_step:
                 note_parts.append(f"[bold #d79b00 reverse] {label} [/]")
@@ -960,61 +1011,87 @@ class MicrotonalMode(Widget):
                 note_parts.append(f"[#777777]{label}[/]")
         notes_str = "  ".join(note_parts)
 
-        # ── Interval steps row ────────────────────────────────────────────
+        # ── Interval steps row with color gradient ────────────────────────
         steps = self._current_steps
         intervals = []
         for i, s in enumerate(steps):
             cents_val = int(round(1200.0 * s / edo))
             if i == self._scale_step:
-                intervals.append(f"[bold #d79b00]{cents_val}¢[/]")
+                ic = "#d79b00"
+            elif cents_val < 100:
+                ic = "#4488cc"     # small intervals: cool blue
+            elif cents_val > 200:
+                ic = "#cc8844"     # large intervals: warm amber
             else:
-                intervals.append(f"[#555555]{cents_val}¢[/]")
-        intervals_str = "  ·  ".join(intervals)
+                ic = "#aaaaaa"     # medium: neutral
+            intervals.append(f"[{ic}]{cents_val}\u00a2[/]")
+        intervals_str = "  \u00b7  ".join(intervals)
 
-        # ── Absolute position indicator ───────────────────────────────────
+        # ── Header box ────────────────────────────────────────────────────
         tonic_cents = int(round(1200.0 * self._tonic_step / edo))
         semitone = int(round(tonic_cents / 100)) % 12
         tonic_name = note_names[semitone]
         step_cents = int(round(1200.0 * (degrees_list[self._scale_step] if degrees_list else 0) / edo))
-        mlt_badge = "  [bold #d79b00]★ MLT[/]" if _is_mlt(self._current_steps) else ""
+        mlt_badge = "  [bold #d79b00]\u2605 MLT[/]" if _is_mlt(self._current_steps) else ""
 
-        divider_a = f"[#3a3a3a]{'─' * 80}[/]"
-        divider_b = f"[#2a2a2a]{'─' * 80}[/]"
+        # content_w is the ring row width — all content is centered within it.
+        content_w = ring_vis_w
+
+        def _cline(markup: str, plain: str) -> str:
+            """Left-pad markup so its visible content is centered in content_w."""
+            lp = max(0, (content_w - len(plain)) // 2)
+            return " " * lp + markup
+
+        # Title box has a fixed width just big enough for the header text.
+        mlt_raw = "  \u2605 MLT" if _is_mlt(self._current_steps) else ""
+        inner_plain = (f"  P I T C H   R I N G"
+                       f"   EDO-{edo}"
+                       f"   {self._current_mode_name}"
+                       f"{mlt_raw}"
+                       f"   tonic: {tonic_name} ({tonic_cents}\u00a2)  ")
+        box_inner = len(inner_plain)   # box exactly fits the title text
+        inner_markup = (f"  [bold #a06000]P I T C H   R I N G[/]"
+                        f"   [#555555]EDO-{edo}[/]"
+                        f"   [#888888]{self._current_mode_name}[/]"
+                        f"{mlt_badge}"
+                        f"   [#555555]tonic: {tonic_name} ({tonic_cents}\u00a2)[/]  ")
+        box_line_top = f"[bold #a06000]\u2554{'═' * box_inner}\u2557[/]"
+        box_line_mid = f"[bold #a06000]\u2551[/]{inner_markup}[bold #a06000]\u2551[/]"
+        box_line_bot = f"[bold #a06000]\u255a{'═' * box_inner}\u255d[/]"
+        # Center the box relative to the ring width
+        box_vis_w = box_inner + 2   # +2 for ╔ and ╗
+        box_lp = " " * max(0, (content_w - box_vis_w) // 2)
+
+        divider_a = f"[#3a3a3a]{'─' * content_w}[/]"
 
         lines = [
             "",
-            f"  [bold #a06000]╔{'═'*74}╗[/]",
-            (f"  [bold #a06000]║[/]  [bold #a06000]P I T C H   R I N G[/]"
-             f"   [#555555]EDO-{edo}[/]"
-             f"   [#888888]{self._current_mode_name}[/]"
-             f"{mlt_badge}"
-             f"   [#555555]tonic: {tonic_name} ({tonic_cents}¢)[/]"
-             f"  [bold #a06000]║[/]"),
-            f"  [bold #a06000]╚{'═'*74}╝[/]",
+            box_lp + box_line_top,
+            box_lp + box_line_mid,
+            box_lp + box_line_bot,
             "",
-            f"  {ring_str}",
+            ring_str,
             "",
             divider_a,
             "",
-            f"  [#444444]degrees:[/]   {notes_str}",
+            _cline(f"[#444444]degrees:[/]   {notes_str}",
+                   "degrees:   " + re.sub(r'\[/?[^\]]*\]', '', notes_str)),
             "",
-            f"  [#444444]intervals:[/] {intervals_str}",
+            _cline(f"[#444444]intervals:[/] {intervals_str}",
+                   "intervals: " + re.sub(r'\[/?[^\]]*\]', '', intervals_str)),
             "",
-            f"  [#333333]deg {self._scale_step+1}  ·  {step_cents}¢ above tonic[/]",
+            _cline(f"[#333333]deg {self._scale_step + 1}  \u00b7  {step_cents}\u00a2 above tonic[/]",
+                   f"deg {self._scale_step + 1}    {step_cents}\u00a2 above tonic"),
         ]
         return "\n".join(lines)
 
     def _refresh_display(self):
         """Update all panel widgets to reflect current state."""
-        if self._panel_edo:
-            self._panel_edo.update(self._render_edo_panel())
-        if self._panel_scale:
-            self._panel_scale.update(self._render_scale_panel())
-        if self._panel_tonic:
-            self._panel_tonic.update(self._render_tonic_panel())
-        if self._panel_step:
-            self._panel_step.update(self._render_step_panel())
-        if self._panel_status:
-            self._panel_status.update(self._render_status_panel())
+        if self._panel_left:
+            self._panel_left.update(self._render_left_panel())
+        if self._panel_center:
+            self._panel_center.update(self._render_center_panel())
+        if self._panel_right:
+            self._panel_right.update(self._render_right_panel())
         if self._panel_ring:
             self._panel_ring.update(self._render_ring_panel())
