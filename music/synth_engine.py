@@ -2063,55 +2063,95 @@ class SynthEngine:
     def _filter_ladder_process(self, samples: np.ndarray, cutoff: float,
                                prev_states: list, res: float = 0.0,
                                _out: Optional[np.ndarray] = None) -> tuple:
-        """4-pole Moog ladder filter — warm, strong resonance, self-oscillates near res=0.99.
+        """4-pole Moog ladder filter using Zero-Delay Feedback (ZDF) topology.
 
-        Uses one-sample-delayed feedback (inaudible at 48 kHz) so the per-sample
-        computation is independent and the loop is simple to follow.
-        Alpha is capped at 0.95 to prevent IIR instability at high cutoff frequencies
-        (alpha > 1.0 violates the stability condition of the discrete integrator).
+        Implements the Topology-Preserving Transform (TPT) bilinear integrator
+        approach from Zavalishin's 'Virtual Analog Filter Design'.  Each stage
+        uses a bilinear integrator so the feedback path has zero delay — the
+        resonance loop is solved algebraically per sample rather than using the
+        previous sample's output.
+
+        Advantages over the old one-sample-delayed (Euler) ladder:
+        - Self-oscillation occurs at the correct frequency (no phase error)
+        - Unconditionally stable at any cutoff up to Nyquist (no alpha cap)
+        - Resonance peak behaves correctly at high cutoff frequencies
+        - Closer to analog prototype across the full cutoff range
+
+        State meaning: z0..z3 are bilinear integrator states (not Euler states).
+        They start at 0 and are preserved across buffers for phase continuity —
+        same structure as before, compatible with legato steal state preservation.
+
+        Resonance mapping: res 0→1 maps to ZDF k 0→3.5.  Near self-oscillation
+        (k ≈ 4) occurs only at res = 1.0.  Existing presets with res < 0.9 will
+        sound more resonant and punchy than the old implementation — this is the
+        intended improvement.
+
+        API: identical to the previous implementation (same signature, same return
+        type) so all callers require no changes.
         """
         sr = self.sample_rate
         fc = float(np.clip(cutoff, 20.0, sr * 0.45))
-        # Chamberlin/bilinear-adjacent coefficient: 2·sin(π·fc/sr) tracks the analog
-        # prototype more accurately than the forward-Euler 2π·fc/sr, especially above
-        # fc/sr ≈ 0.1 where the Euler form over-rotates and undershoots the true cutoff.
-        alpha = float(np.clip(2.0 * math.sin(math.pi * fc / sr), 0.0, 0.95))
-        # k normalisation: resonance feedback scales down with alpha so the
-        # filter remains unconditionally stable; k→1.0 approaches self-oscillation.
-        # Scale by 1.2 for more aggressive resonance character
-        k = float(np.clip(res * 1.2 * (1.0 / (1.0 + alpha)), 0.0, 0.99))
 
-        a1 = 1.0 - alpha
+        # Bilinear pre-warp: exact frequency matching at fc (no Euler over-rotation).
+        # g = tan(π × fc / fs).  Compared to 2×sin(π×fc/fs) used in the old code,
+        # this is exact for the bilinear transform and avoids the cutoff shift that
+        # the old approximation introduced above fc/fs ≈ 0.15.
+        g  = math.tan(math.pi * fc / sr)
+        G  = g / (1.0 + g)          # per-stage gain (bilinear)
+        A  = 1.0 - G                 # per-stage damping = 1/(1+g)
 
-        # Scalar loop: the 4-stage Moog ladder has nonlinear tanh feedback between
-        # stages that makes it unsuitable for scipy.lfilter vectorization.
-        # The global feedback (tanh(x - 4k*s3)) and stage-3 self-feedback
-        # (s3 = tanh(a1*s3 + alpha*s2)) both use the previous SAMPLE's s3,
-        # creating a tight per-sample dependency that cannot be safely extended
-        # to per-buffer or per-chunk delays without audible artifacts at high resonance.
-        N   = len(samples)
-        # Use pre-allocated output buffer when supplied; otherwise allocate.
+        # Pre-compute powers of G for the feedback correction formula.
+        G2 = G  * G
+        G3 = G2 * G
+        G4 = G3 * G
+
+        # Resonance: res 0→1 maps to ZDF k 0→3.5.
+        # Moog self-oscillation threshold is k = 4; k = 3.5 at res=1.0 gives
+        # extreme resonance that approaches but does not enter pure self-oscillation.
+        # The 1/(1+k×G⁴) denominator in the ZDF formula handles stability algebraically —
+        # no clamping of g or k is required for correctness.
+        k = float(np.clip(res * 3.5, 0.0, 3.99))
+
+        N = len(samples)
         if _out is not None and len(_out) >= N:
             out = _out[:N]
         else:
             out = np.zeros(N, dtype=np.float32)
-        s0, s1, s2, s3 = prev_states[0], prev_states[1], prev_states[2], prev_states[3]
+
+        z0, z1, z2, z3 = prev_states[0], prev_states[1], prev_states[2], prev_states[3]
+
+        # ZDF denominator — precomputed once per buffer (constant for fixed fc).
+        # If k == 0 this is 1.0 (no feedback, fast path possible but not worth branching).
+        denom = 1.0 / (1.0 + k * G4)
 
         for i in range(N):
-            x0 = math.tanh(float(samples[i]) - 4.0 * k * s3)
-            s0 = a1 * s0 + alpha * x0
-            s1 = a1 * s1 + alpha * s0
-            s2 = a1 * s2 + alpha * s1
-            s3 = math.tanh(a1 * s3 + alpha * s2)
-            out[i] = s3
+            x = float(samples[i])
 
-        # Resonance-adaptive makeup gain: at low k the 4-pole rolloff reduces
-        # passband level, so 1.3× restores it.  At high k the resonant peak
-        # already provides compensation; applying 1.3× on top over-amplifies
-        # the peak and increases the resonant noise floor.  Taper to 1.0 as
-        # k → 1.0 so the gain only compensates what resonance doesn't cover.
-        out *= 1.0 + 0.3 * (1.0 - k)
-        return out, [s0, s1, s2, s3]
+            # State contribution: how much each integrator state feeds into y3.
+            # Derived from expanding the 4-stage cascade symbolically:
+            #   y3 = G⁴u + (1-G)(G³z0 + G²z1 + Gz2 + z3)
+            sigma = G3 * z0 + G2 * z1 + G * z2 + z3
+
+            # ZDF input: solve for u = x - k×y3 algebraically.
+            # u_linear = (x - k × A × sigma) / (1 + k × G⁴)
+            # tanh applied after ZDF solve — models preamp saturation at the ladder input.
+            u = math.tanh((x - k * A * sigma) * denom)
+
+            # Forward pass: 4 TPT bilinear 1-pole lowpass stages.
+            # Each stage: lp = G × x_in + A × z  (output)
+            #             z_new = 2 × lp - z_old  (bilinear state update)
+            y0 = G * u  + A * z0;  z0 = 2.0 * y0 - z0
+            y1 = G * y0 + A * z1;  z1 = 2.0 * y1 - z1
+            y2 = G * y1 + A * z2;  z2 = 2.0 * y2 - z2
+            y3 = G * y2 + A * z3;  z3 = 2.0 * y3 - z3
+
+            out[i] = y3
+
+        # Resonance-adaptive makeup gain: same taper as before — compensates
+        # 4-pole passband rolloff at low resonance without over-amplifying the
+        # resonant peak at high resonance.  k/4.0 normalises to 0→1 range.
+        out *= 1.0 + 0.3 * max(0.0, 1.0 - k / 4.0)
+        return out, [z0, z1, z2, z3]
 
     def _filter_svf_process(self, samples: np.ndarray, cutoff: float,
                             lp_state: float, bp_state: float,
