@@ -45,3 +45,8 @@ packages = []
 # not here, so it does not pollute the Windows/macOS resolver.
 no-build-isolation-package = ["python-rtmidi"]
 
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2",
+]
+

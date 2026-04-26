@@ -312,8 +312,8 @@ class SynthMode(Widget):
     # nav_up/down steps through these; dispatch in _adjust_focused_param uses the name.
     _SECTION_PARAMS = {
         "oscillator": ["Wave", "Noise", "Octave", "Drive", "P.Decay"],
-        "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "KTrack"],
-        "amp_eg":     ["Attack", "Decay", "Sustain", "Release", "Route"],
+        "filter":     ["HPF Cut", "HPF Pk", "LPF Cut", "LPF Pk", "Route", "KTrack"],
+        "amp_eg":     ["Attack", "Decay", "Sustain", "Release", "Vel"],
         "filter_eg":  ["Atk", "Dcy", "Sus", "Rel", "Amount"],
         "lfo":        ["Rate", "Depth", "Shape", "Target"],
         "chorus":     ["Rate", "Depth", "Mix", "Voices"],
@@ -343,6 +343,7 @@ class SynthMode(Widget):
         "Sustain": ("sustain", 0.0, 1.0, False),
         "Release": ("release", 0.001, 3.0, False),
         "KTrack": ("key_tracking", 0.0, 1.0, False),
+        "Vel": ("vel_depth", 0.0, 1.0, False),
         "Atk": ("feg_attack", 0.001, 3.0, False),
         "Dcy": ("feg_decay", 0.001, 3.0, False),
         "Sus": ("feg_sustain", 0.0, 1.0, False),
@@ -417,6 +418,7 @@ class SynthMode(Widget):
         self.decay      = params["decay"]
         self.sustain    = params["sustain"]
         self.release    = params["release"]
+        self.vel_depth  = params.get("vel_depth", 1.0)
 
         self.feg_attack  = params.get("feg_attack",  0.01)
         self.feg_decay   = params.get("feg_decay",   0.3)
@@ -516,6 +518,7 @@ class SynthMode(Widget):
         self.decay_display          = None
         self.sustain_display        = None
         self.release_display        = None
+        self.vel_depth_display      = None
         self.feg_attack_display  = None
         self.feg_decay_display   = None
         self.feg_sustain_display = None
@@ -679,7 +682,10 @@ class SynthMode(Widget):
                     yield Label(self._row_label("LPF Pk", ""), classes="control-label", id="lbl-filter-3")
                     self.resonance_display = Label(self._fmt_resonance(), classes="control-value", id="resonance-display")
                     yield self.resonance_display
-                    yield Label(self._row_label("KTrack", ""), classes="control-label", id="lbl-filter-4")
+                    yield Label(self._row_label("Route", ""), classes="control-label", id="lbl-filter-4")
+                    self.filter_routing_display = Label(self._fmt_filter_routing(), classes="control-value", id="filter-routing-display")
+                    yield self.filter_routing_display
+                    yield Label(self._row_label("KTrack", ""), classes="control-label", id="lbl-filter-5")
                     self.key_tracking_display = Label(self._fmt_key_tracking(), classes="control-value", id="key-tracking-display")
                     yield self.key_tracking_display
                     yield Label(self._section_bottom(), classes="section-bottom")
@@ -725,9 +731,9 @@ class SynthMode(Widget):
                     yield Label(self._row_label("Release", ""), classes="control-label", id="lbl-amp-eg-3")
                     self.release_display = Label(self._fmt_time(self.release), classes="control-value", id="release-display")
                     yield self.release_display
-                    yield Label(self._row_label("Route", ""), classes="control-label", id="lbl-amp-eg-4")
-                    self.filter_routing_display = Label(self._fmt_filter_routing(), classes="control-value", id="filter-routing-display")
-                    yield self.filter_routing_display
+                    yield Label(self._row_label("Vel", ""), classes="control-label", id="lbl-amp-eg-4")
+                    self.vel_depth_display = Label(self._fmt_vel_depth(), classes="control-value", id="vel-depth-display")
+                    yield self.vel_depth_display
                     yield Label(self._section_bottom(), classes="section-bottom")
 
                 # ── VIDEO PLACEHOLDER ────────────────────────────────────
@@ -1488,6 +1494,7 @@ class SynthMode(Widget):
             elif name == "HPF Pk":  self._do_adjust_hpf_resonance(direction)
             elif name == "LPF Cut": self._do_adjust_cutoff(direction)
             elif name == "LPF Pk":  self._do_adjust_resonance(direction)
+            elif name == "Route":   self._do_cycle_filter_routing(direction)
             elif name == "KTrack":  self._do_step_key_tracking(direction)
         # AMP EG
         elif sec == "amp_eg":
@@ -1495,7 +1502,7 @@ class SynthMode(Widget):
             elif name == "Decay":     self._do_adjust_decay(direction)
             elif name == "Sustain":   self._do_adjust_sustain(direction)
             elif name == "Release":   self._do_adjust_release(direction)
-            elif name == "Route":     self._do_cycle_filter_routing(direction)
+            elif name == "Vel":       self._do_adjust_vel_depth(direction)
         # FILTER EG
         elif sec == "filter_eg":
             if name == "Atk":    self._do_adjust_feg_attack(direction)
@@ -1710,6 +1717,18 @@ class SynthMode(Widget):
         self.synth_engine.update_parameters(filter_routing=self.filter_routing)
         if self.filter_routing_display:
             self.filter_routing_display.update(self._fmt_filter_routing())
+        self._mark_dirty()
+        self._autosave_state()
+
+    def _do_adjust_vel_depth(self, direction: str = "up"):
+        step = 0.05
+        if direction == "up":
+            self.vel_depth = min(1.0, round(self.vel_depth + step, 2))
+        else:
+            self.vel_depth = max(0.0, round(self.vel_depth - step, 2))
+        self.synth_engine.update_parameters(vel_depth=self.vel_depth)
+        if self.vel_depth_display:
+            self.vel_depth_display.update(self._fmt_vel_depth())
         self._mark_dirty()
         self._autosave_state()
 
@@ -2071,6 +2090,7 @@ class SynthMode(Widget):
         # Snap key_tracking to nearest discrete step when loading from old presets
         steps = self._KEY_TRACKING_STEPS
         self.key_tracking = steps[min(range(len(steps)), key=lambda i: abs(steps[i] - self.key_tracking))]
+        self.vel_depth   = max(0.0, min(1.0, params.get("vel_depth", self.vel_depth)))
         # Clamp EG times to safe minimums — legacy presets may have sub-threshold values
         self.attack      = max(0.008, params.get("attack",      self.attack))
         self.decay       = max(0.005, params.get("decay",       self.decay))
@@ -2134,6 +2154,7 @@ class SynthMode(Widget):
             decay=self.decay,
             sustain=self.sustain,
             release=self.release,
+            vel_depth=self.vel_depth,
             feg_attack=self.feg_attack,
             feg_decay=self.feg_decay,
             feg_sustain=self.feg_sustain,
@@ -2185,6 +2206,7 @@ class SynthMode(Widget):
             "decay":           self.decay,
             "sustain":         self.sustain,
             "release":         self.release,
+            "vel_depth":       self.vel_depth,
             "feg_attack":      self.feg_attack,
             "feg_decay":       self.feg_decay,
             "feg_sustain":     self.feg_sustain,
@@ -2296,6 +2318,7 @@ class SynthMode(Widget):
         "decay":          0.2,
         "sustain":        1.0,
         "release":        0.01,
+        "vel_depth":      1.0,
         "feg_attack":     0.01,
         "feg_decay":      0.3,
         "feg_sustain":    0.0,
@@ -2382,6 +2405,9 @@ class SynthMode(Widget):
             elif name == "LPF Pk":
                 self.resonance = ini["resonance"]
                 _push_and_refresh("resonance", "resonance_display", self._fmt_resonance)
+            elif name == "Route":
+                self.filter_routing = ini["filter_routing"]
+                _push_and_refresh("filter_routing", "filter_routing_display", self._fmt_filter_routing)
             elif name == "KTrack":
                 self.key_tracking = ini["key_tracking"]
                 steps = self._KEY_TRACKING_STEPS
@@ -2406,9 +2432,11 @@ class SynthMode(Widget):
             elif name == "Release":
                 self.release = ini["release"]
                 _push_and_refresh("release", "release_display", lambda: self._fmt_time(self.release))
-            elif name == "Route":
-                self.filter_routing = ini["filter_routing"]
-                _push_and_refresh("filter_routing", "filter_routing_display", self._fmt_filter_routing)
+            elif name == "Vel":
+                self.vel_depth = ini.get("vel_depth", 1.0)
+                self.synth_engine.update_parameters(vel_depth=self.vel_depth)
+                if self.vel_depth_display: self.vel_depth_display.update(self._fmt_vel_depth())
+                self._mark_dirty(); self._autosave_state()
 
         elif sec == "filter_eg":
             if name == "Atk":
@@ -3127,8 +3155,10 @@ class SynthMode(Widget):
                     weights=[50, 35, 15])[0], 2)
                 self.synth_engine.update_parameters(resonance=self.resonance)
                 if self.resonance_display: self.resonance_display.update(self._fmt_resonance())
+            elif name == "Route":
+                pass  # Filter routing excluded from randomization — user sets this manually
             elif name == "KTrack":
-                pass  # Key Tracking excluded from randomization — user sets this manually
+                pass  # Key tracking excluded from randomization — user sets this manually
         # ── Amp EG ────────────────────────────────────────────────
         elif sec == "amp_eg":
             if name == "Attack":
@@ -3149,8 +3179,8 @@ class SynthMode(Widget):
                 self.release = round(10 ** random.uniform(math.log10(0.008), math.log10(3.0)), 4)
                 self.synth_engine.update_parameters(release=self.release)
                 if self.release_display: self.release_display.update(self._fmt_time(self.release))
-            elif name == "Route":
-                pass  # Filter routing excluded from randomization — user sets this manually
+            elif name == "Vel":
+                pass  # Velocity depth excluded from randomization — user sets this manually
         # ── Filter EG ─────────────────────────────────────────────
         elif sec == "filter_eg":
             label = self._SECTION_PARAMS["filter_eg"][self._focus_param]
@@ -3291,13 +3321,14 @@ class SynthMode(Widget):
         u("hpf_resonance",  self.hpf_resonance_display,    self._fmt_hpf_resonance())
         u("cutoff",         self.cutoff_display,           self._fmt_cutoff())
         u("resonance",      self.resonance_display,        self._fmt_resonance())
-        u("key_tracking",   self.key_tracking_display,     self._fmt_key_tracking())
         u("filter_drive",   self.filter_drive_display,     self._fmt_filter_drive())
         u("filter_routing", self.filter_routing_display,   self._fmt_filter_routing())
+        u("key_tracking",   self.key_tracking_display,     self._fmt_key_tracking())
         u("attack",         self.attack_display,           self._fmt_time(self.attack))
         u("decay",          self.decay_display,            self._fmt_time(self.decay))
         u("sustain",        self.sustain_display,          self._fmt_knob(self.sustain, 0.0, 1.0, f"{int(self.sustain * 100)}%"))
         u("release",        self.release_display,          self._fmt_time(self.release))
+        u("vel_depth",      self.vel_depth_display,        self._fmt_vel_depth())
         # Filter EG
         u("feg_attack",     self.feg_attack_display,       self._fmt_time(self.feg_attack))
         u("feg_decay",      self.feg_decay_display,        self._fmt_time(self.feg_decay))
@@ -3478,6 +3509,10 @@ class SynthMode(Widget):
         lp    = pad // 2
         rp    = pad - lp
         return f"[#a06000]│[/]{' ' * lp}{line}{' ' * rp}[#a06000]│[/]"
+
+    def _fmt_vel_depth(self) -> str:
+        """Knob display for velocity depth (0%=flat, 100%=full dynamics)."""
+        return self._fmt_knob(self.vel_depth, 0.0, 1.0, f"{int(self.vel_depth * 100)}%")
 
     # ── Waveform selector and shape display ───────────────────────
 

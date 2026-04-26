@@ -557,23 +557,42 @@ class ConfigMode(Screen):
     # ── Buffer Size ───────────────────────────────────────────────────────────
 
     def refresh_buffer_list(self):
-        """Populate the buffer size list with standard options and latency hints.
-
-        Note: ASIO4ALL may not support all buffer sizes. If the actual buffer size
-        differs from your selection, check the startup console output for diagnostics
-        (it will print the negotiated blocksize). Consider using a native ASIO driver
-        for full buffer size control, or adjust to a size your WDM driver supports.
-        """
+        """Populate the buffer size list with standard options and latency hints."""
         list_view = self.query_one("#buffer-list", ListView)
         list_view.clear()
 
         # ARM uses 44100 Hz (bcm2835 native); desktop uses 48000 Hz.
         import platform as _plat
         sample_rate = 44100 if _plat.machine() in ("armv7l", "aarch64") else 48000
+
+        # Check if the running engine is using a different size (ASIO/WASAPI negotiation).
+        # Only flag a mismatch if the engine is fully running (is_available) so we don't
+        # show a stale size from a previous engine instance during a buffer-size restart.
+        actual_driver_size = None
+        backend = self.config_manager.get_audio_backend() or ""
+        _driver_owned = any(b in backend for b in ('ASIO', 'WASAPI', 'ALSA'))
+        if _driver_owned:
+            synth_engine = self.app.synth_engine if hasattr(self.app, 'synth_engine') else None
+            if (synth_engine and hasattr(synth_engine, 'buffer_size')
+                    and hasattr(synth_engine, 'is_available')
+                    and synth_engine.is_available()):
+                candidate = synth_engine.buffer_size
+                if candidate != self.pending_buffer_size:
+                    actual_driver_size = candidate
+
         for size in self.BUFFER_SIZES:
             latency_ms = (size / sample_rate) * 1000
             marker = "☑" if size == self.pending_buffer_size else "☐"
-            list_view.append(ListItem(Label(f"{marker}  {size:<6}  ({latency_ms:.1f} ms)")))
+            entry = f"{marker}  {size:<6}  ({latency_ms:.1f} ms)"
+            list_view.append(ListItem(Label(entry)))
+
+        # If the driver negotiated a different size, append an info row at the bottom.
+        # Kept after the size entries so BUFFER_SIZES indices stay aligned with list indices.
+        if actual_driver_size is not None:
+            actual_ms = (actual_driver_size / sample_rate) * 1000
+            list_view.append(ListItem(Label(
+                f"  [!] Driver using: {actual_driver_size} smp  ({actual_ms:.1f} ms)  [{backend}]"
+            )))
 
         self._update_buffer_label()
 
@@ -615,7 +634,19 @@ class ConfigMode(Screen):
                 backend = self.config_manager.get_audio_backend() or ""
             _driver_owned = any(b in backend for b in ('ASIO', 'WASAPI', 'ALSA'))
             if _driver_owned:
-                label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [driver auto-matched on {backend}]")
+                # Try to read the actual driver-negotiated size from the engine proxy.
+                actual_size = size
+                synth_engine = self.app.synth_engine if hasattr(self.app, 'synth_engine') else None
+                if synth_engine and hasattr(synth_engine, 'buffer_size'):
+                    actual_size = synth_engine.buffer_size
+                actual_ms = (actual_size / sample_rate) * 1000
+                if actual_size != size:
+                    label.update(
+                        f"Selected: {size} smp  |  Driver using: {actual_size} smp  ({actual_ms:.1f} ms)"
+                        f"  [{backend}]"
+                    )
+                else:
+                    label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)  [driver auto-matched on {backend}]")
             else:
                 label.update(f"Selected: {size} samples  ({latency_ms:.1f} ms)")
 

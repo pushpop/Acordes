@@ -2957,18 +2957,17 @@ class SynthEngine:
                 # Filter state preservation: keep all filter and oversample states
                 # warm across the steal.  Zeroing states causes a cold-start impulse:
                 # the oscillator (at steal_start_level amplitude) suddenly feeds a
-                # zeroed Moog ladder, producing a 2-6 sample cascade audible even
-                # through the 480-sample crossfade.  Zeroing _oversample_history adds
-                # a second impulse in the downsampled oscillator output feeding the
-                # ladder.  The old-frequency energy in warm states decays in under 1ms
-                # at typical cutoff values (tau ~= 1/(2*pi*fc)), fully covered by the
-                # 480-sample crossfade window.  ARM scipy zi objects are still reset
-                # because they encode the filter coefficient and must be rebuilt when
-                # the cutoff target changes at the new pitch.
-                old_v._arm_lpf_zi_r1  = None
-                old_v._arm_lpf_zi_r2  = None
-                old_v._arm_hpf_zi_r1  = None
-                old_v._arm_hpf_zi_r2  = None
+                # zeroed filter, producing an audible click on every note change.
+                #
+                # Scipy sosfilt zi arrays ARE the filter delay-line state and must be
+                # preserved.  The SOS coefficient matrix is recomputed each buffer from
+                # the smoothed cutoff target, so keeping zi with the old-pitch values
+                # causes at most a 1-2 sample mismatch that decays instantly — far
+                # quieter than the cold-start discontinuity from zeroing zi.
+                #
+                # _arm_dcblock_zi is safely reconstructed from dc_blocker_x/y (see
+                # _apply_dc_blocker), so resetting it to None is fine and avoids
+                # carrying a stale scipy-encoded state across cutoff changes.
                 old_v._arm_dcblock_zi = None
                 # smooth_fl_lpf / smooth_fl_hpf intentionally NOT snapped to the
                 # new note's key-tracking target.  Snapping the coefficient while
@@ -3095,14 +3094,14 @@ class SynthEngine:
                     # velocity_target NOT updated on legato steal — same reasoning
                     # as MONO: avoids the 64ms velocity-smoothing amplitude ramp.
                     # Filter state preservation: same reasoning as MONO steal path above.
-                    # Keep all filter and oversample states warm; reset only ARM scipy
-                    # zi objects which encode the filter coefficient for the new pitch.
+                    # Keep all filter and oversample states warm; zi arrays are the
+                    # filter delay-line state and must be preserved for click-free
+                    # transitions.  The SOS coefficients are recomputed each buffer so
+                    # keeping old zi with new coefficients causes at most a 1-2 sample
+                    # mismatch — far quieter than a cold-start click from zeroing zi.
                     # smooth_fl_lpf / smooth_fl_hpf also NOT snapped — same reasoning
                     # as MONO: let per-buffer smoother glide coefficient to new target.
-                    v._arm_lpf_zi_r1  = None
-                    v._arm_lpf_zi_r2  = None
-                    v._arm_hpf_zi_r1  = None
-                    v._arm_hpf_zi_r2  = None
+                    # _arm_dcblock_zi is reconstructed from dc_blocker_x/y — safe to reset.
                     v._arm_dcblock_zi = None
                     v.cap_ws_state  = 0.0
                     v.osc_peak_pos  = 0.0
@@ -3266,42 +3265,60 @@ class SynthEngine:
                 # Tier 3: no ghost available — fall through to brutal steal below.
 
             # Trigger the new note in the real voice slot.
-            # For Tier 2 (ghost promoted) and Tier 1 (silent), clear filter state so
-            # the new note starts clean: the ghost carries the old filtered output forward,
-            # making the zero-start imperceptible.
-            # For Tier 3 brutal steals (no ghost, non-silent), PRESERVE filter state.
-            # Zeroing filter memory at a non-trivial amplitude jumps the output from
-            # filtered(old_state) → filtered(zero_state) in one sample — that step IS
-            # the click. Keeping old state lets the filter re-tune to the new pitch
-            # over a few ms without an abrupt amplitude discontinuity.
+            # Filter state handling: preserve warm filter and DC-blocker state across
+            # the steal for all audible voices (Tier 2 ghost and Tier 3 brutal). The
+            # filter re-tunes from the old pitch to the new pitch over a few ms —
+            # smooth and inaudible. Zero-state cold-start (old Tier 2 behavior) produced
+            # a resonance-ringing transient at steal_start_level amplitude = click.
+            # Only Tier 1 (near-silent) gets a cold start, where it is inaudible.
             _is_brutal_steal = not steal_is_safe and not _got_ghost
-            if not _is_brutal_steal:
-                best_v.filter_state_ladder1 = [0.0, 0.0, 0.0, 0.0]
-                best_v.filter_state_ladder2 = [0.0, 0.0, 0.0, 0.0]
-                best_v.filter_state_svf1_lp = best_v.filter_state_svf1_bp = 0.0
-                best_v.filter_state_svf2_lp = best_v.filter_state_svf2_bp = 0.0
-                best_v.dc_blocker_x = best_v.dc_blocker_y = 0.0
-            else:
-                # Brutal steal: save state before trigger() zeroes it, then restore.
+            # Save filter and DC blocker state for all audible steals (Tier 2 and
+            # Tier 3). trigger() always zeros these; restoring them prevents the
+            # cold-start settling transient (resonance ringing from zero state) from
+            # playing at steal_start_level amplitude — which was the remaining click
+            # after the envelope-continuity fix. For Tier 1 (near-silent), zero-start
+            # is inaudible so the save is skipped.
+            if not steal_is_safe:
                 _bv_sl1 = list(best_v.filter_state_ladder1)
                 _bv_sl2 = list(best_v.filter_state_ladder2)
                 _bv_svf1lp = best_v.filter_state_svf1_lp
                 _bv_svf1bp = best_v.filter_state_svf1_bp
                 _bv_svf2lp = best_v.filter_state_svf2_lp
                 _bv_svf2bp = best_v.filter_state_svf2_bp
+                _bv_dcx = best_v.dc_blocker_x
+                _bv_dcy = best_v.dc_blocker_y
             best_v.trigger(note, freq, vel)
-            if _is_brutal_steal:
+            if not steal_is_safe:
                 best_v.filter_state_ladder1 = _bv_sl1
                 best_v.filter_state_ladder2 = _bv_sl2
                 best_v.filter_state_svf1_lp = _bv_svf1lp
                 best_v.filter_state_svf1_bp = _bv_svf1bp
                 best_v.filter_state_svf2_lp = _bv_svf2lp
                 best_v.filter_state_svf2_bp = _bv_svf2bp
+                best_v.dc_blocker_x = _bv_dcx
+                best_v.dc_blocker_y = _bv_dcy
+            # Amplitude continuity fix: back-calculate envelope_time so the new attack
+            # starts from steal_start_level rather than near-zero.  The 8ms CROSS
+            # crossfade blends steal_start_level → new_attack[t=8ms]; with a slow attack
+            # (e.g. 170ms) new_attack[8ms] is only ~5% of peak, so the envelope drops
+            # sharply from steal_start_level → 5% in 8ms — audible as the same class of
+            # click as MONO/UNISON release→steal.  By positioning envelope_time at the
+            # attack phase point that produces steal_start_level amplitude, the transition
+            # is a continuous slope with no step.  Same technique as MONO/UNISON Case A.
+            if best_v.steal_start_level > 0.001:
+                _VEL_C, _VEL_F = 1.3, 0.15
+                _v_scaled = _VEL_F + (1.0 - _VEL_F) * (best_v.velocity ** _VEL_C)
+                _v_int = max(0.001, 1.0 - self.vel_depth_current * (1.0 - _v_scaled))
+                _atk = max(0.001, self.attack_current)
+                _lvl = best_v.steal_start_level
+                _t_eq = _atk * _lvl / _v_int
+                best_v.envelope_time = min(float(_t_eq), _atk * 0.9999)
+                best_v.steal_start_level = 0.0  # CROSS crossfade replaced by envelope continuity
             best_v.onset_ms = onset_ms_for_note
             # Stolen voice was already past its onset period — skip the onset_ramp.
-            # onset_ramp + steal_start_level both fading in simultaneously creates a
-            # double-damped attack (audible stutter gap). Only one mechanism should
-            # handle the transition; steal_start_level (8ms CROSS crossfade) does it.
+            # With steal_start_level cleared above, onset_ramp is the only fade-in
+            # mechanism; setting onset_samples past the buffer skips it entirely so the
+            # back-calculated envelope_time is the sole amplitude source.
             best_v.onset_samples = int(self.sample_rate * onset_ms_for_note / 1000.0) + 1
 
     def _release_note(self, note: int, velocity: float = 0.5):
