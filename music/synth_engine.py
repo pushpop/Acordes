@@ -561,7 +561,7 @@ class SynthEngine:
         # the bottleneck (160ms callbacks). With the fast path the Pi 4 has
         # enough headroom to run 6 voices comfortably at 2048-sample buffers.
         import platform as _plat
-        self.num_voices = 16 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 32)
+        self.num_voices = 16 if _plat.machine() == "armv7l" else (6 if self._IS_ARM else 64)
         # Always use float32 for the sounddevice stream. PortAudio's ALSA backend
         # negotiates format with the driver internally and handles float32->S16_LE
         # conversion via ALSA's plug layer. Forcing int16 at the PortAudio level
