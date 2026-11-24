@@ -801,3 +801,60 @@ def test_master_dynamics_no_buffer_boundary_step():
     boundaries = np.arange(BUFFER_SIZE - 2, len(d2), BUFFER_SIZE)
     worst = float(d2[boundaries].max())
     assert worst < 0.004, f"final output step at buffer boundary: d2={worst:.5f}"
+
+
+# ── Test: releasing an older note does not retrigger the sounding note ───
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="legato release fix is desktop only")
+@pytest.mark.parametrize("voice_type", ["mono", "unison"])
+def test_releasing_older_note_does_not_retrigger(voice_type):
+    eng = make_engine(waveform="pure_sine", voice_type=voice_type, attack=0.15, decay=0.5,
+                      sustain=0.6, release=0.3, hpf_cutoff=20.0)
+    run_buffers(eng, 100)
+    calls = []
+    original = eng._trigger_note
+    eng._trigger_note = lambda n, v: (calls.append(n), original(n, v))[1]
+    eng.note_on(45, velocity=100)
+    run_buffers(eng, 20)
+    eng.note_on(52, velocity=100)
+    run_buffers(eng, 20)
+    calls.clear()
+    eng.note_off(45, velocity=0)          # older note released while 52 is still held
+    run_buffers(eng, 10)
+    assert calls == [], f"sounding note was retriggered: {calls}"
+    # Releasing the sounding note still resumes the older held note.
+    eng.note_on(45, velocity=100)
+    run_buffers(eng, 10)
+    calls.clear()
+    eng.note_off(45, velocity=0)
+    eng.note_off(52, velocity=0)
+    run_buffers(eng, 10)
+    assert calls == [], "nothing is held, so nothing should resume"
+    eng.note_on(45, velocity=100)
+    eng.note_on(52, velocity=100)
+    run_buffers(eng, 10)
+    calls.clear()
+    eng.note_off(52, velocity=0)          # sounding note released, 45 still held
+    run_buffers(eng, 10)
+    assert calls == [45], f"expected resume of the held note, got {calls}"
+
+
+# ── Test: poly tails are counted in the master gain ──────────────────────
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="poly tail gain is desktop only")
+def test_poly_long_tails_do_not_overdrive_master():
+    """Many fast notes with long releases must not distort the mixed output."""
+    eng = make_engine(waveform="pure_sine", voice_type="poly", release=3.0, attack=0.02,
+                      hpf_cutoff=20.0)
+    run_buffers(eng, 100)
+    notes = [40, 43, 45, 47, 50, 52, 55, 57, 59, 62, 40, 43, 45, 47, 50, 52]
+    chunks = []
+    for n in notes:
+        eng.note_on(n, velocity=100)
+        chunks.append(run_buffers(eng, 6))
+        eng.note_off(n, velocity=0)
+        chunks.append(run_buffers(eng, 3))
+    chunks.append(run_buffers(eng, 20))
+    x = np.concatenate(chunks)[:, 0]
+    worst = float(np.abs(np.diff(x, 2)).max())
+    assert worst < 0.008, f"poly tail pile-up distorts the master: d2={worst:.5f}"

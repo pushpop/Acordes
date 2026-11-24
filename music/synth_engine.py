@@ -3420,9 +3420,14 @@ class SynthEngine:
             # held_notes is already updated (note removed) by the time this is called from the queue.
             remaining = [n for n in self._held_notes_ordered if n in self.held_notes]
             if remaining:
-                resume_note = remaining[-1]
-                resume_vel = self._held_notes_vel.get(resume_note, velocity)
-                self._trigger_note(resume_note, resume_vel)
+                # Only resume when the SOUNDING note was released. Releasing an older
+                # held note must not retrigger the current one (that restarts its
+                # envelope and filter sweep, heard as a dip while playing fast).
+                # ARM keeps the original behaviour.
+                if self._IS_ARM or note == self.voices[self.mono_voice_index].midi_note:
+                    resume_note = remaining[-1]
+                    resume_vel = self._held_notes_vel.get(resume_note, velocity)
+                    self._trigger_note(resume_note, resume_vel)
             else:
                 mono_v = self.voices[self.mono_voice_index]
                 if mono_v.note_active:
@@ -3434,9 +3439,11 @@ class SynthEngine:
             # Last-note priority for unison: same logic but all 8 detuned voices.
             remaining = [n for n in self._held_notes_ordered if n in self.held_notes]
             if remaining:
-                resume_note = remaining[-1]
-                resume_vel = self._held_notes_vel.get(resume_note, velocity)
-                self._trigger_note(resume_note, resume_vel)
+                # Same rule as MONO: only the sounding note's release resumes an older one.
+                if self._IS_ARM or note == self.voices[0].midi_note:
+                    resume_note = remaining[-1]
+                    resume_vel = self._held_notes_vel.get(resume_note, velocity)
+                    self._trigger_note(resume_note, resume_vel)
             else:
                 for v in self.voices:
                     if v.note_active:
@@ -3741,6 +3748,14 @@ class SynthEngine:
             # don't need additional gain compensation.
             playing_count = sum(1 for v in self.voices if v.note_active)
             gain_count = 1 if self.voice_type in ("mono", "unison") else max(playing_count, 1)
+            if self.voice_type == "poly" and not self._IS_ARM:
+                # Releasing tails still add to the mix. Count each by its energy (level
+                # squared) so many fast notes with long releases cannot pile up unnormalised
+                # and overdrive the master stage, while a single fading tail barely moves
+                # the gain at the next note onset.
+                gain_count = max(1.0, playing_count + sum(
+                    float(v.last_envelope_level) ** 2 for v in self.voices
+                    if v.is_releasing and not v.note_active))
             self.master_gain_target = 1.0 / np.sqrt(gain_count) if gain_count > 1 else 1.0
             # Snapshot gain AFTER the target is known but BEFORE smoothing,
             # so gain_ramp interpolates from the previous buffer's settled value

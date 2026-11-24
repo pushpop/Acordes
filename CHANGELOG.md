@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
 
+**Live-play dips with fast notes** (desktop only):
+- MONO/UNISON: releasing an older held note while a newer one sounded retriggered the sounding note, restarting its envelope and filter sweep (a dip after 3 or 4 fast overlapping presses). Only the release of the sounding note now resumes an older held note.
+- POLY: the master gain counted only held voices, so many long release tails (10 to 15 fast notes) piled up unnormalised and overdrove the master stage. Releasing tails now count by energy.
+
 **Buffer-boundary dips in the waveform** (desktop only) - small steps at every audio buffer boundary, visible as notches at sine peaks, most audible on pure-sine bass in MONO:
 - Root cause 1: the fast filter kept scipy's transposed direct form II state while the cutoff moved every buffer (filter-EG sweeps), so each buffer started with a step. The state is now rebuilt from the last two input/output samples of each section (`_sosfilt_tv`).
 - Root cause 2: the per-voice output limiter, the master tube compressor and the brickwall limiter each applied one constant gain per buffer. Their gains are now interpolated across the buffer.
