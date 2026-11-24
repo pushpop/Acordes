@@ -71,3 +71,9 @@ analyze_*.py
 !tests/test_*.py
 # Per-machine visualizer window position (rewritten by the app on every move)
 visualizer/window_position.json
+
+# Local reports, reference PDFs, audio renders and analysis output
+battery-report.html
+docs/*.pdf
+tools/*.wav
+tools/artifact_analysis/
