@@ -3076,7 +3076,6 @@ class SynthMode(Widget):
             weights=[25, 35, 40]
         )[0], 2)
         self.release = round(10 ** random.uniform(math.log10(0.008), math.log10(3.0)), 4)
-        self.intensity = round(random.uniform(0.40, 1.0), 2)
 
         # Randomize Filter EG amount only; timing params stay at defaults for musicality
         self.feg_amount = round(random.uniform(0.5, 1.0), 2)

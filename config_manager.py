@@ -142,7 +142,7 @@ class ConfigManager:
     # ── Audio output device ───────────────────────────────────────
 
     def get_audio_device_index(self) -> Optional[int]:
-        """Get the saved PyAudio output device index (None = not yet chosen)."""
+        """Get the saved sounddevice output device index (None = not yet chosen)."""
         return self.config.get("audio_device_index")
 
     def set_audio_device(self, index: Optional[int], name: Optional[str]):

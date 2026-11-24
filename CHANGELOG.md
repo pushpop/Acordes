@@ -5,6 +5,36 @@ All notable changes to the Acordes MIDI Piano TUI Application will be documented
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.6] - 2026-11-24 - Click-Free Legato, ZDF Filter & 64 Voices
+
+### Fixed
+
+**MONO/UNISON legato click** - the persistent click on legato note changes is gone:
+- Root cause: the legato path reset `_arm_lpf_zi_r1/r2` and `_arm_hpf_zi_r1/r2` to `None`. These scipy `sosfilt` `zi` arrays are the filter delay-line state (not coefficient storage), so zeroing them cold-started the filter on every note change.
+- Fix: the four resets were removed from both the MONO and UNISON legato paths. Boundary jump dropped from about 0.37 to 0.0002.
+
+**Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
+
+**Stereo spread above 32 voices** - the pan table now has 64 entries (voices 32-63 previously all sat in the centre).
+
+### Changed
+
+- **ZDF TPT Moog filter** replaces the Euler ladder (used by `filter_quality="analog"`).
+- **64 voices** on desktop (was 32); ghost-voice pool scales with it.
+- **Default preset / piano mode** retuned toward an acoustic piano: triangle wave, instant attack, 0.7 s decay, 0.35 sustain, 0.30 s release, filter EG brightness sweep, strong key tracking, high-passed at 80 Hz, no noise.
+- **Noise** is now coloured by a pitch-tracking 1-pole lowpass (cutoff 3x note frequency, 400-4000 Hz) and gain raised to 0.35 to compensate. Desktop only; ARM keeps the previous noise path.
+- Removed the dead `intensity` parameter from `DEFAULT_PARAMS` and the randomizer (old presets that carry it are unaffected).
+
+### Added
+
+- `tests/test_voice_regression.py` (39 tests: voice stealing, ghost voices, MONO/UNISON legato click ratio) and `tests/bench_voice_count.py`.
+
+### Documentation
+
+- Corrected voice counts, factory preset count (27 in 9 categories), test status, sounddevice wording, UI section list, filter description and global key bindings (0 and 6).
+
+---
+
 ## [1.12.5] - 2026-04-05 - MONO True Legato Note Transitions
 
 ### Fixed

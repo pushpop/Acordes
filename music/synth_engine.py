@@ -90,8 +90,9 @@ class Voice:
         # outward in symmetric pairs so the full-polyphony image stays balanced.
         # pan=0.5 → ang=π/4 → cos=sin=0.707 → equal power L and R (correct centre).
         # Layout: 0=C, 1=C, 2=slight-L, 3=slight-R, 4=mid-L, 5=mid-R, 6=wide-L, 7=wide-R
-        # 32 entries: centre pair, then symmetric L/R pairs spreading outward.
-        # Voices beyond 32 fall back to centre (0.5).
+        # 64 entries: centre pair, then symmetric L/R pairs spreading outward;
+        # voices 16-63 interleave between the first 16 so the image stays even.
+        # Voices beyond 64 fall back to centre (0.5).
         _pan_table = [
             0.50, 0.50,  # 0-1: centre
             0.44, 0.56,  # 2-3: slight spread
@@ -109,6 +110,22 @@ class Voice:
             0.20, 0.80,  # 26-27
             0.16, 0.84,  # 28-29
             0.13, 0.87,  # 30-31: widest spread
+            0.49, 0.51,  # 32-33: interleaved fill (second pass)
+            0.46, 0.54,  # 34-35
+            0.43, 0.57,  # 36-37
+            0.40, 0.60,  # 38-39
+            0.37, 0.63,  # 40-41
+            0.34, 0.66,  # 42-43
+            0.31, 0.69,  # 44-45
+            0.28, 0.72,  # 46-47
+            0.26, 0.74,  # 48-49
+            0.23, 0.77,  # 50-51
+            0.21, 0.79,  # 52-53
+            0.19, 0.81,  # 54-55
+            0.17, 0.83,  # 56-57
+            0.14, 0.86,  # 58-59
+            0.12, 0.88,  # 60-61
+            0.11, 0.89,  # 62-63
         ]
         self.pan = _pan_table[voice_index] if voice_index < len(_pan_table) else 0.5
         # Dedicated phase accumulator for the sine-reinforcement sub-oscillator
@@ -220,6 +237,11 @@ class Voice:
         self._arm_hpf_zi_r1: Optional[np.ndarray] = None
         self._arm_hpf_zi_r2: Optional[np.ndarray] = None
         self._arm_dcblock_zi: Optional[np.ndarray] = None
+        # Noise colour filter: 1-pole LPF applied to the pink noise source before
+        # mixing so the noise tracks the voice pitch (warm at low notes, brighter at
+        # high notes).  None = uninitialised; reset on every new trigger so each note
+        # starts with a quiet filter state instead of carrying energy from a previous note.
+        self._noise_lp_zi: Optional[np.ndarray] = None
 
         # ── Pre-allocated hot-path working buffers ────────────────────────────
         # Each voice carries its own set of reusable numpy arrays so the audio
@@ -310,6 +332,7 @@ class Voice:
             self._arm_hpf_zi_r1 = None
             self._arm_hpf_zi_r2 = None
             self._arm_dcblock_zi = None
+            self._noise_lp_zi = None
             # Reset capacitor simulation states on every new trigger.
             self.cap_env      = 0.0
             self.sustain_cap  = 1.0
@@ -375,6 +398,7 @@ class Voice:
         self._arm_hpf_zi_r1 = None
         self._arm_hpf_zi_r2 = None
         self._arm_dcblock_zi = None
+        self._noise_lp_zi = None
         self.release_time_cap = 0.0
         self.is_ghost = False
         self.cap_env      = 0.0
@@ -3391,7 +3415,7 @@ class SynthEngine:
                 self.master_volume = self.master_volume * 0.9 + self.master_volume_target * 0.1
             else: self.master_volume = self.master_volume_target
 
-            # --- Per-buffer parameter smoothing: cutoff, resonance, intensity ---
+            # --- Per-buffer parameter smoothing: cutoff, resonance, and related params ---
             # Eliminates clicks from hard parameter step-changes mid-playback.
             if abs(self.cutoff_current - self.cutoff_target) > 0.5:
                 self.cutoff_current = (self.cutoff_current * self.cutoff_smoothing
@@ -3859,12 +3883,38 @@ class SynthEngine:
                     # before the VCF so the filter shapes the noise alongside the tone.
                     # Real analog synths route the noise source into the VCF; this gives
                     # the noise breath and musicality instead of harsh full-bandwidth hiss.
-                    # Pink noise (1/f spectrum) has rolled-off highs; much warmer than white.
-                    # Square-root curve on the mix keeps low values subtle (analog noise floor
-                    # character) while still allowing aggressive sweeps at higher settings.
+                    # A pitch-tracking 1-pole LPF (cutoff = 3 × voice frequency, clamped
+                    # 400–4000 Hz) colours the pink noise before mixing so the noise
+                    # character matches the note: warm/dark on bass, airy on treble.
+                    # This eliminates the wideband "tape hiss" quality at all levels.
                     if self.noise_level_current > 0:
-                        noise_gain = math.sqrt(self.noise_level_current) * 0.25
+                        # The pitch-tracking colour filter is desktop only; ARM keeps the
+                        # original plain pink noise mix (gain 0.25) unchanged.
+                        noise_gain = math.sqrt(self.noise_level_current) * (0.25 if self._IS_ARM else 0.35)
                         pink = self._generate_pink_noise(frame_count)
+                        # Pitch-tracking colour filter on noise source.
+                        lp_f = min(max(3.0 * f1, 400.0), 4000.0)
+                        lp_alpha = np.float32(lp_f / (lp_f + self.sample_rate / (2.0 * math.pi)))
+                        if self._IS_ARM:
+                            pass
+                        elif self._scipy_lfilter is not None:
+                            if v._noise_lp_zi is None:
+                                v._noise_lp_zi = np.zeros(1)
+                            pink, v._noise_lp_zi = self._scipy_lfilter(
+                                [lp_alpha], [1.0, -(1.0 - lp_alpha)],
+                                pink.astype(np.float64), zi=v._noise_lp_zi)
+                            pink = pink.astype(np.float32)
+                        else:
+                            # Scalar fallback (no scipy): run the 1-pole IIR in Python.
+                            state = float(v._noise_lp_zi[0]) if v._noise_lp_zi is not None else 0.0
+                            a = float(lp_alpha)
+                            b = 1.0 - a
+                            out = np.empty(frame_count, dtype=np.float32)
+                            for _i in range(frame_count):
+                                state = a * float(pink[_i]) + b * state
+                                out[_i] = state
+                            v._noise_lp_zi = np.array([state])
+                            pink = out
                         s1 = s1 + pink * noise_gain
 
                     # VCF LFO: blend toward the current value from the previous buffer's

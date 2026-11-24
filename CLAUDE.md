@@ -18,14 +18,14 @@ The app uses **`uv`** to manage Python versions and dependencies across all plat
 uv run python main.py
 ```
 
-**Python version:** `uv python pin` ensures Python 3.12 (falls back to 3.11 if unavailable). PyAudio and python-rtmidi have no pre-built wheels for 3.13+, so `uv` automatically selects the compatible version and installs it if needed.
+**Python version:** `uv python pin` ensures Python 3.12 (falls back to 3.11 if unavailable). python-rtmidi has no pre-built wheels for 3.13+, so `uv` automatically selects the compatible version and installs it if needed.
 
 **Project Configuration:**
 - `pyproject.toml`;Modern Python project setup (PEP 517), defines metadata and dependencies
 - `requirements.txt`;Kept for reference; `uv sync` uses `pyproject.toml`
 - `.python-version`;Auto-created by `uv python pin` (do not edit manually)
 
-There are no tests, no linting config, and no CI pipeline.
+Tests live in `tests/` (run `uv run python -m pytest tests -q`): `test_voice_regression.py` covers the synth engine (voice stealing, ghost voices, MONO/UNISON legato click ratio) and `tests/arm_ui/` covers the ARM UI. `tests/bench_voice_count.py` is a voice-count benchmark. There is no linting config and no CI pipeline.
 
 ## Architecture
 
@@ -42,7 +42,7 @@ Each mode is a Textual `Widget` subclass. Modes use `on_mount()` / `on_unmount()
 **Widget lifecycle:** `compose()` yields child widgets in order (determines initial layout), then `on_mount()` is called (can mount additional widgets or start timers). Set `can_focus = True` and define `BINDINGS` list if the mode needs keyboard input; `_switch_mode()` will call `widget.focus()` after mounting to activate key bindings.
 
 Key modes:
-- **`synth_mode.py`**;The most complex mode. Manages 8 UI sections (OSC, FILTER, ENVELOPE, LFO, CHORUS, FX, ARPEGGIO, MIXER) rendered as a parameter grid. Has two input sub-modes: *focus mode* (WASD cursor + Q/E value change + `_` randomize focused param) and *legacy mode* (letter keys mapped to individual params). All parameter changes go through `_push_params_to_engine()` → `synth_engine.update_parameters(**kwargs)`.
+- **`synth_mode.py`**;The most complex mode. Manages 10 UI sections (OSCILLATOR, FILTER, FILTER EG, AMP EG, VIDEO, LFO, CHORUS, FX, ARPEGGIO, MIXER) rendered as a parameter grid. Has two input sub-modes: *focus mode* (WASD cursor + Q/E value change + `_` randomize focused param) and *legacy mode* (letter keys mapped to individual params). All parameter changes go through `_push_params_to_engine()` → `synth_engine.update_parameters(**kwargs)`.
 - **`piano_mode.py`**;Visualises the MIDI keyboard, runs chord detection, also drives synth.
 - **`metronome_mode.py`**;Shares BPM with the arpeggiator via `config_manager.get_bpm()` / `set_bpm()`.
 - **`tambor/tambor_mode.py`**;Drum machine sequencer (16-step sequencer, 8 drum sounds, pattern management, fills, humanize). Integrated from standalone Tambor project. Uses the shared Acordes `SynthEngine` to generate drum sounds via MIDI triggers. Pattern playback enqueues note-on/off events to `synth_engine.midi_event_queue` for sample-accurate timing. BPM syncs with metronome via `config_manager`.
@@ -55,7 +55,7 @@ MIDI hardware
   → MIDIInputHandler.poll_messages()   [called on a Textual timer in each mode]
   → mode callbacks (_on_note_on / _on_note_off)
   → SynthEngine.note_on() / note_off() [enqueues to midi_event_queue]
-  → _audio_callback() [PyAudio thread, drains queue each buffer]
+  → _audio_callback() [sounddevice audio thread, drains queue each buffer]
 ```
 
 `MIDIInputHandler` (`midi/input_handler.py`) is a thin wrapper around `mido`. It maintains an `active_notes` set (protected by `notes_lock`) and dispatches to registered callbacks. Polling is non-blocking (`iter_pending()`).
@@ -110,7 +110,7 @@ Signal chain per buffer (inside `_audio_callback`):
 1. Drain MIDI event queue (param updates, note on/off, all-notes-off)
 2. LFO tick (shape-aware: SIN/TRI/SQR/S&H → routes to VCO/VCF/VCA)
 3. Arpeggiator clock (sample-accurate, audio-thread driven)
-4. Voice loop: oscillator → filter (ladder or SVF) → envelope → onset ramp → DC blocker → pan → stereo mix
+4. Voice loop: oscillator → filter (default `filter_quality="fast"`: scipy sosfilt biquads with persistent `zi` state; "analog": per-sample ZDF Moog ladder) → envelope → onset ramp → DC blocker → pan → stereo mix
 5. Chorus DSP (BBD-style ring buffer, bypass if `chorus_mix == 0`)
 6. Delay DSP (stereo feedback loop, bypass if `delay_mix == 0`)
 7. Filter-switch anti-click ramp

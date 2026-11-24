@@ -18,28 +18,44 @@ if TYPE_CHECKING:
     from music.synth_engine import SynthEngine
 
 # Piano-mode exclusive sound — applied on mount, restored on exit.
-# Uses the "Default" preset which provides a well-balanced, natural tone:
-# sine-based, moderate attack/decay, good sustain, clean resonance character,
-# no LFO/delay/chorus, arpeggiator off.
+# Tuned to approximate an acoustic piano: triangle wave for warm odd harmonics,
+# fast attack, decaying envelope, filter EG for hammer brightness transient,
+# strong key tracking so high notes are brighter than low ones, subtle noise
+# click, and no FX/LFO/arp so the tone stays clean and natural.
 _PIANO_PARAMS: dict = {
-    "waveform":       "sine",
+    "waveform":       "triangle",  # odd harmonics that roll off fast — warmer than saw, richer than sine
     "octave":         0,
     "noise_level":    0.0,
+    "partial_decay":  0.7,         # upper partials decay faster, mimicking piano string physics
     "amp_level":      0.95,
-    "cutoff":         2000.0,
-    "hpf_cutoff":     20.0,
-    "resonance":      0.3,
+    "vel_depth":      1.0,         # full velocity sensitivity
+    "cutoff":         3500.0,      # open enough for piano presence without harsh brightness
+    "hpf_cutoff":     80.0,        # cut low-end mud, especially on bass notes
+    "resonance":      0.05,        # near-zero — acoustic pianos have no resonant peak
     "hpf_resonance":  0.0,
-    "key_tracking":   0.5,
-    "attack":         0.01,
-    "decay":          0.2,
-    "sustain":        0.7,
-    "release":        0.1,
+    "key_tracking":   0.85,        # high notes much brighter, low notes darker — piano-like tonal spread
+    "filter_drive":   1.0,         # clean, no saturation
+    "filter_routing": "lp_hp",
+    # Amp envelope: instant attack (hammer), noticeable decay even when held,
+    # partial sustain (strings keep decaying), short damper release.
+    "attack":         0.008,       # minimum — hammer strike is nearly instant
+    "decay":          0.7,         # strings decay audibly while key is held
+    "sustain":        0.35,        # real pianos don't sustain at full level
+    "release":        0.30,        # damper engages when key released
+    # Filter envelope: brief upward brightness sweep on each note, then settles.
+    # Simulates the inharmonic hammer transient brightening the tone at onset.
+    "feg_attack":     0.008,       # instant filter opening with the note
+    "feg_decay":      0.35,        # brightness settles in ~350 ms
+    "feg_sustain":    0.0,         # no sustained filter modulation
+    "feg_release":    0.15,
+    "feg_amount":     0.35,        # moderate upward sweep — bright attack, mellow body
+    # Second oscillator — disabled
     "rank2_enabled":  False,
-    "rank2_waveform": "sine",
+    "rank2_waveform": "triangle",
     "rank2_detune":   0.0,
     "rank2_mix":      0.0,
     "sine_mix":       0.0,
+    # LFO — off
     "lfo_freq":       1.0,
     "lfo_vco_mod":    0.0,
     "lfo_vcf_mod":    0.0,
@@ -47,6 +63,7 @@ _PIANO_PARAMS: dict = {
     "lfo_shape":      "sine",
     "lfo_target":     "all",
     "lfo_depth":      0.0,
+    # FX — all bypassed
     "delay_time":     0.25,
     "delay_feedback": 0.3,
     "delay_mix":      0.0,
@@ -54,16 +71,12 @@ _PIANO_PARAMS: dict = {
     "chorus_depth":   0.0,
     "chorus_mix":     0.0,
     "chorus_voices":  2,
+    # Arpeggiator — off
     "arp_enabled":    False,
     "arp_mode":       "up",
     "arp_gate":       0.5,
     "arp_range":      1,
     "voice_type":     "poly",
-    "feg_attack":     0.01,
-    "feg_decay":      0.2,
-    "feg_sustain":    0.0,
-    "feg_release":    0.1,
-    "feg_amount":     0.0,
 }
 
 

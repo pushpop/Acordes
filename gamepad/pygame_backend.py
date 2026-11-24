@@ -5,7 +5,7 @@ import os
 import sys
 
 # SDL_VIDEODRIVER=dummy: no SDL window (Acordes uses Textual, not SDL rendering).
-# SDL_AUDIODRIVER=dummy: Acordes owns the audio device via sounddevice/PyAudio.
+# SDL_AUDIODRIVER=dummy: Acordes owns the audio device via sounddevice.
 # SDL_JOYSTICK_THREAD=1: SDL polls joystick state in its own background thread so
 #   we can read get_button()/get_axis() directly without calling SDL_PumpEvents().
 #   This is the key setting that avoids the Win32 message-loop crash when running

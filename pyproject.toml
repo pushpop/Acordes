@@ -1,6 +1,6 @@
 [project]
 name = "acordes"
-version = "1.8.0"
+version = "1.12.6"
 description = "A professional polyphonic MIDI synthesizer and piano TUI application"
 readme = "README.md"
 requires-python = ">=3.9"

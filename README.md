@@ -1,4 +1,4 @@
-# Acordes v1.12.5 - MONO True Legato Note Transitions: Polyphonic MIDI Synthesizer & Piano TUI
+# Acordes v1.12.6 - Click-Free Legato, ZDF Filter & 64 Voices: Polyphonic MIDI Synthesizer & Piano TUI
 
 ## Application Overview
 
@@ -11,13 +11,13 @@
 
 ## About This Project
 
-**Acordes** is a professional-grade, terminal-based MIDI synthesizer and piano application built with Python. It combines real-time MIDI input processing with a full 8-voice polyphonic synthesizer, musical reference tools, and a 16-step drum machine sequencer.
+**Acordes** is a professional-grade, terminal-based MIDI synthesizer and piano application built with Python. It combines real-time MIDI input processing with a full 64-voice polyphonic synthesizer, musical reference tools, and a 16-step drum machine sequencer.
 
 Whether you're a musician exploring synthesis in the terminal, a developer interested in audio DSP, or someone seeking a lightweight alternative to heavyweight DAWs, Acordes offers:
 
 - **Real-time MIDI Playback**: Connect any USB MIDI keyboard and play instantly
-- **Professional Polyphonic Synthesis**: 16-voice synthesis engine with dual-rank architecture, dual filters per voice, and a complete signal chain (VCO → HPF → LPF → Sine Reinforcement → Envelopes → FX)
-- **Preset System**: 128 professionally programmed factory presets + unlimited user-saveable presets
+- **Professional Polyphonic Synthesis**: 64-voice synthesis engine (desktop) with dual-rank architecture, dual filters per voice, and a complete signal chain (VCO → HPF → LPF → Sine Reinforcement → Envelopes → FX)
+- **Preset System**: 27 factory presets + unlimited user-saveable presets
 - **Effects Processing**: BBD-style chorus, stereo feedback delay, and parametric filtering
 - **Arpeggiator**: Sample-accurate, audio-thread driven arpeggiator (UP / DOWN / UP+DOWN / RANDOM)
 - **Percussion Synthesis**: Dedicated drum machine mode with 16-step sequencer and 8 drum sounds
@@ -26,7 +26,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
 - **Velocity Curves**: Adaptive velocity response (Linear, Soft, Normal, Strong, Very Strong)
 
-**Latest Version**: 1.12.4 - MONO/UNISON Note Transition Smoothing
+**Latest Version**: 1.12.6 - Click-Free Legato, ZDF Filter & 64 Voices
 
 ---
 
@@ -48,7 +48,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - Musical staff notation (side-by-side bass and treble clefs)
 
 ### Synth Mode: The Heart of Acordes
-A full 8-voice polyphonic synthesizer with real-time MIDI playback:
+A full 64-voice polyphonic synthesizer (desktop) with real-time MIDI playback:
 
 **Synthesis Architecture**:
 - **Dual Rank per Voice**: Two independent synthesis paths per note (Rank I & II)
@@ -58,7 +58,7 @@ A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 - **Global LFO**: Modulates VCO (pitch), VCF (filter), and VCA (amplitude)
 
 **Synthesis Parameters** (8 sections):
-- **Oscillator**: Waveform (7 types), Octave (-2 to +2), Noise Level, Partial Decay (Piano String only)
+- **Oscillator**: Waveform (8 types), Octave (-2 to +2), Noise Level, Partial Decay (Piano String only)
 - **Filter**: HPF/LPF Cutoff & Resonance, Filter Drive (0.5–8.0× pre-filter gain), Filter Routing (HP+LP / BP+LP / NT+LP / LP+LP), Key Tracking
 - **Filter EG**: Independent envelope for filter modulation
 - **Amp EG**: Amplitude envelope (ADSR)
@@ -107,7 +107,7 @@ A full 8-voice polyphonic synthesizer with real-time MIDI playback:
 - **Focus Mode Integration**: Fully navigable in WASD focus mode with all standard key bindings (↑↓ adjust, ← → fine-step, Q/E randomize)
 
 **Preset System**:
-- **Factory Presets**: 128 professionally programmed presets across 8 categories (Bass, Leads, Pads, Plucked, Seq, FX, Misc, Synth)
+- **Factory Presets**: 27 presets across 9 categories (Bass, Leads, Pads, Plucked, Seq, FX, Misc, Synth, User)
 - **User Presets**: Unlimited custom presets saved as individual JSON files
 - **Randomizer**: Generate musically useful random patches with the `-` key
 - **Parameter Persistence**: All tweaks auto-saved to disk; last preset restored on restart
@@ -337,7 +337,7 @@ In the app, look at the window title which displays the current version (e.g. `A
 3. **Select Your Device**: Press **C** → navigate → **Space** to select MIDI input
 4. **Play Piano**: Press **1** → play notes on your MIDI keyboard
 5. **Explore Synth**: Press **3** → play to hear the current preset
-6. **Browse Presets**: Press **N** → scroll through 128 factory presets
+6. **Browse Presets**: Press **N** → scroll through the factory presets
 
 For complete keyboard controls, see **[KEYBINDS.md](KEYBINDS.md)**.
 For Xbox-style gamepad controller support, see **[GAMEPAD.md](GAMEPAD.md)**.
@@ -391,6 +391,7 @@ See **[GAMEPAD.md](GAMEPAD.md)** for complete controller reference and keybindin
 - Switched from white to pink noise (1/f spectrum, warmer and more musical)
 - Noise now blended pre-filter so VCF shapes it alongside the tone (analog synth behavior)
 - Square-root curve on noise blend level keeps values subtle and musical across the full range
+- Pitch-tracking 1-pole lowpass colours the noise (cutoff = 3x note frequency, clamped 400-4000 Hz): warm on bass notes, airy on treble, never wideband hiss (v1.12.6, desktop only)
 
 **Filter Responsiveness Fix**:
 - Engine-level resonance smoothing optimized: instant response with per-voice artifact protection
@@ -442,7 +443,7 @@ See **[CHANGELOG.md](CHANGELOG.md)** for full technical details.
 
 ```
 ┌─ Audio Engine (music/synth_engine.py)
-│  ├─ 8-voice polyphonic synthesis (voices 0-7)
+│  ├─ 64-voice polyphonic synthesis on desktop
 │  ├─ Dual-rank per-voice architecture
 │  ├─ MIDI event queue (thread-safe parameter routing)
 │  ├─ sounddevice real-time I/O (48 kHz, 1024-sample buffer)
@@ -476,7 +477,7 @@ Velocity Curve Remapping (config_manager)
   ↓
 SynthEngine.note_on() / note_off()
   ↓
-Voice Allocation (8-voice polyphony with stealing)
+Voice Allocation (polyphony with stealing and ghost-voice tails)
   ↓
 [Per Voice]
   Oscillator (VCO) → HPF → LFO (modulation) → LPF → Sine Reinf. → Envelopes → Pan → Mix
@@ -639,9 +640,9 @@ acordes/
 │   └── cc_mappings.json             # MIDI CC to parameter mapping (16 assignable knobs)
 │
 ├── music/                           # Audio synthesis & music theory
-│   ├── synth_engine.py              # 8-voice polyphonic synthesizer (core audio)
+│   ├── synth_engine.py              # Polyphonic synthesizer (core audio)
 │   ├── preset_manager.py            # Preset load/save/cycle
-│   ├── factory_presets.py           # 128 factory presets (8 categories)
+│   ├── factory_presets.py           # 27 factory presets (9 categories)
 │   ├── velocity_curves.py           # Velocity remapping curves
 │   ├── chord_detector.py            # Real-time chord recognition
 │   └── chord_library.py             # Chord database (1000+ chords)

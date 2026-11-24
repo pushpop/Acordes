@@ -12,6 +12,9 @@ This directory contains technical documentation and development notes for the Ac
 - **`MIDI_SYNCHRONIZATION.md`**: Technical explanation of MIDI event queue synchronization system
 - **`TESTING_MIDI_SYNC.md`**: Testing procedures for MIDI synchronization features
 
+### Tests
+- **`../tests/`**: `test_voice_regression.py` (synth engine regression suite), `bench_voice_count.py` (voice-count benchmark), `arm_ui/` (ARM UI tests). Run with `uv run python -m pytest tests -q`.
+
 ### UI Design Documentation
 - **`UI_BOX_LAYOUT.md`**: ASCII box-drawing character specifications and layout design
 - **`UI_REDESIGN_SUMMARY.md`**: Summary of Synth Mode UI redesign (v1.0.2)

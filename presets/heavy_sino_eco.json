@@ -34,7 +34,7 @@
   "delay_mix": 0.7559055118110236,
   "chorus_rate": 0.5,
   "chorus_depth": 0.4015748031496063,
-  "chorus_mix": 0.0,
+  "chorus_mix": 0.3,
   "chorus_voices": 2,
   "arp_enabled": true,
   "arp_mode": "up",

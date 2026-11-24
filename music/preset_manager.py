@@ -84,7 +84,6 @@ DEFAULT_PARAMS: dict = {
     "sustain": 0.7,
     "release": 0.1,   # min 0.008 — same
     "vel_depth": 1.0,
-    "intensity": 1.0,
     "rank2_enabled": False,
     "rank2_waveform": "sawtooth",
     "rank2_detune": 5.0,

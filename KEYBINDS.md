@@ -4,11 +4,13 @@
 
 | Key | Action |
 |---|---|
+| **0** | Switch to Main Menu |
 | **1** | Switch to Piano Mode |
 | **2** | Switch to Compendium Mode |
 | **3** | Switch to Synth Mode |
 | **4** | Switch to Metronome Mode |
 | **5** | Switch to Tambor (Drum Machine) Mode |
+| **6** | Switch to μTonalidade (Microtonal) Mode |
 | **C** | Switch to Config Mode |
 | **Escape** | Quit application (with confirmation) |
 

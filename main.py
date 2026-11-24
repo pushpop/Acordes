@@ -731,7 +731,7 @@ class MainScreen(Screen):
 
         def on_audio_device_change(new_device_index):
             """Restart the audio subprocess with the newly selected output device."""
-            # Translate -2 (System Default sentinel) to None for PyAudio.
+            # Translate -2 (System Default sentinel) to None for sounddevice.
             actual_index = None if new_device_index in (-2, None) else new_device_index
             engine = self.app_context["synth_engine"]
             engine.all_notes_off()
@@ -777,7 +777,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.12.5 - MONO True Legato Note Transitions"
+    VERSION = "1.12.6 - Click-Free Legato, ZDF Filter & 64 Voices"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
@@ -835,11 +835,11 @@ class AcordesApp(App):
 
         device_index values:
           -2  = System Default (OS/PipeWire selects the output device)
-          -1  = No Audio (engine runs silently, no PyAudio stream)
+          -1  = No Audio (engine runs silently, no audio stream)
           None = same as -2 (legacy; treated as system default)
-          >=0 = specific PyAudio device index
+          >=0 = specific sounddevice device index
         """
-        # Translate -2 sentinel to None so PyAudio uses the system default.
+        # Translate -2 sentinel to None so sounddevice uses the system default.
         actual_index = None if device_index in (-2, None) else device_index
 
         buffer_size = self.config_manager.get_buffer_size()
