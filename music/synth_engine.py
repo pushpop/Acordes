@@ -237,6 +237,13 @@ class Voice:
         self._arm_hpf_zi_r1: Optional[np.ndarray] = None
         self._arm_hpf_zi_r2: Optional[np.ndarray] = None
         self._arm_dcblock_zi: Optional[np.ndarray] = None
+        # Last two input/output samples of every biquad section (x1, x2, y1, y2), used
+        # to rebuild the filter state when the coefficients change between buffers.
+        # Only meaningful while the matching zi array exists; see _sosfilt_tv().
+        self._arm_lpf_hist_r1: Optional[np.ndarray] = None
+        self._arm_lpf_hist_r2: Optional[np.ndarray] = None
+        self._arm_hpf_hist_r1: Optional[np.ndarray] = None
+        self._arm_hpf_hist_r2: Optional[np.ndarray] = None
         # Noise colour filter: 1-pole LPF applied to the pink noise source before
         # mixing so the noise tracks the voice pitch (warm at low notes, brighter at
         # high notes).  None = uninitialised; reset on every new trigger so each note
@@ -278,6 +285,9 @@ class Voice:
         self.osc_peak_neg: float = 0.0   # negative envelope (starts 0, moves negative)
         # Output peak detector for gentle dynamic ceiling (Feature C).
         self.out_peak: float = 0.0
+        # Limiter gain applied to the previous buffer; the new gain is interpolated from
+        # it so the waveform never steps at a buffer boundary.
+        self.out_gain_prev: float = 1.0
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -407,6 +417,7 @@ class Voice:
         self.osc_peak_pos = 0.0
         self.osc_peak_neg = 0.0
         self.out_peak     = 0.0
+        self.out_gain_prev = 1.0
         self._glide_from_freq = 0.0
         self._glide_elapsed   = 0
 
@@ -1020,6 +1031,10 @@ class SynthEngine:
         # with gain reduction, adding warmth only when the compressor is working.
         self._comp_env       = 0.0    # RMS envelope follower state
         self._comp_gain      = 1.0    # current smoothed gain (1.0 = unity)
+        # Gain actually applied at the end of the previous buffer (compressor incl. makeup,
+        # and brickwall limiter); the new gain is interpolated from it across the buffer.
+        self._comp_fg_prev   = 1.15
+        self._limiter_gain_prev = 1.0
         self._COMP_THRESH    = 0.316  # -10 dBFS threshold
         self._COMP_RATIO_EXP = 0.6667 # 1 - 1/ratio (3:1 → 0.667)
         self._COMP_ENV_ATK   = 0.60   # fast attack (~1 buffer response)
@@ -1287,7 +1302,12 @@ class SynthEngine:
         """
         sr = self.sample_rate
         f0 = float(np.clip(cutoff, 20.0, sr * 0.45))
-        Q = max(0.5, 0.707 + resonance * 9.293)
+        # Desktop: the resonance knob spans Q 0.707..3.0 (peak at most about +9.5 dB).
+        # With Q up to 10 the peak gain (about +20 dB) drove the inter-stage tanh into
+        # hard clipping for any note near the cutoff, adding harmonic grit.
+        # ARM keeps the original 0.707..10.0 range.
+        q_max = 10.0 if self._IS_ARM else 3.0
+        Q = max(0.5, 0.707 + resonance * (q_max - 0.707))
         w0 = 2.0 * math.pi * f0 / sr
         cos_w0 = math.cos(w0)
         sin_w0 = math.sin(w0)
@@ -2309,6 +2329,41 @@ class SynthEngine:
 
         return out, lp, bp
 
+    def _sosfilt_tv(self, sos: np.ndarray, x: np.ndarray, zi, hist):
+        """Run biquad sections with coefficients that may change between buffers.
+
+        scipy's sosfilt keeps its state in transposed direct form II, where the state
+        holds partial sums computed with the OLD coefficients. Continuing it with new
+        coefficients produces a step at the buffer start whenever the cutoff moves
+        (filter-EG sweeps, key tracking, resonance smoothing). Here the state is rebuilt
+        from the last two input and output samples of each section (direct form I
+        history), which do not depend on the coefficients, so the output stays continuous.
+
+        Returns (output, zi, hist). hist is None on ARM, which keeps plain sosfilt.
+        """
+        n = sos.shape[0]
+        if zi is None or zi.shape[0] != n:
+            zi = np.zeros((n, 2))
+            hist = None
+        if self._IS_ARM or len(x) < 2:
+            y, zf = self._scipy_sosfilt(sos, x, zi=zi)
+            return y, zf, None
+        if hist is not None and hist.shape[0] == n:
+            zi = np.empty((n, 2))
+            for k in range(n):
+                b0, b1, b2, _, a1, a2 = sos[k]
+                x1, x2, y1, y2 = hist[k]
+                zi[k, 0] = b1 * x1 - a1 * y1 + b2 * x2 - a2 * y2
+                zi[k, 1] = b2 * x1 - a2 * y1
+        new_hist = np.empty((n, 4))
+        sig = x.astype(np.float64)
+        for k in range(n):
+            y, zf = self._scipy_sosfilt(sos[k:k + 1], sig, zi=zi[k:k + 1])
+            zi[k] = zf[0]
+            new_hist[k] = (sig[-1], sig[-2], y[-1], y[-2])
+            sig = y
+        return sig, zi, new_hist
+
     def _apply_filter(self, voice: Voice, samples: np.ndarray, rank: int = 1, cutoff_mod: float = 1.0) -> np.ndarray:
         """MS-20 style dual filter: resonant SVF HPF → Ladder LPF in series.
 
@@ -2407,14 +2462,12 @@ class SynthEngine:
                 else:  # "lp_hp" (default) — HPF into LPF
                     stage1_sos = self._design_biquad_hpf_sos(fl_hpf, self.hpf_resonance_current)
                 if rank == 1:
-                    if voice._arm_hpf_zi_r1 is None:
-                        voice._arm_hpf_zi_r1 = np.zeros((1, 2))
-                    samples, voice._arm_hpf_zi_r1 = _sosfilt(stage1_sos, samples, zi=voice._arm_hpf_zi_r1)
+                    samples, voice._arm_hpf_zi_r1, voice._arm_hpf_hist_r1 = self._sosfilt_tv(
+                        stage1_sos, samples, voice._arm_hpf_zi_r1, voice._arm_hpf_hist_r1)
                     samples = samples.astype(np.float32)
                 else:
-                    if voice._arm_hpf_zi_r2 is None:
-                        voice._arm_hpf_zi_r2 = np.zeros((1, 2))
-                    samples, voice._arm_hpf_zi_r2 = _sosfilt(stage1_sos, samples, zi=voice._arm_hpf_zi_r2)
+                    samples, voice._arm_hpf_zi_r2, voice._arm_hpf_hist_r2 = self._sosfilt_tv(
+                        stage1_sos, samples, voice._arm_hpf_zi_r2, voice._arm_hpf_hist_r2)
                     samples = samples.astype(np.float32)
                 # Inter-stage soft saturation: high-Q resonant peaks can reach
                 # Q × input amplitude.  tanh(x/2)*2 limits stage output to ±2.0,
@@ -2424,15 +2477,12 @@ class SynthEngine:
                 np.multiply(samples, np.float32(2.0), out=samples)
             # LPF stage: 2-section SOS (4-pole, 24dB/oct cascade)
             lpf_sos = self._design_biquad_lpf_sos(fl_lpf, voice.smooth_resonance)
-            n_sections = lpf_sos.shape[0]   # 2 sections
             if rank == 1:
-                if voice._arm_lpf_zi_r1 is None or voice._arm_lpf_zi_r1.shape[0] != n_sections:
-                    voice._arm_lpf_zi_r1 = np.zeros((n_sections, 2))
-                filtered, voice._arm_lpf_zi_r1 = _sosfilt(lpf_sos, samples, zi=voice._arm_lpf_zi_r1)
+                filtered, voice._arm_lpf_zi_r1, voice._arm_lpf_hist_r1 = self._sosfilt_tv(
+                    lpf_sos, samples, voice._arm_lpf_zi_r1, voice._arm_lpf_hist_r1)
             else:
-                if voice._arm_lpf_zi_r2 is None or voice._arm_lpf_zi_r2.shape[0] != n_sections:
-                    voice._arm_lpf_zi_r2 = np.zeros((n_sections, 2))
-                filtered, voice._arm_lpf_zi_r2 = _sosfilt(lpf_sos, samples, zi=voice._arm_lpf_zi_r2)
+                filtered, voice._arm_lpf_zi_r2, voice._arm_lpf_hist_r2 = self._sosfilt_tv(
+                    lpf_sos, samples, voice._arm_lpf_zi_r2, voice._arm_lpf_hist_r2)
             return filtered.astype(np.float32)
 
         # ── HPF stage: resonant Chamberlin SVF (HP output) ───────────────────
@@ -3274,6 +3324,7 @@ class SynthEngine:
                     ghost_slot.osc_peak_pos       = best_v.osc_peak_pos
                     ghost_slot.osc_peak_neg       = best_v.osc_peak_neg
                     ghost_slot.out_peak           = best_v.out_peak
+                    ghost_slot.out_gain_prev      = best_v.out_gain_prev
                     # Smoothed filter parameters (avoid click from sudden cutoff jump).
                     ghost_slot.smooth_fl_lpf       = best_v.smooth_fl_lpf
                     ghost_slot.smooth_fl_hpf       = best_v.smooth_fl_hpf
@@ -3290,6 +3341,10 @@ class SynthEngine:
                         ghost_slot._arm_hpf_zi_r1 = None if best_v._arm_hpf_zi_r1 is None else best_v._arm_hpf_zi_r1.copy()
                         ghost_slot._arm_hpf_zi_r2 = None if best_v._arm_hpf_zi_r2 is None else best_v._arm_hpf_zi_r2.copy()
                         ghost_slot._arm_dcblock_zi = None if best_v._arm_dcblock_zi is None else best_v._arm_dcblock_zi.copy()
+                        ghost_slot._arm_lpf_hist_r1 = None if best_v._arm_lpf_hist_r1 is None else best_v._arm_lpf_hist_r1.copy()
+                        ghost_slot._arm_lpf_hist_r2 = None if best_v._arm_lpf_hist_r2 is None else best_v._arm_lpf_hist_r2.copy()
+                        ghost_slot._arm_hpf_hist_r1 = None if best_v._arm_hpf_hist_r1 is None else best_v._arm_hpf_hist_r1.copy()
+                        ghost_slot._arm_hpf_hist_r2 = None if best_v._arm_hpf_hist_r2 is None else best_v._arm_hpf_hist_r2.copy()
                         ghost_slot._noise_lp_zi = None if best_v._noise_lp_zi is None else best_v._noise_lp_zi.copy()
                         ghost_slot.feg_offset_smooth = best_v.feg_offset_smooth
                         ghost_slot.partial_phases[:] = best_v.partial_phases
@@ -4015,7 +4070,19 @@ class SynthEngine:
                     if v.out_peak > self._CAP_OUT_THRESH:
                         _out_excess = (v.out_peak - self._CAP_OUT_THRESH) / (1.0 - self._CAP_OUT_THRESH)
                         _out_gain = max(self._CAP_OUT_MIN_GAIN, 1.0 - self._CAP_OUT_DEPTH * _out_excess)
-                        v_samples = v_samples * np.float32(_out_gain)
+                        if not self._IS_ARM:
+                            # Ramp from last buffer's gain: a constant gain per buffer steps
+                            # the waveform at every boundary (visible dip at each peak).
+                            v_samples = v_samples * np.linspace(v.out_gain_prev, _out_gain,
+                                                                frame_count, dtype=np.float32)
+                            v.out_gain_prev = _out_gain
+                        else:
+                            v_samples = v_samples * np.float32(_out_gain)
+                    elif v.out_gain_prev != 1.0 and not self._IS_ARM:
+                        # Level fell back under the threshold: release the gain smoothly.
+                        v_samples = v_samples * np.linspace(v.out_gain_prev, 1.0,
+                                                            frame_count, dtype=np.float32)
+                        v.out_gain_prev = 1.0
                     v_samples = self._apply_dc_blocker(v, v_samples)
                     if self.voice_type == "unison":
                         # Map each voice's detune position to the stereo field.
@@ -4503,8 +4570,16 @@ class SynthEngine:
             else:
                 self._comp_gain += self._COMP_GAIN_REL * (_gtgt - self._comp_gain)
             _fg = self._comp_gain * self._COMP_MAKEUP
-            clipped_l[:_fc] *= _fg
-            clipped_r[:_fc] *= _fg
+            if self._IS_ARM or _fg == self._comp_fg_prev:
+                clipped_l[:_fc] *= _fg
+                clipped_r[:_fc] *= _fg
+            else:
+                # Interpolate from last buffer's gain: one constant per buffer would
+                # step the output at every boundary while the level is changing.
+                _gr = self._fill_linspace(self._cb_ramp_buf, self._comp_fg_prev, _fg, _fc)
+                clipped_l[:_fc] *= _gr
+                clipped_r[:_fc] *= _gr
+            self._comp_fg_prev = _fg
             # 2nd harmonic: only active during compression — gate prevents overhead
             # on silence or quiet passages where comp_gain stays near 1.0.
             if self._comp_gain < 0.98:
@@ -4532,9 +4607,16 @@ class SynthEngine:
             else:
                 # Slow release: recover toward 1.0 one step per buffer.
                 self._limiter_gain = min(1.0, self._limiter_gain + self._LIMITER_REL)
-            if self._limiter_gain < 0.999:
-                clipped_l[:_fc] *= self._limiter_gain
-                clipped_r[:_fc] *= self._limiter_gain
+            if self._IS_ARM:
+                if self._limiter_gain < 0.999:
+                    clipped_l[:_fc] *= self._limiter_gain
+                    clipped_r[:_fc] *= self._limiter_gain
+            elif self._limiter_gain < 0.999 or self._limiter_gain_prev < 0.999:
+                _lr = self._fill_linspace(self._cb_ramp_buf, self._limiter_gain_prev,
+                                          self._limiter_gain, _fc)
+                clipped_l[:_fc] *= _lr
+                clipped_r[:_fc] *= _lr
+            self._limiter_gain_prev = self._limiter_gain
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])

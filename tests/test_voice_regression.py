@@ -704,3 +704,100 @@ def test_poly_steal_no_click(waveform):
     eng.note_on(40, velocity=100)
     after = np.abs(np.diff(run_buffers(eng, 4)[:, 0])).max()
     assert after < steady * 1.3, f"steal click: {after:.4f} vs steady {steady:.4f}"
+
+
+# ── Test: HPF resonance peak is bounded on desktop ───────────────────────
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="HPF resonance cap is desktop only")
+def test_hpf_resonance_peak_gain_bounded():
+    from scipy.signal import sosfreqz
+    eng = make_engine()
+    sos = eng._design_biquad_hpf_sos(153.0, 1.0)
+    w, h = sosfreqz(sos, worN=8192, fs=SAMPLE_RATE)
+    peak_db = 20.0 * np.log10(np.abs(h).max())
+    assert peak_db < 11.0, f"HPF resonant peak too high: {peak_db:.1f} dB"
+    # Resonance 0 stays Butterworth (no peak).
+    sos0 = eng._design_biquad_hpf_sos(153.0, 0.0)
+    _, h0 = sosfreqz(sos0, worN=8192, fs=SAMPLE_RATE)
+    assert 20.0 * np.log10(np.abs(h0).max()) < 0.5
+
+
+# ── Test: filter output stays smooth while the cutoff sweeps ─────────────
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="time-varying filter state is desktop only")
+def test_filter_sweep_no_buffer_boundary_glitch():
+    """A fast filter-EG sweep changes the biquad coefficients every buffer.
+
+    The filter output must stay as smooth as its (sinusoidal) input; before the
+    state was rebuilt from sample history it showed d2 spikes of about 0.02-0.035.
+    """
+    eng = make_engine(waveform="pure_sine", voice_type="mono", cutoff=4630.0, resonance=0.04,
+                      hpf_cutoff=40.0, hpf_resonance=0.2, attack=0.09, decay=0.02,
+                      sustain=0.59, release=0.5, feg_attack=0.01, feg_decay=0.3,
+                      feg_sustain=0.0, feg_amount=0.9)
+    run_buffers(eng, 100)   # let smoothed parameters settle
+    outs = []
+    original = eng._apply_filter
+
+    def recording_filter(v, s, rank=1, cutoff_mod=1.0):
+        r = original(v, s, rank=rank, cutoff_mod=cutoff_mod)
+        outs.append(np.array(r, copy=True))
+        return r
+
+    eng._apply_filter = recording_filter
+    eng.note_on(52, velocity=100)
+    run_buffers(eng, 12)
+    out = np.concatenate(outs)
+    worst = float(np.abs(np.diff(out, 2)).max())
+    assert worst < 0.004, f"filter output glitch during cutoff sweep: d2={worst:.5f}"
+
+
+# ── Test: output limiter gain does not step at buffer boundaries ─────────
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="limiter gain ramp is desktop only")
+def test_output_limiter_no_buffer_boundary_step():
+    """The per-voice output limiter changes gain as the attack passes its threshold.
+
+    A constant gain per buffer steps the waveform by 1-2% at every boundary (a dip at
+    each sine peak); the gain must be interpolated across the buffer instead.
+    """
+    eng = make_engine(waveform="pure_sine", voice_type="mono", cutoff=4630.0, resonance=0.04,
+                      hpf_cutoff=40.0, hpf_resonance=0.2, attack=0.09, decay=0.02,
+                      sustain=0.59, release=0.5, feg_amount=0.0)
+    run_buffers(eng, 100)
+    outs = []
+    original = eng._apply_dc_blocker
+
+    def recording_dc(v, s):
+        outs.append(np.array(s, copy=True))
+        return original(v, s)
+
+    eng._apply_dc_blocker = recording_dc
+    eng.note_on(52, velocity=127)
+    run_buffers(eng, 14)
+    x = np.concatenate(outs)
+    d2 = np.abs(np.diff(x, 2))
+    boundaries = np.arange(BUFFER_SIZE - 2, len(d2), BUFFER_SIZE)
+    worst = float(d2[boundaries].max())
+    assert worst < 0.004, f"limiter gain step at buffer boundary: d2={worst:.5f}"
+
+
+# ── Test: final output has no gain steps at buffer boundaries ────────────
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="master gain ramps are desktop only")
+def test_master_dynamics_no_buffer_boundary_step():
+    """Compressor and limiter gains change every buffer while a loud note attacks.
+
+    Applied as one constant per buffer they step the output at every boundary; they
+    must be interpolated across the buffer so the final waveform stays smooth.
+    """
+    eng = make_engine(waveform="pure_sine", voice_type="mono", cutoff=4630.0, resonance=0.04,
+                      hpf_cutoff=40.0, hpf_resonance=0.2, attack=0.09, decay=0.02,
+                      sustain=0.59, release=0.5, feg_amount=0.0)
+    run_buffers(eng, 100)
+    eng.note_on(52, velocity=127)
+    x = run_buffers(eng, 16)[:, 0]
+    d2 = np.abs(np.diff(x, 2))
+    boundaries = np.arange(BUFFER_SIZE - 2, len(d2), BUFFER_SIZE)
+    worst = float(d2[boundaries].max())
+    assert worst < 0.004, f"final output step at buffer boundary: d2={worst:.5f}"
