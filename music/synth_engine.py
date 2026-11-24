@@ -995,6 +995,7 @@ class SynthEngine:
         self._last_output_L: float = 0.0
         self._last_output_R: float = 0.0
         self._transition_xf_remaining: int = 0   # samples left in active crossfade
+        self._had_active_voices: bool = False    # voices were sounding on the previous buffer
         self._TRANSITION_XF_SAMPLES:  int = 480  # 480 smp ≈ 10ms at 48kHz: spans ~2 buffers at 256 buffer size
 
         # Subsonic high-pass filter on the stereo output bus (20 Hz, 1-pole IIR).
@@ -3792,8 +3793,14 @@ class SynthEngine:
             # click at the tail end of every note.  Setting the crossfade here
             # blends the last output toward zero over the first 48 samples of
             # the now-silent buffer, making the tail inaudible.
+            # Desktop: arm it only on the buffer where the voices FIRST go silent. While a
+            # delay or chorus tail is still playing, re-arming it every buffer blended each
+            # buffer's real signal with the held last sample (an amplitude ramp at buffer rate).
             if active_count == 0 and self._last_output_L != 0.0:
-                self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+                if self._IS_ARM or self._had_active_voices:
+                    self._transition_xf_remaining = self._TRANSITION_XF_SAMPLES
+            if not self._IS_ARM:
+                self._had_active_voices = active_count > 0
 
             # Compute gain target from the pre-counted voice count and update
             # the smoothed current value BEFORE capturing gain_prev so the ramp

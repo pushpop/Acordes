@@ -1014,3 +1014,24 @@ def test_quiet_release_tail_frees_voice_early():
     eng.note_off(60, 0)
     run_buffers(eng, int(6.2 * eng.sample_rate / BUFFER_SIZE))
     assert _live_voices(eng) == 0, "quiet tail still occupies a voice"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+@pytest.mark.parametrize("voice_type", ["mono", "poly"])
+def test_delay_tail_after_release_has_no_buffer_boundary_steps(voice_type):
+    """Once voices are silent, the end-of-note crossfade must not be re-armed every buffer
+    while a delay echo is still playing (it amplitude-modulated the tail at buffer rate)."""
+    eng = make_engine(voice_type=voice_type, waveform="square", octave=1, cutoff=900,
+                      attack=0.02, release=0.012, sustain=0.89, delay_time=0.25,
+                      delay_feedback=0.3, delay_mix=0.3)
+    eng.note_on(48, 127)
+    run_buffers(eng, 80)
+    eng.note_off(48, 0)
+    audio = run_buffers(eng, 140)[:, 0].astype(float)
+    tail = audio[20 * BUFFER_SIZE:]          # skip the release itself
+    d2 = np.abs(np.diff(tail, 2))
+    idx = np.arange(len(d2))
+    at_boundary = (idx % BUFFER_SIZE) >= BUFFER_SIZE - 2
+    assert d2[at_boundary].max() < 2.0 * d2[~at_boundary].max() + 0.002, (
+        f"delay tail steps at buffer boundaries (boundary {d2[at_boundary].max():.4f}, "
+        f"interior {d2[~at_boundary].max():.4f})")
