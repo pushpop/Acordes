@@ -567,6 +567,8 @@ class SynthEngine:
     # ARM devices (armv7l/aarch64) use reduced settings to fit within the CPU budget
     # of a Raspberry Pi or similar single-board computer.
     _IS_ARM = platform.machine() in ("armv7l", "aarch64")
+    # Per-voice offsets (fraction of one detune step) that break equal unison spacing.
+    _UNISON_JITTER = (0.0, 0.31, -0.22, 0.27, -0.33, 0.19, -0.28, 0.0)
 
     def __init__(self, output_device_index=None, buffer_size=256, audio_backend=None,
                  enable_oversampling=True, level_shm_name=None):
@@ -1960,6 +1962,11 @@ class SynthEngine:
             # ~6.5 seconds, flooring at 65% of the sustain level. Models the slow
             # charge bleed that occurs in real analog envelope generator hold stages.
             if not voice.is_releasing:
+                if not self._IS_ARM and times[0] < dec_end:
+                    # Still in attack/decay: the leak only starts at the sustain stage. A
+                    # leaked value carried over from the previous note (legato re-press)
+                    # would step the envelope down at the decay-to-sustain knee.
+                    voice.sustain_cap = 1.0
                 sustain_mask = times >= dec_end
                 if sustain_mask.any():
                     voice.sustain_cap = max(0.65, voice.sustain_cap - self._CAP_SUSTAIN_LEAK * num_samples)
@@ -3103,7 +3110,13 @@ class SynthEngine:
             for i, v in enumerate(self.voices[:n]):
                 # Spread voices evenly from -unison_detune to +unison_detune cents
                 if n > 1:
-                    detune_cents = self.unison_detune * (2.0 * i / (n - 1) - 1.0)
+                    _u_pos = 2.0 * i / (n - 1) - 1.0
+                    if not self._IS_ARM:
+                        # Equal spacing makes the voices phase-align periodically and add into
+                        # one loud peak (a click). Offsetting each voice by a fraction of the
+                        # spacing keeps the order and range but breaks the alignment.
+                        _u_pos += self._UNISON_JITTER[i % len(self._UNISON_JITTER)] * (2.0 / (n - 1))
+                    detune_cents = self.unison_detune * _u_pos
                 else:
                     detune_cents = 0.0
                 detuned_freq = freq * (2.0 ** (detune_cents / 1200.0))

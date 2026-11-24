@@ -882,3 +882,44 @@ def test_unison_uses_bounded_voice_count():
     out = run_buffers(eng, 60)
     rms = float(np.sqrt((out ** 2).mean()))
     assert 0.08 < rms < 0.30, f"unison loudness changed (rms {rms:.3f})"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+@pytest.mark.parametrize("note", [43, 67])
+def test_unison_voices_do_not_realign_into_pulses(note):
+    """Equal detune spacing made the voices phase-align periodically, giving a loud peak
+    (heard as a click after about a second). Peaks must stay close to the typical level."""
+    eng = make_engine(voice_type="unison", waveform="sine", octave=2, cutoff=14000,
+                      attack=0.007, decay=0.9, sustain=0.86)
+    eng.note_on(note, 100)
+    audio = run_buffers(eng, 600)[60 * BUFFER_SIZE:, 0]
+    win = 240
+    m = len(audio) // win
+    peaks = np.abs(audio[:m * win]).reshape(m, win).max(axis=1)
+    ratio = float(peaks.max() / np.median(peaks))
+    assert ratio < 2.4, f"unison produced a coherent peak (peak/median {ratio:.2f})"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+@pytest.mark.parametrize("voice_type", ["unison", "mono"])
+def test_repress_after_long_sustain_no_step_at_decay_end(voice_type):
+    """The sustain leak must not carry over into a re-pressed note: it would step the
+    envelope down when the new decay reaches sustain (heard as a click)."""
+    from scipy.signal import butter, sosfiltfilt
+    eng = make_engine(voice_type=voice_type, waveform="sine", octave=2, cutoff=14000,
+                      attack=0.007, decay=0.9, sustain=0.86, release=1.1)
+    sr = eng.sample_rate
+    on2 = 150
+    chunks = []
+    for b in range(on2 + 140):
+        if b == 0:
+            eng.note_on(43, 100)
+        if b == 140:
+            eng.note_off(43, 0)
+        if b == on2:
+            eng.note_on(43, 100)
+        chunks.append(run_buffers(eng, 1)[:, 0])
+    y = np.concatenate(chunks).astype(float)
+    h = np.abs(sosfiltfilt(butter(4, 2500, "hp", fs=sr, output="sos"), y))
+    knee = on2 * BUFFER_SIZE + int(0.9 * sr)
+    assert h[knee - 2000:knee + 2000].max() < 0.003, "envelope stepped at the end of decay"
