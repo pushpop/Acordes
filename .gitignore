@@ -69,3 +69,5 @@ test_*.py
 analyze_*.py
 # Re-include the test suite (tests/ directory is the canonical location)
 !tests/test_*.py
+# Per-machine visualizer window position (rewritten by the app on every move)
+visualizer/window_position.json
