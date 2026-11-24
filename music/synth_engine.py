@@ -734,6 +734,10 @@ class SynthEngine:
         self.chorus_mix    = 0.0    # 0.0–1.0 wet/dry (0 = bypass)
         self.chorus_voices = 2      # 1–4 modulated taps
         _cho_len = int(self.sample_rate * 0.030) + 2   # 30ms + guard
+        # Desktop: the ring is written for a whole buffer before the taps are read, so it
+        # must hold the longest tap delay PLUS one buffer or deep sweeps read overwritten data.
+        if not self._IS_ARM:
+            _cho_len += self._alloc_size
         self._chorus_buf_l  = np.zeros(_cho_len, dtype=np.float32)
         self._chorus_buf_r  = np.zeros(_cho_len, dtype=np.float32)
         # Four LFO phases spread 90° apart for natural voice spread

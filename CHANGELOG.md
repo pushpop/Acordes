@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
 
+**Chorus glitch at deep depth** (desktop only) - the chorus ring buffer (30 ms) is written for a whole audio buffer before the taps are read, so taps more than (ring size minus buffer size) behind read overwritten data and produced a step at every buffer start. It showed up from about depth 0.7 up (for example `User: Mellow Bass`, depth 0.8). The ring now has one extra buffer of headroom.
+
 **Live-play dips with fast notes** (desktop only):
 - MONO/UNISON: releasing an older held note while a newer one sounded retriggered the sounding note, restarting its envelope and filter sweep (a dip after 3 or 4 fast overlapping presses). Only the release of the sounding note now resumes an older held note.
 - POLY: the master gain counted only held voices, so many long release tails (10 to 15 fast notes) piled up unnormalised and overdrove the master stage. Releasing tails now count by energy.

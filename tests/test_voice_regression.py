@@ -858,3 +858,14 @@ def test_poly_long_tails_do_not_overdrive_master():
     x = np.concatenate(chunks)[:, 0]
     worst = float(np.abs(np.diff(x, 2)).max())
     assert worst < 0.008, f"poly tail pile-up distorts the master: d2={worst:.5f}"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_chorus_deep_sweep_no_buffer_boundary_step():
+    """A deep chorus sweep must not read samples the current buffer already overwrote."""
+    eng = make_engine(waveform="sine", octave=-1, chorus_mix=0.3, chorus_depth=0.8,
+                      chorus_rate=0.8, chorus_voices=1, attack=0.05, sustain=1.0)
+    eng.note_on(40, 100)
+    audio = run_buffers(eng, 300)[100 * BUFFER_SIZE:, 0].astype(float)
+    d2 = np.abs(np.diff(audio, 2))
+    assert d2.max() < 0.005, f"chorus produced a step (max d2 {d2.max():.4f})"
