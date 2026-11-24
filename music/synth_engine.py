@@ -288,6 +288,10 @@ class Voice:
         # Limiter gain applied to the previous buffer; the new gain is interpolated from
         # it so the waveform never steps at a buffer boundary.
         self.out_gain_prev: float = 1.0
+        # Set when the voice budget (or a very quiet tail) asks this releasing voice to fade
+        # out and free its slot; tail_fade_prev is the gain applied to the previous buffer.
+        self.tail_fading: bool = False
+        self.tail_fade_prev: float = 1.0
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -298,6 +302,8 @@ class Voice:
     def trigger(self, midi_note: int, frequency: float, velocity: float = 1.0):
         """Trigger a new note. Keeps oscillators free-running to prevent phase-jump clicks."""
         was_silent = not self.note_active and not self.is_releasing
+        self.tail_fading = False
+        self.tail_fade_prev = 1.0
         self.steal_start_level = self.last_envelope_level if not was_silent else 0.0
 
         self.midi_note = midi_note
@@ -418,6 +424,8 @@ class Voice:
         self.osc_peak_neg = 0.0
         self.out_peak     = 0.0
         self.out_gain_prev = 1.0
+        self.tail_fading = False
+        self.tail_fade_prev = 1.0
         self._glide_from_freq = 0.0
         self._glide_elapsed   = 0
 
@@ -569,6 +577,13 @@ class SynthEngine:
     _IS_ARM = platform.machine() in ("armv7l", "aarch64")
     # Per-voice offsets (fraction of one detune step) that break equal unison spacing.
     _UNISON_JITTER = (0.0, 0.31, -0.22, 0.27, -0.33, 0.19, -0.28, 0.0)
+    # Voice budget (desktop POLY). When the audio callback uses too much of its time, the
+    # number of live voices is capped and the quietest release tails are faded out first.
+    _VOICE_BUDGET_MIN = 12       # never reduce the budget below this many live voices
+    _LOAD_HIGH = 0.65            # callback time / buffer time above which the budget shrinks
+    _LOAD_LOW = 0.45             # below which the budget grows back
+    _TAIL_FADE_S = 0.03          # time constant of a tail fade-out
+    _TAIL_FLOOR = 0.003          # release tails below this level (-50 dB) are faded out
 
     def __init__(self, output_device_index=None, buffer_size=256, audio_backend=None,
                  enable_oversampling=True, level_shm_name=None):
@@ -627,6 +642,16 @@ class SynthEngine:
             self._scipy_lfilter = _lfilter
         except ImportError:
             pass
+        # Low-level biquad core used by _sosfilt_tv. It skips the Python argument handling
+        # of scipy.signal.sosfilt (most of its cost for 256-sample buffers). It is a private
+        # scipy routine, so it is optional: when missing, _sosfilt_tv uses sosfilt.
+        self._sosfilt_core = None
+        if not self._IS_ARM:
+            try:
+                from scipy.signal._sosfilt import _sosfilt as _sosfilt_core
+                self._sosfilt_core = _sosfilt_core
+            except Exception:
+                pass
         # Filter quality mode: "analog" = per-sample Moog ladder with tanh saturation,
         # "fast" = scipy sosfilt biquad (C code). ARM always forces "fast".
         # Default to "fast" on all platforms for maximum voice headroom.
@@ -1120,6 +1145,11 @@ class SynthEngine:
         # render, so stacking the whole desktop pool (64) overran the audio deadline.
         # ARM keeps using its whole (small) pool.
         self._unison_count = self.num_voices if self._IS_ARM else min(8, self.num_voices)
+        self._voice_budget = self.num_voices
+        self._cpu_load = 0.0                  # smoothed callback time / buffer time
+        import time as _load_time_mod
+        self._load_clock = _load_time_mod.perf_counter
+        self._cpu_load_override = None        # tests set this to simulate a load
 
         # Ghost voice pool: pre-allocated extra voices that hold release tails from
         # stolen POLY voices.  When a real voice is stolen while still audible, its
@@ -1936,6 +1966,8 @@ class SynthEngine:
             # cut before the exponential reaches inaudible levels.
             # 10 time constants → exp(-10) ≈ 0.00005, well below the 0.001 threshold.
             if envelope[-1] < 0.001 or times[-1] > time_const * 10: voice.reset()
+            elif not self._IS_ARM and envelope[-1] < self._TAIL_FLOOR:
+                voice.tail_fading = True   # fade out and free the voice instead of ringing on
         elif voice.note_active:
             atk_mask = times < self.attack_current
             if self.attack_current > 0: envelope[atk_mask] = (times[atk_mask] / self.attack_current) * v_int
@@ -2371,6 +2403,18 @@ class SynthEngine:
                 zi[k, 0] = b1 * x1 - a1 * y1 + b2 * x2 - a2 * y2
                 zi[k, 1] = b2 * x1 - a2 * y1
         new_hist = np.empty((n, 4))
+        core = self._sosfilt_core
+        if core is not None:
+            # In-place cython core: one section at a time on a (1, N) float64 signal.
+            sig = np.array(x, dtype=np.float64).reshape(1, -1)
+            sos64 = np.ascontiguousarray(sos, dtype=np.float64)
+            zi = np.ascontiguousarray(zi, dtype=np.float64)
+            for k in range(n):
+                xl1, xl2 = sig[0, -1], sig[0, -2]
+                zk = zi[k:k + 1].reshape(1, 1, 2)
+                core(sos64[k:k + 1], sig, zk)
+                new_hist[k] = (xl1, xl2, sig[0, -1], sig[0, -2])
+            return sig[0], zi, new_hist
         sig = x.astype(np.float64)
         for k in range(n):
             y, zf = self._scipy_sosfilt(sos[k:k + 1], sig, zi=zi[k:k + 1])
@@ -2691,6 +2735,32 @@ class SynthEngine:
         np.nan_to_num(samples, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
         np.clip(samples, -2.0, 2.0, out=samples)
         return samples
+
+    def _apply_voice_budget(self):
+        """Cap live POLY voices by CPU load: fade out the quietest release tails first.
+
+        Held notes are never touched. Runs once per buffer on the audio thread.
+        """
+        load = self._cpu_load if self._cpu_load_override is None else self._cpu_load_override
+        if load > self._LOAD_HIGH:
+            self._voice_budget = max(self._VOICE_BUDGET_MIN, self._voice_budget - 2)
+        elif load < self._LOAD_LOW:
+            self._voice_budget = min(self.num_voices, self._voice_budget + 1)
+        live = 0
+        fading = 0
+        tails = []
+        for v in self.voices:
+            if v.note_active or v.is_releasing:
+                live += 1
+                if v.tail_fading:
+                    fading += 1
+                elif v.is_releasing:
+                    tails.append(v)
+        need = live - self._voice_budget - fading
+        if need > 0:
+            tails.sort(key=lambda t: t.last_envelope_level)
+            for v in tails[:need]:
+                v.tail_fading = True
 
     def _process_midi_events(self):
         """Drain the event queue at the start of each audio callback.
@@ -3497,6 +3567,8 @@ class SynthEngine:
                     _arm_probe = True
                     _cb_t0 = self._perf_counter()
 
+            _load_t0 = self._load_clock() if not self._IS_ARM else 0.0
+
             # Output initial silence for ~50ms after startup to avoid filter transients
             if self._startup_silence_samples > 0:
                 outdata.fill(0)
@@ -3767,6 +3839,8 @@ class SynthEngine:
             # producing a visible and audible volume bump on each note.
             # Releasing voices are already decaying naturally via their envelope; they
             # don't need additional gain compensation.
+            if self.voice_type == "poly" and not self._IS_ARM:
+                self._apply_voice_budget()
             playing_count = sum(1 for v in self.voices if v.note_active)
             gain_count = 1 if self.voice_type in ("mono", "unison") else max(playing_count, 1)
             if self.voice_type == "poly" and not self._IS_ARM:
@@ -4119,6 +4193,11 @@ class SynthEngine:
                         v_samples = v_samples * np.linspace(v.out_gain_prev, 1.0,
                                                             frame_count, dtype=np.float32)
                         v.out_gain_prev = 1.0
+                    if v.tail_fading:
+                        _tf = v.tail_fade_prev * math.exp(-frame_count / (self.sample_rate * self._TAIL_FADE_S))
+                        v_samples = v_samples * np.linspace(v.tail_fade_prev, _tf, frame_count,
+                                                            dtype=np.float32)
+                        v.tail_fade_prev = _tf
                     v_samples = self._apply_dc_blocker(v, v_samples)
                     if self.voice_type == "unison":
                         # Map each voice's detune position to the stereo field.
@@ -4139,6 +4218,8 @@ class SynthEngine:
                         mix_scale = 1.0
                     mixed_l += v_samples * np.cos(ang) * mix_scale
                     mixed_r += v_samples * np.sin(ang) * mix_scale
+                    if v.tail_fading and v.tail_fade_prev < 0.02:
+                        v.reset()
 
             # Update LFO previous-buffer trackers for within-buffer interpolation.
             # These are read at the start of each voice's filter and VCA processing
@@ -4711,6 +4792,11 @@ class SynthEngine:
             dither_r = (buf_r[:fc] - buf_r[fc:]) * self._DITHER_AMP
             outdata[:fc, 0] = np.clip(clipped_l + dither_l, -1.0, 1.0)
             outdata[:fc, 1] = np.clip(clipped_r + dither_r, -1.0, 1.0)
+
+            if not self._IS_ARM:
+                # Smoothed share of the buffer time spent rendering; drives the voice budget.
+                _ratio = (self._load_clock() - _load_t0) * self.sample_rate / frame_count
+                self._cpu_load += 0.2 * (_ratio - self._cpu_load)
 
             if _arm_probe:
                 _cb_ms = (self._perf_counter() - _cb_t0) * 1000.0

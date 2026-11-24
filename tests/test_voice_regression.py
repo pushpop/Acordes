@@ -923,3 +923,94 @@ def test_repress_after_long_sustain_no_step_at_decay_end(voice_type):
     h = np.abs(sosfiltfilt(butter(4, 2500, "hp", fs=sr, output="sos"), y))
     knee = on2 * BUFFER_SIZE + int(0.9 * sr)
     assert h[knee - 2000:knee + 2000].max() < 0.003, "envelope stepped at the end of decay"
+
+
+def _reference_sosfilt_tv(eng, sos, x, zi, hist):
+    """Reference: one scipy sosfilt call per section, with the DF1 history rebuild."""
+    n = sos.shape[0]
+    if zi is None:
+        zi = np.zeros((n, 2))
+    if hist is not None and hist.shape[0] == n:
+        zi = np.empty((n, 2))
+        for k in range(n):
+            b0, b1, b2, _, a1, a2 = sos[k]
+            x1, x2, y1, y2 = hist[k]
+            zi[k, 0] = b1 * x1 - a1 * y1 + b2 * x2 - a2 * y2
+            zi[k, 1] = b2 * x1 - a2 * y1
+    new_hist = np.empty((n, 4))
+    sig = x.astype(np.float64)
+    for k in range(n):
+        y, zf = eng._scipy_sosfilt(sos[k:k + 1], sig, zi=zi[k:k + 1])
+        zi[k] = zf[0]
+        new_hist[k] = (sig[-1], sig[-2], y[-1], y[-2])
+        sig = y
+    return sig, zi, new_hist
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+@pytest.mark.parametrize("use_core", [True, False])
+def test_sosfilt_tv_matches_reference(use_core):
+    """The fast time-varying biquad helper must match the per-section scipy reference."""
+    from scipy.signal import butter
+    eng = make_engine()
+    if not use_core:
+        eng._sosfilt_core = None
+    rng = np.random.default_rng(1)
+    zi = hist = rz = rh = None
+    worst = 0.0
+    for i in range(30):
+        fc = 500.0 + 4000.0 * (i % 7) / 7.0
+        sos = butter(4, fc, "lp", fs=48000, output="sos")
+        x = rng.standard_normal(256).astype(np.float32)
+        y, zi, hist = eng._sosfilt_tv(sos, x, zi, hist)
+        ry, rz, rh = _reference_sosfilt_tv(eng, sos, x, rz, rh)
+        worst = max(worst, float(np.max(np.abs(y - ry))))
+    assert worst < 1e-9, f"helper differs from reference by {worst}"
+
+
+def _live_voices(eng):
+    return sum(1 for v in eng.voices if v.note_active or v.is_releasing)
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_voice_budget_fades_excess_tails_under_load():
+    """When the CPU is overloaded, old release tails are faded out, never held notes."""
+    eng = make_engine(voice_type="poly", release=3.0, sustain=0.7)
+    for n in range(40, 70):
+        eng.note_on(n, 100)
+        run_buffers(eng, 1)
+    for n in range(40, 62):
+        eng.note_off(n, 0)
+    run_buffers(eng, 12)  # note events are applied 3 per buffer
+    held = sum(1 for v in eng.voices if v.note_active)
+    assert held == 8
+    assert _live_voices(eng) == 30
+    eng._cpu_load_override = 1.0
+    run_buffers(eng, 120)
+    assert sum(1 for v in eng.voices if v.note_active) == held, "a held note was removed"
+    assert _live_voices(eng) <= eng._VOICE_BUDGET_MIN, "tails were not reclaimed"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_voice_budget_leaves_tails_alone_when_cpu_is_fine():
+    eng = make_engine(voice_type="poly", release=3.0, sustain=0.7)
+    for n in range(40, 70):
+        eng.note_on(n, 100)
+        run_buffers(eng, 1)
+    for n in range(40, 62):
+        eng.note_off(n, 0)
+    eng._cpu_load_override = 0.0
+    run_buffers(eng, 120)
+    assert _live_voices(eng) == 30
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_quiet_release_tail_frees_voice_early():
+    """A tail below -50 dB is faded out and freed instead of ringing to -60 dB."""
+    eng = make_engine(voice_type="poly", release=0.5, sustain=0.7)
+    eng._cpu_load_override = 0.0
+    eng.note_on(60, 100)
+    run_buffers(eng, 20)
+    eng.note_off(60, 0)
+    run_buffers(eng, int(6.2 * eng.sample_rate / BUFFER_SIZE))
+    assert _live_voices(eng) == 0, "quiet tail still occupies a voice"

@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
 
+**Overload with dense polyphony** (desktop only) - a busy sequence with long release tails kept all 64 voices alive (a dense test sequence needed about 90) at roughly 0.28 ms each, so the audio callback ran 3 times over its deadline and glitched. Three changes:
+- Voice budget (POLY): the callback time is measured; when it passes 65% of the buffer time the live-voice budget shrinks (down to 12) and the quietest release tails are faded out first. Held notes are never touched. The budget grows back below 45%.
+- Release tails below -50 dB are now faded out and freed instead of ringing to -60 dB.
+- The time-varying biquad helper (`_sosfilt_tv`) uses scipy's low-level core instead of one `sosfilt` call per section (with a fallback), cutting its cost by about 70%.
+- Result on the dense test sequence with `misty_shift_raum`: callback mean 17.5 ms to 3.2 ms (deadline 5.3 ms), late callbacks 97% to 1%, peak live voices 64 to 26.
+
 **Click at the end of decay after a re-press** (desktop only) - the sustain leak (the slow downward drift of a held note) was not reset when a note was pressed again while the previous one still sounded (legato path in MONO and UNISON). When the new decay reached the sustain level the envelope stepped down by the leaked amount, heard as a click about one decay time after the second press. The leak now only starts at the sustain stage.
 
 **Unison click after about a second** (desktop only) - the unison voices were spaced at exactly equal detune steps, so they drifted back into phase periodically and added into one loud peak (3 to 4 times the normal level) that the master limiter turned into a click. It was most noticeable when a note was pressed again while the previous one still rang, because the legato path keeps the voice phases. Each voice is now offset by a fraction of the spacing, keeping the order and total range.
