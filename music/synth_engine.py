@@ -1114,6 +1114,10 @@ class SynthEngine:
             self._arm_cb_count     = 0   # total callbacks processed
 
         self.voices: List[Voice] = [Voice(self.sample_rate, i, _bs) for i in range(self.num_voices)]
+        # UNISON stacks this many detuned voices. Every unison voice costs a full voice
+        # render, so stacking the whole desktop pool (64) overran the audio deadline.
+        # ARM keeps using its whole (small) pool.
+        self._unison_count = self.num_voices if self._IS_ARM else min(8, self.num_voices)
 
         # Ghost voice pool: pre-allocated extra voices that hold release tails from
         # stolen POLY voices.  When a real voice is stolen while still audible, its
@@ -3089,14 +3093,14 @@ class SynthEngine:
         elif self.voice_type == "unison":
             # Unison mode: all voices play same note with detuning spread.
             # Voices are detuned across ±unison_detune cents for the characteristic thick sound.
-            n = len(self.voices)
+            n = self._unison_count
             # _legato_base_phase is set by the first voice that takes the soft-trigger
             # (legato) path.  Initialise to voice 0's current phase so that voices
             # taking the soft path always have a valid anchor even if voice 0 itself
             # fell below the amplitude threshold and took the hard-trigger path instead.
             # (Without this initialisation, if voice 0 goes hard and voice 1 goes soft,
             # reading _legato_base_phase before it is ever assigned raises UnboundLocalError.)
-            for i, v in enumerate(self.voices):
+            for i, v in enumerate(self.voices[:n]):
                 # Spread voices evenly from -unison_detune to +unison_detune cents
                 if n > 1:
                     detune_cents = self.unison_detune * (2.0 * i / (n - 1) - 1.0)
@@ -4109,14 +4113,14 @@ class SynthEngine:
                         # Voice index N-1 = most positive detune → full right (pan=1.0).
                         # This links pitch position to spatial position, giving the
                         # characteristic "wide sweep" of professional unison sounds.
-                        n_v = len(self.voices)
-                        unison_pan = vi / max(n_v - 1, 1)
+                        n_v = self._unison_count
+                        unison_pan = min(vi / max(n_v - 1, 1), 1.0)
                         ang = unison_pan * np.pi / 2
                         # 1/sqrt(N) normalization: detuned voices are partially decorrelated
                         # (different phases + beating), so RMS sum grows as sqrt(N), not N.
                         # 1/N was too quiet; 1/sqrt(N) gives perceptually consistent loudness
                         # whether 2 or 8 voices are stacked.
-                        mix_scale = 1.0 / math.sqrt(self.num_voices)
+                        mix_scale = 1.0 / math.sqrt(self._unison_count)
                     else:
                         ang = v.pan * np.pi / 2
                         mix_scale = 1.0

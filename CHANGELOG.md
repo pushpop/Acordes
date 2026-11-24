@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
 
+**Unison dropouts** (desktop only) - UNISON stacked every voice in the pool, and the desktop pool grew to 64 voices, so each unison note rendered 64 detuned voices. The audio callback took about 12 ms for a 10 ms buffer, which underran continuously and chopped the sound into gated bursts (heard in `sharp_key`). UNISON now stacks 8 voices (about 1.8 ms per buffer). Loudness now matches MONO and POLY instead of the erratic 64-voice sum, which was quieter.
+
 **Chorus glitch at deep depth** (desktop only) - the chorus ring buffer (30 ms) is written for a whole audio buffer before the taps are read, so taps more than (ring size minus buffer size) behind read overwritten data and produced a step at every buffer start. It showed up from about depth 0.7 up (for example `User: Mellow Bass`, depth 0.8). The ring now has one extra buffer of headroom.
 
 **Live-play dips with fast notes** (desktop only):

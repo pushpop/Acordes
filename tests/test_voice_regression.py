@@ -869,3 +869,16 @@ def test_chorus_deep_sweep_no_buffer_boundary_step():
     audio = run_buffers(eng, 300)[100 * BUFFER_SIZE:, 0].astype(float)
     d2 = np.abs(np.diff(audio, 2))
     assert d2.max() < 0.005, f"chorus produced a step (max d2 {d2.max():.4f})"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_unison_uses_bounded_voice_count():
+    """UNISON must not render the whole voice pool; cost would exceed the audio deadline."""
+    eng = make_engine(voice_type="unison", waveform="sawtooth")
+    eng.note_on(60, 100)
+    run_buffers(eng, 10)
+    active = sum(1 for v in eng.voices if v.note_active)
+    assert active == 8, f"unison rendered {active} voices"
+    out = run_buffers(eng, 60)
+    rms = float(np.sqrt((out ** 2).mean()))
+    assert 0.08 < rms < 0.30, f"unison loudness changed (rms {rms:.3f})"
