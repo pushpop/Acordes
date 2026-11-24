@@ -77,3 +77,5 @@ battery-report.html
 docs/*.pdf
 tools/*.wav
 tools/artifact_analysis/
+tools/diagnose_dip.py
+tools/simulate_strum.py
