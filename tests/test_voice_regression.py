@@ -645,3 +645,62 @@ def test_legato_no_click_at_boundary(waveform, voice_type):
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ── Test: ghost promotion copies the full filter state ───────────────────
+
+def _small_poly_engine(**overrides):
+    """Poly engine limited to 4 voices so a 5th note forces a steal."""
+    eng = make_engine(waveform="sawtooth", cutoff=1500, resonance=0.4, sustain=0.8, **overrides)
+    eng.voices = eng.voices[:4]
+    eng.num_voices = 4
+    for n in (48, 55, 60, 67):
+        eng.note_on(n, velocity=100)
+    run_buffers(eng, 20)
+    return eng
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ghost filter-state copy is desktop only")
+def test_ghost_copies_filter_state():
+    eng = _small_poly_engine()
+    before = {
+        v.midi_note: (
+            v._arm_lpf_zi_r1.copy(),
+            v._arm_hpf_zi_r1.copy() if v._arm_hpf_zi_r1 is not None else None,
+            v._arm_dcblock_zi.copy() if v._arm_dcblock_zi is not None else None,
+        )
+        for v in eng.voices
+    }
+    eng.note_on(72, velocity=100)
+    # Render one buffer's worth of events without letting the ghost evolve:
+    # inspect right after the steal is processed by draining the queue.
+    eng._process_midi_events()
+    ghosts = [g for g in eng._ghost_voices if g.is_ghost]
+    assert ghosts, "steal did not promote a ghost"
+    g = ghosts[0]
+    lpf, hpf, dcb = before[g.midi_note]
+    assert g._arm_lpf_zi_r1 is not None and np.allclose(g._arm_lpf_zi_r1, lpf)
+    if hpf is not None:
+        assert g._arm_hpf_zi_r1 is not None and np.allclose(g._arm_hpf_zi_r1, hpf)
+    if dcb is not None:
+        assert g._arm_dcblock_zi is not None and np.allclose(g._arm_dcblock_zi, dcb)
+    # Copies, not shared references with the re-triggered real voice.
+    for v in eng.voices:
+        assert g._arm_lpf_zi_r1 is not v._arm_lpf_zi_r1
+
+
+# ── Test: poly steal does not click ──────────────────────────────────────
+
+@pytest.mark.parametrize("waveform", ["sawtooth", "square", "sine"])
+def test_poly_steal_no_click(waveform):
+    eng = make_engine(waveform=waveform, cutoff=1500, resonance=0.4, sustain=0.8)
+    eng.voices = eng.voices[:4]
+    eng.num_voices = 4
+    for n in (48, 55, 60, 67):
+        eng.note_on(n, velocity=100)
+    run_buffers(eng, 20)
+    steady = np.abs(np.diff(run_buffers(eng, 4)[:, 0])).max()
+    # Steal with a LOW note so the new waveform's own slope does not dominate.
+    eng.note_on(40, velocity=100)
+    after = np.abs(np.diff(run_buffers(eng, 4)[:, 0])).max()
+    assert after < steady * 1.3, f"steal click: {after:.4f} vs steady {steady:.4f}"

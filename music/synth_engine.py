@@ -3196,7 +3196,7 @@ class SynthEngine:
             #
             # Tier 3 (brutal steal): no ghost slot free.
             #   Same as the original behaviour — accept the glitch risk.  Only happens
-            #   under extreme polyphony abuse (all 8 real + all ghost slots occupied).
+            #   under extreme polyphony abuse (all real + all ghost slots occupied).
 
             # Priority metric: higher = more stealable.
             #   3 = releasing, not held, nearly silent (< 5%)   ← safe Tier 1
@@ -3279,6 +3279,20 @@ class SynthEngine:
                     ghost_slot.smooth_fl_hpf       = best_v.smooth_fl_hpf
                     ghost_slot.smooth_resonance    = best_v.smooth_resonance
                     ghost_slot.smooth_hpf_resonance = best_v.smooth_hpf_resonance
+                    if not self._IS_ARM:
+                        # Delay-line state of the scipy filters (the real filter state in
+                        # "fast" mode), the FEG cutoff smoother, piano-string partial
+                        # phases and the noise colour filter. Without these the ghost tail
+                        # restarts with a cold filter and zeroed partials.
+                        # Arrays are copied: the real voice is re-triggered right after.
+                        ghost_slot._arm_lpf_zi_r1 = None if best_v._arm_lpf_zi_r1 is None else best_v._arm_lpf_zi_r1.copy()
+                        ghost_slot._arm_lpf_zi_r2 = None if best_v._arm_lpf_zi_r2 is None else best_v._arm_lpf_zi_r2.copy()
+                        ghost_slot._arm_hpf_zi_r1 = None if best_v._arm_hpf_zi_r1 is None else best_v._arm_hpf_zi_r1.copy()
+                        ghost_slot._arm_hpf_zi_r2 = None if best_v._arm_hpf_zi_r2 is None else best_v._arm_hpf_zi_r2.copy()
+                        ghost_slot._arm_dcblock_zi = None if best_v._arm_dcblock_zi is None else best_v._arm_dcblock_zi.copy()
+                        ghost_slot._noise_lp_zi = None if best_v._noise_lp_zi is None else best_v._noise_lp_zi.copy()
+                        ghost_slot.feg_offset_smooth = best_v.feg_offset_smooth
+                        ghost_slot.partial_phases[:] = best_v.partial_phases
                     # If the voice was still active (not yet releasing), put the ghost
                     # into release so it fades out naturally.
                     if ghost_slot.note_active and not ghost_slot.is_releasing:
