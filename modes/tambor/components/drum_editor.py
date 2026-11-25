@@ -130,6 +130,7 @@ class DrumEditorScreen(Screen):
         sequencer: Optional["SequencerEngine"] = None,
         on_close: Optional[Callable[[], None]] = None,
         on_parameter_change: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_preview: Optional[Callable[[Dict[str, Any]], None]] = None,
     ):
         """Initialize drum editor.
 
@@ -140,6 +141,7 @@ class DrumEditorScreen(Screen):
             sequencer: SequencerEngine for triggering preview sounds
             on_close: Optional callback called when editor closes (via Enter or Escape)
             on_parameter_change: Optional callback called whenever parameter changes (for real-time updates)
+            on_preview: Optional callback that plays the drum with the given parameters
         """
         super().__init__()
         self.drum_name = drum_name
@@ -147,6 +149,7 @@ class DrumEditorScreen(Screen):
         self.on_apply = on_apply
         self.on_close = on_close
         self.on_parameter_change = on_parameter_change
+        self.on_preview = on_preview
         self.sequencer = sequencer
         self.selected_idx = 0  # Keep for backward compatibility, but use two-column navigation
         self.preview_playing = False
@@ -288,8 +291,11 @@ class DrumEditorScreen(Screen):
     def action_preview_drum(self):
         """Preview drum with current parameter edits.
 
-        Posts a preview request to TamborMode which will handle it via DrumVoiceManager.
+        Calls the preview callback when one is given, otherwise posts a preview request.
         """
+        if self.on_preview:
+            self.on_preview(self.synth_params.copy())
+            return
         # Post message for TamborMode to handle preview with current parameters
         self.post_message(self.PreviewRequested(self.drum_name, self.synth_params.copy()))
 

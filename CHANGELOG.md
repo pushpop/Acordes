@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+**Tambor per-pattern settings and drum editor** (desktop only) - ARM keeps the previous behaviour:
+- Mute, solo, PRE-SCALE, humanize and fill labels now follow each pattern. Mute and solo no longer carry over to the next pattern or get saved into it, and a queued fill is dropped when the pattern changes.
+- Pattern 1 on disk is no longer replaced by an empty placeholder when another pattern was open last.
+- An empty pattern keeps its step count, and the grid always matches the sequencer.
+- Changing the step count (or switching pattern) resizes the grid in place, so playback continues and the mute/solo lights and cursor stay.
+- Drum editor changes are now used during playback, and Space/R in the editor play the edited sound.
+
+**Tambor drum envelopes** (desktop only) - the attack, decay, sustain and release of the drum presets never took effect: the engine replaced them with the synth envelope, so with a sustaining synth sound the drums rang on forever. Each drum hit now carries its own envelope in its voice. It plays once, releases by itself when the preset has a sustain level, and frees the voice. Synth notes keep using the synth envelope.
+
 **MONO/UNISON legato click** - the persistent click on legato note changes is gone:
 - Root cause: the legato path reset `_arm_lpf_zi_r1/r2` and `_arm_hpf_zi_r1/r2` to `None`. These scipy `sosfilt` `zi` arrays are the filter delay-line state (not coefficient storage), so zeroing them cold-started the filter on every note change.
 - Fix: the four resets were removed from both the MONO and UNISON legato paths. Boundary jump dropped from about 0.37 to 0.0002.

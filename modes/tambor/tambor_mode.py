@@ -6,6 +6,7 @@ from textual.containers import Vertical, Horizontal, Container
 from textual.widgets import Static, Label
 from textual.binding import Binding
 from typing import Set, Tuple, List, Optional, Dict, Any
+import platform
 import time
 import threading
 from .components.header_widget import HeaderWidget
@@ -298,6 +299,23 @@ class DrumRow(Static):
                 cell.is_active = False
             cell.update_display()
 
+    def set_step_count(self, num_steps: int, pattern: list):
+        """Add or remove step cells so the row shows num_steps steps of pattern."""
+        self.num_steps = max(2, min(32, num_steps))
+        self.pattern_data = pattern
+        if not self.cells:
+            return  # Not composed yet: compose() builds the cells from the fields above
+
+        while len(self.cells) > self.num_steps:
+            self.cells.pop().remove()
+
+        added = [GridCell(step, self.drum_index) for step in range(len(self.cells), self.num_steps)]
+        if added:
+            self.cells.extend(added)
+            self.query_one("#drum-steps").mount(*added)
+
+        self.set_pattern(pattern)
+
     def toggle_step(self, step: int):
         """Toggle a specific step."""
         if 0 <= step < len(self.cells):
@@ -512,6 +530,9 @@ class TamborMode(Vertical):
 
     can_focus = True
 
+    # The ARM build keeps its established Tambor behaviour; fixes gated on this are desktop only.
+    _IS_ARM = platform.machine() in ("armv7l", "aarch64")
+
     BINDINGS = [
         Binding("up", "move_drum_up", "Up", show=False),
         Binding("down", "move_drum_down", "Down", show=False),
@@ -617,6 +638,7 @@ class TamborMode(Vertical):
         self.drum_solo_toggle: Set[int] = set()  # Which drums are manually soloed
         self.pattern_drum_mute_state: Dict[int, List[bool]] = {}  # Per-pattern mute state
         self.pattern_drum_solo_state: Dict[int, List[bool]] = {}  # Per-pattern solo state
+        self.pattern_pre_scales: Dict[int, PreScale] = {}  # Per-pattern PRE-SCALE
 
         # Humanize settings per-pattern
         self.pattern_humanize_enabled: Dict[int, bool] = {}  # Track ON/OFF per pattern
@@ -718,6 +740,10 @@ class TamborMode(Vertical):
         last_pattern = self._load_last_pattern()
         if last_pattern and 1 <= last_pattern <= 64:
             self.current_pattern = last_pattern
+
+        # The placeholder pattern 1 must not shadow the pattern 1 file on disk
+        if not self._IS_ARM and self.current_pattern != 1:
+            self.patterns[1] = None
 
         # Load initial pattern from disk on app startup (force_reload=True)
         self._load_current_pattern(force_reload=True)
@@ -1017,6 +1043,10 @@ class TamborMode(Vertical):
             # Auto-save current pattern before switching
             self._auto_save_current_pattern()
 
+            if not self._IS_ARM:
+                self._switch_pattern_state(pattern)
+                return
+
             self.current_pattern = pattern
             # Load pattern from memory or disk
             self._load_current_pattern()
@@ -1037,6 +1067,53 @@ class TamborMode(Vertical):
                 is_dirty = self.current_pattern in self.pattern_dirty
                 self.control_panel.update_pattern(self.current_pattern, is_dirty=is_dirty)
                 self.control_panel.update_step_count(self.current_step_count)
+
+    def _switch_pattern_state(self, pattern: int):
+        """Make pattern current, carrying every per-pattern setting with it.
+
+        Playback keeps running; the grid is resized in place to the pattern's step count.
+        """
+        self._remember_pattern_state(self.current_pattern)
+        if pattern != self.current_pattern:
+            # A fill belongs to the pattern it was queued on
+            self._fill_in_progress = False
+            self._current_fill_id = None
+            self._cached_expanded_fill = None
+
+        was_in_memory = self.patterns[pattern] is not None
+        self.current_pattern = pattern
+        self._load_current_pattern()
+        if was_in_memory:
+            self._restore_pattern_state(pattern)
+
+        self.current_step_count = self.pattern_step_counts[pattern]
+        self.sequencer.num_steps = self.current_step_count
+        self._rebuild_grid()
+
+        self._update_all_drum_row_displays()
+        self._update_control_panel_humanize()
+        self._update_control_panel_fill()
+        self._update_control_panel_pre_scale()
+        if self.control_panel:
+            self.control_panel.update_pattern(pattern, is_dirty=pattern in self.pattern_dirty)
+
+    def _remember_pattern_state(self, pattern_num: int):
+        """Keep the mute, solo and PRE-SCALE settings of a pattern in memory."""
+        drums = range(len(self.DRUM_SOUNDS))
+        self.pattern_drum_mute_state[pattern_num] = [i in self.drum_mute_toggle for i in drums]
+        self.pattern_drum_solo_state[pattern_num] = [i in self.drum_solo_toggle for i in drums]
+        self.pattern_pre_scales[pattern_num] = self.current_pre_scale
+
+    def _restore_pattern_state(self, pattern_num: int):
+        """Apply the remembered mute, solo and PRE-SCALE settings of a pattern."""
+        mute_state = self.pattern_drum_mute_state.get(pattern_num, [])
+        solo_state = self.pattern_drum_solo_state.get(pattern_num, [])
+        self.drum_mute_toggle = {i for i, muted in enumerate(mute_state) if muted}
+        self.drum_solo_toggle = {i for i, soloed in enumerate(solo_state) if soloed}
+        self._update_drum_mute_state_from_solo()
+
+        self.current_pre_scale = self.pattern_pre_scales.get(pattern_num, PreScale.SCALE_4)
+        self.pre_scale_index = self.pre_scale_values.index(self.current_pre_scale)
 
     def action_open_pattern_selector(self):
         """Open pattern selector as modal screen (N key)."""
@@ -1226,6 +1303,11 @@ class TamborMode(Vertical):
         def _on_editor_close():
             self.sequencer.restore_mute_state(mute_state_before)
 
+        on_preview = None
+        if not self._IS_ARM:
+            def on_preview(params):
+                self.drum_voice_manager.trigger_drum(drum_idx, 100, overrides=params)
+
         # Open drum editor modal with sequencer for preview functionality
         editor_screen = DrumEditorScreen(
             drum_name=drum_name,
@@ -1233,7 +1315,8 @@ class TamborMode(Vertical):
             on_apply=lambda params: self._on_drum_editor_applied(drum_name, params),
             sequencer=self.sequencer,
             on_close=_on_editor_close,
-            on_parameter_change=lambda params: self.update_drum_override_during_edit(drum_name, params)
+            on_parameter_change=lambda params: self.update_drum_override_during_edit(drum_name, params),
+            on_preview=on_preview,
         )
         self.app.push_screen(editor_screen)
 
@@ -1703,6 +1786,13 @@ class TamborMode(Vertical):
                     solo_state = [drum_idx in self.drum_solo_toggle for drum_idx in range(len(self.DRUM_SOUNDS))]
                     mute_state = mute_state if any(mute_state) else None
                     solo_state = solo_state if any(solo_state) else None
+                elif not self._IS_ARM:
+                    remembered_mute = self.pattern_drum_mute_state.get(pattern_num, [])
+                    remembered_solo = self.pattern_drum_solo_state.get(pattern_num, [])
+                    mute_state = remembered_mute if any(remembered_mute) else None
+                    solo_state = remembered_solo if any(remembered_solo) else None
+                    remembered_scale = self.pattern_pre_scales.get(pattern_num, self.current_pre_scale)
+                    pre_scale = str(remembered_scale.value)
 
                 # Get drum overrides if they exist
                 drum_overrides = None
@@ -1740,8 +1830,13 @@ class TamborMode(Vertical):
     def _rebuild_grid(self):
         """Rebuild the grid when step count changes.
 
-        Destroys old DrumRow widgets and recreates them with new step count.
+        On desktop the existing rows are resized in place, so playback, mute/solo lights
+        and the cursor are kept. On ARM the DrumRow widgets are destroyed and recreated.
         """
+        if not self._IS_ARM:
+            self._resize_grid()
+            return
+
         # Stop playback if running
         if self.playback_state == "PLAYING":
             self.action_stop_playback()
@@ -1800,6 +1895,26 @@ class TamborMode(Vertical):
 
         # Force display refresh to ensure grid is visible
         self.refresh()
+
+    def _resize_grid(self):
+        """Fit the current pattern and its drum rows to the current step count."""
+        old_pattern = self.patterns[self.current_pattern]
+        new_pattern = self._create_empty_pattern(self.current_step_count)
+        if old_pattern:
+            for new_steps, old_steps in zip(new_pattern, old_pattern):
+                for step_idx, old_step in enumerate(old_steps[:len(new_steps)]):
+                    new_steps[step_idx] = old_step.copy()
+
+        self.patterns[self.current_pattern] = new_pattern
+        self.pattern_step_counts[self.current_pattern] = self.current_step_count
+
+        for row, steps in zip(self.drum_rows, new_pattern):
+            row.set_step_count(self.current_step_count, steps)
+
+        self.cursor_step = max(0, min(self.cursor_step, self.current_step_count - 1))
+        if self.control_panel:
+            self.control_panel.update_step_count(self.current_step_count)
+        self._highlight_cursor()
 
     def _save_current_pattern(self):
         """Save the current pattern from the UI to memory.
@@ -2069,7 +2184,12 @@ class TamborMode(Vertical):
 
             # Trigger drum using DrumVoiceManager (handles monophonic synthesis)
             # DrumVoiceManager automatically applies drum-specific parameters
-            self.drum_voice_manager.trigger_drum(drum_idx, velocity, humanize_velocity=1.0 if not should_humanize else (velocity / 100.0))
+            self.drum_voice_manager.trigger_drum(
+                drum_idx,
+                velocity,
+                humanize_velocity=1.0 if not should_humanize else (velocity / 100.0),
+                overrides=None if self._IS_ARM else pattern_overrides.get(drum_name),
+            )
 
     def _on_sequencer_step(self, step: int):
         """Callback when sequencer advances to a new step."""

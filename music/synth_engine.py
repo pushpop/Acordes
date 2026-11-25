@@ -292,6 +292,9 @@ class Voice:
         # out and free its slot; tail_fade_prev is the gain applied to the previous buffer.
         self.tail_fading: bool = False
         self.tail_fade_prev: float = 1.0
+        # One-shot (attack, decay, sustain, release) carried by a drum hit. None means the
+        # voice follows the synth envelope.
+        self.drum_env: Optional[tuple] = None
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -304,6 +307,7 @@ class Voice:
         was_silent = not self.note_active and not self.is_releasing
         self.tail_fading = False
         self.tail_fade_prev = 1.0
+        self.drum_env = None
         self.steal_start_level = self.last_envelope_level if not was_silent else 0.0
 
         self.midi_note = midi_note
@@ -426,6 +430,7 @@ class Voice:
         self.out_gain_prev = 1.0
         self.tail_fading = False
         self.tail_fade_prev = 1.0
+        self.drum_env = None
         self._glide_from_freq = 0.0
         self._glide_elapsed   = 0
 
@@ -1953,12 +1958,24 @@ class SynthEngine:
             envelope.fill(0.0)
         else:
             envelope = np.zeros(num_samples, dtype=np.float32)
+        if voice.drum_env is None:
+            attack, decay = self.attack_current, self.decay_current
+            sustain, release = self.sustain_current, self.release_current
+        else:
+            attack, decay, sustain, release = voice.drum_env
+            # A drum hit gets no note-off: once its decay is over it either frees the
+            # voice (no sustain) or releases itself.
+            if voice.note_active and voice.envelope_time >= attack + decay:
+                if sustain > 0.001:
+                    voice.release(attack, decay, sustain, 1.0)
+                else:
+                    voice.reset()
         if voice.is_releasing:
             # rel_mod scales release time by note-off velocity (soft release -> longer tail).
             # time_const is the RC time constant of the exponential decay — the /4 divisor
             # that was here previously made releases sound 4x shorter than the UI indicated.
             rel_mod = 1.0 / (0.5 + voice.release_velocity)
-            time_const = max(0.005, self.release_current * rel_mod)
+            time_const = max(0.005, release * rel_mod)
             # On a MONO voice steal the outgoing voice gets a short cap so two pure-sine
             # voices don't beat together long enough to produce an audible AM artifact.
             if voice.release_time_cap > 0.0:
@@ -1978,8 +1995,8 @@ class SynthEngine:
             elif not self._IS_ARM and envelope[-1] < self._TAIL_FLOOR:
                 voice.tail_fading = True   # fade out and free the voice instead of ringing on
         elif voice.note_active:
-            atk_mask = times < self.attack_current
-            if self.attack_current > 0: envelope[atk_mask] = (times[atk_mask] / self.attack_current) * v_int
+            atk_mask = times < attack
+            if attack > 0: envelope[atk_mask] = (times[atk_mask] / attack) * v_int
             else: envelope[atk_mask] = v_int
             if voice.steal_start_level > 0.001:
                 # 8ms linear crossfade from the stolen note's last level to the new
@@ -1991,13 +2008,13 @@ class SynthEngine:
                     p = times[mask] / CROSS          # linear 0->1 over 8ms
                     envelope[mask] = voice.steal_start_level * (1.0 - p) + envelope[mask] * p
                     if times[-1] >= CROSS: voice.steal_start_level = 0.0
-            dec_end = self.attack_current + self.decay_current
-            dec_mask = (times >= self.attack_current) & (times < dec_end)
-            if self.decay_current > 0:
-                p = (times[dec_mask] - self.attack_current) / self.decay_current
-                envelope[dec_mask] = v_int * (1.0 - p * (1.0 - self.sustain_current))
-            else: envelope[dec_mask] = v_int * self.sustain_current
-            envelope[times >= dec_end] = v_int * self.sustain_current
+            dec_end = attack + decay
+            dec_mask = (times >= attack) & (times < dec_end)
+            if decay > 0:
+                p = (times[dec_mask] - attack) / decay
+                envelope[dec_mask] = v_int * (1.0 - p * (1.0 - sustain))
+            else: envelope[dec_mask] = v_int * sustain
+            envelope[times >= dec_end] = v_int * sustain
             # Feature 2: Sustain capacitor leakage — dielectric loss on the hold
             # capacitor. Very long sustained notes drift slightly downward over
             # ~6.5 seconds, flooring at 65% of the sustain level. Models the slow
@@ -2933,6 +2950,8 @@ class SynthEngine:
                 # trigger its note. No cap — up to 8 drums can fire per buffer.
                 self._apply_drum_params_inline(e['params'])
                 self._trigger_note(e['note'], e['velocity'] / 127.0)
+                if not self._IS_ARM:
+                    self._set_drum_envelope(e['note'], e['params'])
                 note_events_processed += 1
                 continue
             if note_events_processed >= 3:
@@ -2994,6 +3013,24 @@ class SynthEngine:
                 pass  # LPF always uses ladder; filter_mode kept for preset compat only
             elif hasattr(self, k):
                 setattr(self, k, v)
+
+    def _set_drum_envelope(self, note: int, params: dict):
+        """Give the voice just triggered for a drum hit its own envelope.
+
+        The synth envelope is shared by every voice and driven by the synth parameters,
+        so drum envelope values only take effect when they travel with the voice.
+        """
+        envelope = (
+            float(params.get('attack',  self.attack_target)),
+            float(params.get('decay',   self.decay_target)),
+            float(params.get('sustain', self.sustain_target)),
+            float(params.get('release', self.release_target)),
+        )
+        for v in self.voices:
+            if v.midi_note == note and v.note_active:
+                v.drum_env = envelope
+                # A stolen voice may have been positioned inside the synth attack
+                v.envelope_time = min(v.envelope_time, envelope[0])
 
     def _trigger_note(self, note: int, vel: float):
         # MONO and UNISON use gate behavior: velocity is ignored, amplitude is always full.
@@ -3121,6 +3158,7 @@ class SynthEngine:
 
                 old_v.is_releasing = False
                 old_v.note_active  = True
+                old_v.drum_env     = None
 
                 # Filter state preservation: keep all filter and oversample states
                 # warm across the steal.  Zeroing states causes a cold-start impulse:
@@ -3264,6 +3302,7 @@ class SynthEngine:
                         v.feg_release_start = 0.0
                     # Case B: envelope_time and feg_time continue unchanged.
                     v.is_releasing = False
+                    v.drum_env = None
                     v.onset_ms = onset_ms_for_note
                     # velocity_target NOT updated on legato steal — same reasoning
                     # as MONO: avoids the 64ms velocity-smoothing amplitude ramp.
@@ -3448,6 +3487,7 @@ class SynthEngine:
                         ghost_slot._noise_lp_zi = None if best_v._noise_lp_zi is None else best_v._noise_lp_zi.copy()
                         ghost_slot.feg_offset_smooth = best_v.feg_offset_smooth
                         ghost_slot.partial_phases[:] = best_v.partial_phases
+                        ghost_slot.drum_env = best_v.drum_env
                     # If the voice was still active (not yet releasing), put the ghost
                     # into release so it fades out naturally.
                     if ghost_slot.note_active and not ghost_slot.is_releasing:

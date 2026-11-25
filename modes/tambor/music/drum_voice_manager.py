@@ -46,7 +46,8 @@ class DrumVoiceManager:
                 synth_params = drum_preset.get("synth_params", {})
                 self.midi_note_params[midi_note] = synth_params.copy()
 
-    def trigger_drum(self, drum_idx: int, velocity: int, humanize_velocity: float = 1.0):
+    def trigger_drum(self, drum_idx: int, velocity: int, humanize_velocity: float = 1.0,
+                     overrides: Optional[Dict[str, Any]] = None):
         """
         Trigger a drum hit with a specific velocity.
 
@@ -64,6 +65,7 @@ class DrumVoiceManager:
             drum_idx: Drum index (0-7)
             velocity: MIDI velocity (0-127)
             humanize_velocity: Velocity modulation from humanization (0.8-1.2 typical)
+            overrides: Edited sound parameters that take precedence over the preset
         """
         if drum_idx < 0 or drum_idx >= 8:
             return
@@ -77,7 +79,7 @@ class DrumVoiceManager:
             return
 
         midi_note = drum_preset.get("midi_note", 36 + drum_idx)
-        synth_params = drum_preset.get("synth_params", {})
+        synth_params = {**drum_preset.get("synth_params", {}), **(overrides or {})}
 
         # Cache parameters for this MIDI note (per-note parameter tracking)
         # This prevents parameter overwriting when multiple drums trigger on same step
