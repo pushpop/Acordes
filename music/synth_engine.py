@@ -295,6 +295,10 @@ class Voice:
         # One-shot (attack, decay, sustain, release) carried by a drum hit. None means the
         # voice follows the synth envelope.
         self.drum_env: Optional[tuple] = None
+        # Engine settings a drum voice is rendered with, and its own level. None means the
+        # voice sounds like the synth.
+        self.drum_sound: Optional[dict] = None
+        self.drum_gain: float = 1.0
 
     def is_available(self) -> bool:
         return not self.note_active and not self.is_releasing
@@ -308,6 +312,8 @@ class Voice:
         self.tail_fading = False
         self.tail_fade_prev = 1.0
         self.drum_env = None
+        self.drum_sound = None
+        self.drum_gain = 1.0
         self.steal_start_level = self.last_envelope_level if not was_silent else 0.0
 
         self.midi_note = midi_note
@@ -431,6 +437,11 @@ class Voice:
         self.tail_fading = False
         self.tail_fade_prev = 1.0
         self.drum_env = None
+        if self.drum_sound is not None:
+            # The next note must not glide its filter from this drum's cutoff
+            self.smooth_fl_lpf = -1.0
+        self.drum_sound = None
+        self.drum_gain = 1.0
         self._glide_from_freq = 0.0
         self._glide_elapsed   = 0
 
@@ -2948,10 +2959,11 @@ class SynthEngine:
             if e['type'] == 'drum_trigger':
                 # Atomic drum trigger: apply this drum's params then immediately
                 # trigger its note. No cap — up to 8 drums can fire per buffer.
-                self._apply_drum_params_inline(e['params'])
-                self._trigger_note(e['note'], e['velocity'] / 127.0)
-                if not self._IS_ARM:
-                    self._set_drum_envelope(e['note'], e['params'])
+                if self._IS_ARM:
+                    self._apply_drum_params_inline(e['params'])
+                    self._trigger_note(e['note'], e['velocity'] / 127.0)
+                else:
+                    self._trigger_drum_voice(e['note'], e['velocity'] / 127.0, e['params'])
                 note_events_processed += 1
                 continue
             if note_events_processed >= 3:
@@ -3014,21 +3026,60 @@ class SynthEngine:
             elif hasattr(self, k):
                 setattr(self, k, v)
 
-    def _set_drum_envelope(self, note: int, params: dict):
-        """Give the voice just triggered for a drum hit its own envelope.
+    def _drum_voice_sound(self, params: dict) -> dict:
+        """Engine settings for one drum voice: the drum's own sound, synth colouring off."""
+        return {
+            'waveform':              params.get('waveform', self.waveform),
+            'cutoff_current':        float(params.get('cutoff', self.cutoff_target)),
+            'resonance_current':     float(params.get('resonance', self.resonance_target)),
+            'noise_level_current':   float(params.get('noise_level', 0.0)),
+            'octave':                0,
+            'sine_mix':              0.0,
+            'rank2_enabled':         False,
+            'key_tracking_current':  0.0,
+            'hpf_cutoff_current':    20.0,
+            'hpf_resonance_current': 0.0,
+            'filter_routing':        'lp_hp',
+            'feg_amount_current':    0.0,
+            'feg_amount_target':     0.0,
+        }
 
-        The synth envelope is shared by every voice and driven by the synth parameters,
-        so drum envelope values only take effect when they travel with the voice.
+    def _swap_settings(self, settings: dict) -> dict:
+        """Set engine attributes from settings and return the values they replaced."""
+        replaced = {name: getattr(self, name) for name in settings}
+        for name, value in settings.items():
+            setattr(self, name, value)
+        return replaced
+
+    def _trigger_drum_voice(self, note: int, vel: float, params: dict):
+        """Trigger a drum hit whose sound and envelope travel with its voice.
+
+        The synth settings are shared by every voice, so drum values written to them
+        would colour all drums on a step alike and overwrite the synth sound.
         """
+        sound = self._drum_voice_sound(params)
         envelope = (
             float(params.get('attack',  self.attack_target)),
             float(params.get('decay',   self.decay_target)),
             float(params.get('sustain', self.sustain_target)),
             float(params.get('release', self.release_target)),
         )
+        synth_settings = self._swap_settings(sound)
+        try:
+            self._trigger_note(note, vel)
+        finally:
+            self._swap_settings(synth_settings)
+
         for v in self.voices:
             if v.midi_note == note and v.note_active:
                 v.drum_env = envelope
+                v.drum_sound = sound
+                v.drum_gain = float(params.get('amp_level', 1.0))
+                # Start the filter on the drum's own settings instead of gliding to them
+                v.smooth_fl_lpf = sound['cutoff_current']
+                v.smooth_fl_hpf = sound['hpf_cutoff_current']
+                v.smooth_resonance = sound['resonance_current']
+                v.smooth_hpf_resonance = sound['hpf_resonance_current']
                 # A stolen voice may have been positioned inside the synth attack
                 v.envelope_time = min(v.envelope_time, envelope[0])
 
@@ -3159,6 +3210,8 @@ class SynthEngine:
                 old_v.is_releasing = False
                 old_v.note_active  = True
                 old_v.drum_env     = None
+                old_v.drum_sound   = None
+                old_v.drum_gain    = 1.0
 
                 # Filter state preservation: keep all filter and oversample states
                 # warm across the steal.  Zeroing states causes a cold-start impulse:
@@ -3303,6 +3356,8 @@ class SynthEngine:
                     # Case B: envelope_time and feg_time continue unchanged.
                     v.is_releasing = False
                     v.drum_env = None
+                    v.drum_sound = None
+                    v.drum_gain = 1.0
                     v.onset_ms = onset_ms_for_note
                     # velocity_target NOT updated on legato steal — same reasoning
                     # as MONO: avoids the 64ms velocity-smoothing amplitude ramp.
@@ -3488,6 +3543,8 @@ class SynthEngine:
                         ghost_slot.feg_offset_smooth = best_v.feg_offset_smooth
                         ghost_slot.partial_phases[:] = best_v.partial_phases
                         ghost_slot.drum_env = best_v.drum_env
+                        ghost_slot.drum_sound = best_v.drum_sound
+                        ghost_slot.drum_gain = best_v.drum_gain
                     # If the voice was still active (not yet releasing), put the ghost
                     # into release so it fades out naturally.
                     if ghost_slot.note_active and not ghost_slot.is_releasing:
@@ -3953,6 +4010,11 @@ class SynthEngine:
                         v.velocity_current = v.velocity_target
                     v.velocity = v.velocity_current  # Update the velocity used in envelope/filter calculations
 
+                    # A drum voice is rendered with its own settings and ignores the synth LFO
+                    is_drum = v.drum_sound is not None
+                    drum_gain = v.drum_gain
+                    synth_settings = self._swap_settings(v.drum_sound) if is_drum else None
+
                     p1_s, p2_s = v.phase, v.phase2
 
                     # Portamento glide: smoothly interpolate v.frequency from the
@@ -3971,7 +4033,7 @@ class SynthEngine:
                             v._glide_from_freq = 0.0
                             v.frequency = v.base_frequency
 
-                    f1 = v.frequency * vco_lfo if v.frequency else 440.0
+                    f1 = v.frequency * (1.0 if is_drum else vco_lfo) if v.frequency else 440.0
                     if self.octave_enabled and self.octave != 0: f1 *= (2.0 ** self.octave)
 
                     if self.waveform == "piano_string":
@@ -4155,7 +4217,7 @@ class SynthEngine:
                     # value.  The per-voice smooth_fl_lpf already partially absorbs steps,
                     # but this midpoint average halves the effective step size before it
                     # ever reaches the filter coefficient calculation.
-                    _vcf_lfo_eff = (self._vcf_lfo_prev + vcf_lfo) * 0.5
+                    _vcf_lfo_eff = 1.0 if is_drum else (self._vcf_lfo_prev + vcf_lfo) * 0.5
 
                     _base_cutoff = self.cutoff_current
                     self.cutoff_current = float(np.clip(_base_cutoff + feg_cutoff_offset, 20.0, 20000.0))
@@ -4191,7 +4253,9 @@ class SynthEngine:
                     _vca_lfo_ramp = np.linspace(self._vca_lfo_prev, vca_lfo, frame_count, dtype=np.float32)
                     v_samples = self._apply_envelope(
                         v, v_samples, frame_count,
-                        _env_buf=v._v_env_buf, _times_buf=v._v_times_buf) * _vca_lfo_ramp
+                        _env_buf=v._v_env_buf, _times_buf=v._v_times_buf)
+                    if not is_drum:
+                        v_samples = v_samples * _vca_lfo_ramp
                     # Per-voice onset ramp: a frequency-adaptive linear fade-in applied
                     # to the post-envelope signal before the DC blocker.  The DC blocker
                     # resets to zero on every new trigger; if the signal is non-zero at
@@ -4271,10 +4335,14 @@ class SynthEngine:
                     else:
                         ang = v.pan * np.pi / 2
                         mix_scale = 1.0
+                    if is_drum:
+                        mix_scale *= drum_gain
                     mixed_l += v_samples * np.cos(ang) * mix_scale
                     mixed_r += v_samples * np.sin(ang) * mix_scale
                     if v.tail_fading and v.tail_fade_prev < 0.02:
                         v.reset()
+                    if synth_settings is not None:
+                        self._swap_settings(synth_settings)
 
             # Update LFO previous-buffer trackers for within-buffer interpolation.
             # These are read at the start of each voice's filter and VCA processing
@@ -4290,6 +4358,9 @@ class SynthEngine:
             _ghost_ang  = np.pi / 4.0   # centre pan
             for g in self._ghost_voices:
                 if g.is_ghost and (g.note_active or g.is_releasing):
+                    ghost_gain = _GHOST_GAIN * g.drum_gain
+                    synth_settings = (self._swap_settings(g.drum_sound)
+                                      if g.drum_sound is not None else None)
                     f_g = g.frequency if g.frequency else 440.0
                     if self.octave_enabled and self.octave != 0:
                         f_g *= (2.0 ** self.octave)
@@ -4317,8 +4388,10 @@ class SynthEngine:
                         gs[:n] = gs[:n] * ramp[:n]
                         g.onset_samples += frame_count
                     gs = self._apply_dc_blocker(g, gs)
-                    mixed_l += gs * np.cos(_ghost_ang) * _GHOST_GAIN
-                    mixed_r += gs * np.sin(_ghost_ang) * _GHOST_GAIN
+                    mixed_l += gs * np.cos(_ghost_ang) * ghost_gain
+                    mixed_r += gs * np.sin(_ghost_ang) * ghost_gain
+                    if synth_settings is not None:
+                        self._swap_settings(synth_settings)
 
             # ── BBD-style Chorus (bypass when chorus_mix == 0) ───────────────
             # All taps read from the same shared ring buffer. Four LFO phases

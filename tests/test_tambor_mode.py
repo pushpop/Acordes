@@ -301,7 +301,7 @@ def test_override_reaches_the_synth_engine():
     engine = make_engine()
     DrumVoiceManager(engine).trigger_drum(KICK, 100, overrides={"cutoff_freq": 900})
     run_buffers(engine, 1)
-    assert engine.cutoff_target == 900
+    assert sounding_voices(engine, 36)[0].drum_sound["cutoff_current"] == 900
 
 
 # ── Drum envelopes in the synth engine ───────────────────────────
@@ -383,6 +383,7 @@ def test_synth_notes_after_drums_use_the_synth_envelope(voice_type):
     render(engine, 1.5)
     assert sounding_voices(engine, SYNTH_NOTE)
     assert all(v.drum_env is None for v in sounding_voices(engine, SYNTH_NOTE))
+    assert all(v.drum_sound is None for v in sounding_voices(engine, SYNTH_NOTE))
     assert np.abs(render(engine, 0.1)).max() > 0.01
 
 
@@ -392,6 +393,131 @@ def test_arm_engine_ignores_per_drum_envelopes():
     DrumVoiceManager(engine).trigger_drum(KICK, 100)
     engine._process_midi_events()
     assert all(v.drum_env is None for v in engine.voices)
+
+
+# ── Drum sound settings in the synth engine ──────────────────────
+
+def low_band_db(audio):
+    """Energy below 150 Hz in the first 200 ms of the left channel."""
+    spectrum = np.abs(np.fft.rfft(audio[:9600, 0])) ** 2
+    freqs = np.fft.rfftfreq(9600, 1 / 48000)
+    return 10 * np.log10(spectrum[freqs < 150].sum() + 1e-12)
+
+
+def test_kick_keeps_its_low_end_with_a_hat_on_the_same_step():
+    alone = drum_engine()
+    DrumVoiceManager(alone).trigger_drum(KICK, 100)
+    together = drum_engine()
+    manager = DrumVoiceManager(together)
+    manager.trigger_drum(KICK, 100)
+    manager.trigger_drum(2, 100)
+    # Two voices share the mix, which lowers each by about 3 dB
+    assert low_band_db(render(together, 0.2)) > low_band_db(render(alone, 0.2)) - 6.0
+
+
+def test_drum_hits_leave_the_synth_sound_untouched():
+    engine = drum_engine()
+    render(engine, 3.0)  # let smoothed synth parameters settle
+    names = ("waveform", "cutoff_target", "cutoff_current", "resonance_target",
+             "noise_level_target", "amp_level_target", "amp_level_current")
+    before = {name: getattr(engine, name) for name in names}
+    manager = DrumVoiceManager(engine)
+    for drum_idx in range(8):
+        manager.trigger_drum(drum_idx, 100)
+    render(engine, 0.2)
+    assert {name: getattr(engine, name) for name in names} == before
+
+
+def test_synth_settings_do_not_colour_the_drums():
+    def kick(**synth):
+        engine = drum_engine()
+        engine.update_parameters(**synth)
+        render(engine, 3.0)  # let smoothed synth parameters settle
+        DrumVoiceManager(engine).trigger_drum(KICK, 100, overrides={"noise_level": 0.0})
+        return render(engine, 0.3)
+
+    plain = kick()
+    coloured = kick(octave=1, octave_enabled=True, sine_mix=0.5, rank2_enabled=True,
+                    feg_amount=1.0, hpf_cutoff=2000.0, key_tracking=1.0,
+                    lfo_depth=1.0, lfo_target="all", lfo_freq=8.0)
+    assert np.abs(plain).max() > 0.01
+    np.testing.assert_allclose(coloured, plain, atol=1e-3)
+
+
+def test_each_drum_has_its_own_volume():
+    def peak(volume):
+        engine = drum_engine()
+        DrumVoiceManager(engine).trigger_drum(5, 100, overrides={"volume": volume})
+        return np.abs(render(engine, 0.1)).max()
+
+    assert peak(0.3) == pytest.approx(peak(0.9) / 3, rel=0.15)
+
+
+def test_arm_engine_keeps_global_drum_parameters():
+    engine = drum_engine()
+    engine._IS_ARM = True
+    DrumVoiceManager(engine).trigger_drum(KICK, 100)
+    engine._process_midi_events()
+    assert engine.cutoff_target == DRUM_PRESETS["Kick"]["synth_params"]["cutoff_freq"]
+    assert all(v.drum_sound is None for v in engine.voices)
+
+
+# ── Navigation inside the application ────────────────────────────
+
+def run_in_main_screen(scenario):
+    """Run scenario(pilot, mode) with Tambor opened from the real MainScreen."""
+    from main import MainScreen
+    from modes.main_menu_mode import MainMenuMode
+
+    engine = FakeEngine()
+    engine.soft_all_notes_off = lambda: None
+    context = {
+        "synth_engine": engine,
+        "current_mode": "main_menu",
+        "create_main_menu": lambda screen: MainMenuMode(screen),
+        "create_tambor": lambda: TamborMode(config_manager=FakeConfig(), synth_engine=engine),
+    }
+
+    class ShellApp(App):
+        def on_mount(self):
+            self.push_screen(MainScreen(context))
+
+    async def main():
+        async with ShellApp().run_test(size=(160, 50)) as pilot:
+            await pilot.pause(0.3)
+            await pilot.press("5")
+            await pilot.pause(0.5)
+            await scenario(pilot, pilot.app.screen.query_one(TamborMode))
+
+    asyncio.run(main())
+
+
+def test_arrow_keys_move_the_cursor_inside_the_app():
+    async def scenario(pilot, mode):
+        await pilot.press("right", "right", "right", "down", "down", "left")
+        assert (mode.cursor_drum, mode.cursor_step) == (2, 2)
+        assert mode.drum_rows[2].cells[2].has_class("focused")
+        await pilot.press("up")
+        assert mode.cursor_drum == 1
+
+    run_in_main_screen(scenario)
+
+
+def test_arrow_keys_still_work_after_dialogs_and_mode_changes():
+    async def scenario(pilot, mode):
+        await pilot.press("e")
+        await pilot.pause(0.1)
+        await pilot.press("down", "right", "escape")
+        await pilot.pause(0.1)
+        assert (mode.cursor_drum, mode.cursor_step) == (0, 0)
+        await pilot.press("0")
+        await pilot.pause(0.3)
+        await pilot.press("5")
+        await pilot.pause(0.3)
+        await pilot.press("right")
+        assert mode.cursor_step == 1
+
+    run_in_main_screen(scenario)
 
 
 # ── ARM behaviour is frozen ──────────────────────────────────────

@@ -23,6 +23,14 @@ from .music.audio_thread import PatternSaver
 from .music.humanize import Humanizer
 
 
+# The ARM build keeps its established Tambor behaviour; fixes gated on this are desktop only.
+IS_ARM = platform.machine() in ("armv7l", "aarch64")
+
+# The main screen consumes arrow keys before ordinary bindings see them, so the desktop
+# arrow bindings take priority.
+ARROWS_FIRST = not IS_ARM
+
+
 class SimpleConfigManager:
     """Simple config manager stub for standalone use."""
 
@@ -530,14 +538,13 @@ class TamborMode(Vertical):
 
     can_focus = True
 
-    # The ARM build keeps its established Tambor behaviour; fixes gated on this are desktop only.
-    _IS_ARM = platform.machine() in ("armv7l", "aarch64")
+    _IS_ARM = IS_ARM
 
     BINDINGS = [
-        Binding("up", "move_drum_up", "Up", show=False),
-        Binding("down", "move_drum_down", "Down", show=False),
-        Binding("left", "move_step_left", "Left", show=False),
-        Binding("right", "move_step_right", "Right", show=False),
+        Binding("up", "move_drum_up", "Up", show=False, priority=ARROWS_FIRST),
+        Binding("down", "move_drum_down", "Down", show=False, priority=ARROWS_FIRST),
+        Binding("left", "move_step_left", "Left", show=False, priority=ARROWS_FIRST),
+        Binding("right", "move_step_right", "Right", show=False, priority=ARROWS_FIRST),
         Binding("enter", "toggle_step", "Toggle Step", show=False),
         Binding("space", "toggle_playback", "Play/Stop", show=False),
         Binding("p", "toggle_playback", "Play/Stop", show=False),

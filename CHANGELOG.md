@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor drum envelopes** (desktop only) - the attack, decay, sustain and release of the drum presets never took effect: the engine replaced them with the synth envelope, so with a sustaining synth sound the drums rang on forever. Each drum hit now carries its own envelope in its voice. It plays once, releases by itself when the preset has a sustain level, and frees the voice. Synth notes keep using the synth envelope.
 
+**Tambor drum sounds** (desktop only) - waveform, cutoff, resonance, noise level and volume were single engine settings, so the last drum on a step decided how all of them sounded (a closed hi-hat on the kick's step removed about 32 dB of the kick's low end), and playing Tambor overwrote the synth sound. Each drum voice is now rendered with its own settings. Synth octave, sub oscillator, second oscillator, key tracking, high-pass filter, filter envelope and LFO no longer colour the drums. Master settings (amp level, drive, chorus, delay) still apply.
+
+**Tambor arrow keys** (desktop only) - inside the application the arrow keys did nothing, because the main screen consumed them before Tambor's bindings ran. The sequencer cursor can be moved again.
+
 **MONO/UNISON legato click** - the persistent click on legato note changes is gone:
 - Root cause: the legato path reset `_arm_lpf_zi_r1/r2` and `_arm_hpf_zi_r1/r2` to `None`. These scipy `sosfilt` `zi` arrays are the filter delay-line state (not coefficient storage), so zeroing them cold-started the filter on every note change.
 - Fix: the four resets were removed from both the MONO and UNISON legato paths. Boundary jump dropped from about 0.37 to 0.0002.
