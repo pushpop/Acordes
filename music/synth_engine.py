@@ -1048,7 +1048,10 @@ class SynthEngine:
         # a small even-harmonic injection adds warmth proportional to signal level.
         # State is per-engine (post-mix, stereo). Shares the scipy lfilter fast
         # path with the per-voice DC blocker for zero extra Python overhead.
-        _xfmr_c = math.exp(-2.0 * math.pi * 18000.0 / self.sample_rate)
+        # Desktop rolls the top end off lower (12 kHz) than the original 18 kHz to take the
+        # edge off bright, saturated material.
+        _xfmr_hz = 18000.0 if self._IS_ARM else 12000.0
+        _xfmr_c = math.exp(-2.0 * math.pi * _xfmr_hz / self.sample_rate)
         self._XFMR_LP_B    = np.array([(1.0 - _xfmr_c)], dtype=np.float64)
         self._XFMR_LP_A    = np.array([1.0, -_xfmr_c],   dtype=np.float64)
         self._XFMR_LP_ZI_L = np.zeros(1, dtype=np.float64)  # filter memory L
@@ -1073,8 +1076,10 @@ class SynthEngine:
         self._COMP_ENV_REL   = 0.08   # slower release (~8 buffers / ~85 ms)
         self._COMP_GAIN_ATK  = 0.40   # gain ramp down quickly
         self._COMP_GAIN_REL  = 0.04   # gain recovers slowly (tube pumping character)
-        self._COMP_MAKEUP    = 1.15   # +1.2 dB makeup gain
-        self._COMP_HARMONIC  = 0.12   # 2nd harmonic depth during compression
+        # Desktop uses less makeup and less added harmonic than the original (1.15 / 0.12)
+        # so the master stays cooler and less edgy; ARM keeps the original values.
+        self._COMP_MAKEUP    = 1.15 if self._IS_ARM else 1.0    # makeup gain
+        self._COMP_HARMONIC  = 0.12 if self._IS_ARM else 0.08   # 2nd harmonic depth during compression
 
         # ── Brickwall true-peak limiter ─────────────────────────────────────────
         # Final safety net after compressor: catches per-buffer peak transients
@@ -1089,7 +1094,10 @@ class SynthEngine:
         # Varicap: maximum fractional cutoff reduction at full signal level (10%).
         self._CAP_VARICAP_DEPTH = 0.10
         # Sustain leakage: one-sample charge loss, giving a ~6.5 s time constant.
-        self._CAP_SUSTAIN_LEAK  = 1.0 / (6.5 * self.sample_rate)
+        # Desktop keeps only a faint drift (down to 95% over about 6.5 s) so a held note
+        # stays even; the original 65% floor sank a held note by about 3 dB. ARM unchanged.
+        self._CAP_SUSTAIN_FLOOR = 0.65 if self._IS_ARM else 0.95
+        self._CAP_SUSTAIN_LEAK  = (1.0 if self._IS_ARM else 0.05) / (6.5 * self.sample_rate)
         # Capacitor waveshaper: dry/wet blend (7% wet — transparent).
         self._CAP_WS_BLEND      = 0.07
         # Capacitor waveshaper: RC time constant normalised to oscillator period.
@@ -2002,7 +2010,7 @@ class SynthEngine:
                     voice.sustain_cap = 1.0
                 sustain_mask = times >= dec_end
                 if sustain_mask.any():
-                    voice.sustain_cap = max(0.65, voice.sustain_cap - self._CAP_SUSTAIN_LEAK * num_samples)
+                    voice.sustain_cap = max(self._CAP_SUSTAIN_FLOOR, voice.sustain_cap - self._CAP_SUSTAIN_LEAK * num_samples)
                     envelope[sustain_mask] *= voice.sustain_cap
             # DC blocker settling transient suppression is now handled by ONSET_RAMP
             # (frequency-adaptive linear fade-in applied to post-envelope signal).
@@ -4572,7 +4580,7 @@ class SynthEngine:
             # fills that headroom while letting the tanh work a little harder for
             # natural analog warmth.  Applied before drive so high-drive presets
             # are unaffected (tanh already saturates fully at drive >= 2).
-            _MAKEUP_GAIN = 1.4
+            _MAKEUP_GAIN = 1.4 if self._IS_ARM else 1.08   # desktop: cooler, less saturated master
             mixed_l *= _MAKEUP_GAIN
             mixed_r *= _MAKEUP_GAIN
             # Drive applied here — after _sanitize_signal has already guarded per-voice

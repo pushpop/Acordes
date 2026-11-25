@@ -1035,3 +1035,34 @@ def test_delay_tail_after_release_has_no_buffer_boundary_steps(voice_type):
     assert d2[at_boundary].max() < 2.0 * d2[~at_boundary].max() + 0.002, (
         f"delay tail steps at buffer boundaries (boundary {d2[at_boundary].max():.4f}, "
         f"interior {d2[~at_boundary].max():.4f})")
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+@pytest.mark.parametrize("waveform,max_rms_db", [("sawtooth", -11.5), ("square", -10.0)])
+def test_master_output_leaves_headroom(waveform, max_rms_db):
+    """A loud four-note chord must leave headroom on the master output."""
+    eng = make_engine(voice_type="poly", waveform=waveform, cutoff=2000, sustain=0.7)
+    for n in (48, 52, 55, 60):
+        eng.note_on(n, 127)
+    audio = run_buffers(eng, 120)[40 * BUFFER_SIZE:, 0].astype(float)
+    peak = float(np.abs(audio).max())
+    rms_db = 20 * np.log10(np.sqrt((audio ** 2).mean()) + 1e-9)
+    assert peak < 0.8, f"master peak too hot ({peak:.2f})"
+    assert rms_db < max_rms_db, f"master RMS too hot ({rms_db:.1f} dBFS)"
+
+
+@pytest.mark.skipif(SynthEngine._IS_ARM, reason="ARM engine behaviour is frozen")
+def test_held_note_level_stays_even():
+    """A held note must not keep drifting down once it reaches the sustain level."""
+    eng = make_engine(voice_type="poly", waveform="sine", octave=1, cutoff=8000,
+                      attack=0.016, decay=0.08, sustain=0.65, release=0.2)
+    eng.note_on(60, 100)
+    audio = run_buffers(eng, 500)[:, 0].astype(float)
+    sr = eng.sample_rate
+
+    def peak_db(t0, t1):
+        seg = np.abs(audio[int(t0 * sr):int(t1 * sr)]).max()
+        return 20 * np.log10(seg + 1e-9)
+
+    drift = peak_db(0.4, 0.6) - peak_db(3.8, 4.0)
+    assert drift < 1.0, f"held note drifted down by {drift:.1f} dB"

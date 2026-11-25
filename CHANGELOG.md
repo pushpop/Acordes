@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Silent chorus in four presets** - `heavy_sino_eco`, `user__acid_lead`, `user__arp_slow` and `user__harpsichord` had `chorus_depth` set but `chorus_mix = 0`, which bypasses the chorus. `chorus_mix` is now set.
 
+**Even level on held notes** (desktop only) - a held note kept sinking by about 3 dB over the first 2 to 3 seconds because of the simulated sustain-capacitor leak (it floored at 65% of the sustain level). The desktop leak now only drifts down to 95% over about 6.5 s, so a held note stays even. ARM keeps the original behaviour. The remaining initial drop is the preset's own decay and sustain settings.
+
+**Cooler, less harsh master output** (desktop only) - the output stage ran hot: across the 75 presets the median chord sat at -12.4 dBFS RMS with peaks near 0.71, and 6 presets peaked above 0.9. Changes: pre-saturation makeup 1.4 to 1.08 (less drive into the tanh, so less added harmonic edge), compressor makeup 1.15 to 1.0, compressor added harmonic 0.12 to 0.08, and the output transformer low-pass 18 kHz to 12 kHz. Median chord is now -15.0 dBFS RMS with peaks near 0.56, and no preset chord peaks above 0.9. ARM keeps the original values.
+
 **Glitchy delay and chorus tails after note-off** (desktop only) - once all voices were silent, the end-of-note crossfade was re-armed on every buffer for as long as the delay or chorus tail was audible. Each buffer's real signal was blended with the held last sample, ramping its level from zero at every buffer start. That amplitude modulation at buffer rate (10 ms at 480 samples) is the pulsing and stepping heard after releasing a key in `lunar_sino`. The crossfade is now armed only on the buffer where the voices first go silent.
 
 **Overload with dense polyphony** (desktop only) - a busy sequence with long release tails kept all 64 voices alive (a dense test sequence needed about 90) at roughly 0.28 ms each, so the audio callback ran 3 times over its deadline and glitched. Three changes:
