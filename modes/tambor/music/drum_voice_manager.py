@@ -107,6 +107,17 @@ class DrumVoiceManager:
         voice_info["last_note"] = midi_note
         voice_info["is_active"] = True
 
+    def hit_params(self, drum_idx: int, overrides: Optional[Dict[str, Any]] = None) -> tuple:
+        """Return (midi_note, engine parameters) describing one drum's sound.
+
+        Args:
+            drum_idx: Drum index (0-7)
+            overrides: Edited sound parameters that take precedence over the preset
+        """
+        drum_preset = DRUM_PRESETS[self._get_drum_name_by_index(drum_idx)]
+        synth_params = {**drum_preset.get("synth_params", {}), **(overrides or {})}
+        return drum_preset.get("midi_note", 36 + drum_idx), self._build_drum_params(synth_params)
+
     def release_drum(self, drum_idx: int, velocity: int = 0):
         """
         Release a drum note (allows envelope release phase to complete).

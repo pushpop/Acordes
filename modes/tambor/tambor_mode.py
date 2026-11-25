@@ -710,6 +710,10 @@ class TamborMode(Vertical):
         # Playhead step (-1 = no playhead shown)
         self.playhead_step: int = -1
 
+        # Engine drum clock: last sequence sent and last step count seen
+        self._sent_sequence: Optional[Dict[str, Any]] = None
+        self._clock_ticks: int = 0
+
     def compose(self):
         """Compose the drum machine layout."""
         yield HeaderWidget(title="TAMBOR", subtitle="Drum Sequencer")
@@ -1009,14 +1013,22 @@ class TamborMode(Vertical):
             self.playback_state = "PLAYING"
             self.sequencer.stop()  # Reset to step 0
             self.sequencer.start()  # Then start playback
-            # Trigger the initial step (step 0) immediately so it plays on startup
-            self._trigger_active_drums_for_step(0)
+            if self._uses_engine_clock():
+                # The audio thread plays the pattern from step 0
+                self._clock_ticks = self.synth_engine.get_drum_clock_position()[0]
+                self._sent_sequence = self._build_sequence()
+                self.synth_engine.drum_clock_start(self._sent_sequence)
+            else:
+                # Trigger the initial step (step 0) immediately so it plays on startup
+                self._trigger_active_drums_for_step(0)
             # Update playhead to show step 0 immediately
             self._update_playhead(0)
             # Ensure update timer is running for playback polling
             self._start_update_timer()
         else:
             self.playback_state = "STOPPED"
+            if self._uses_engine_clock():
+                self.synth_engine.drum_clock_stop()
             self.sequencer.stop()  # Stop and reset to step 0
             self._clear_playhead()
             # Stop update timer — no polling needed when sequencer is idle
@@ -1032,6 +1044,8 @@ class TamborMode(Vertical):
         Same as space bar - always stops and resets to step 0.
         """
         self.playback_state = "STOPPED"
+        if self._uses_engine_clock():
+            self.synth_engine.drum_clock_stop()
         self.sequencer.stop()
         self._clear_playhead()
         # Stop update timer — no polling needed when sequencer is idle
@@ -2097,8 +2111,80 @@ class TamborMode(Vertical):
             info = f"{pre_scale_val} steps/beat"
             self.control_panel.update_pre_scale_info(info)
 
+    def _uses_engine_clock(self) -> bool:
+        """True when the audio engine keeps the beat (desktop)."""
+        return not self._IS_ARM and hasattr(self.synth_engine, "drum_clock_start")
+
+    def _build_sequence(self) -> Dict[str, Any]:
+        """Describe the current pattern as the engine drum clock plays it."""
+        pattern_num = self.current_pattern
+        num_steps = self.current_step_count
+        overrides = getattr(self, "pattern_drum_overrides", {}).get(pattern_num, {})
+        sounds = [
+            self.drum_voice_manager.hit_params(drum_idx, overrides.get(name))
+            for drum_idx, name in enumerate(self.DRUM_SOUNDS)
+        ]
+        audible = [
+            drum_idx for drum_idx, (midi_note, _) in enumerate(sounds)
+            if not self.sequencer.is_drum_muted(midi_note)
+        ]
+
+        def hits_per_step(source: list) -> list:
+            steps = []
+            for step in range(num_steps):
+                hits = []
+                for drum_idx in audible:
+                    if drum_idx >= len(source) or step >= len(source[drum_idx]):
+                        continue
+                    data = source[drum_idx][step]
+                    if not data.get("active", False):
+                        continue
+                    midi_note, params = sounds[drum_idx]
+                    velocity = max(0, min(127, data.get("velocity", 100)))
+                    hits.append((midi_note, velocity, params))
+                steps.append(hits)
+            return steps
+
+        fill = None
+        fill_id = self.pattern_fill_patterns.get(pattern_num)
+        if fill_id in FILL_TEMPLATES:
+            template = FILL_TEMPLATES[fill_id].get("pattern", [])
+            fill = hits_per_step(expand_fill_to_steps(template, num_steps))
+
+        humanize = 0.0
+        if self._get_pattern_humanize_enabled(pattern_num):
+            humanize = self._get_pattern_humanize_velocity_amount(pattern_num)
+
+        return {
+            "pattern": pattern_num,
+            "steps": hits_per_step(self.patterns[pattern_num]),
+            "fill": fill,
+            "step_seconds": self.sequencer.get_step_duration(),
+            "humanize": humanize,
+        }
+
+    def _follow_engine_clock(self):
+        """Send pattern changes to the engine and move the playhead to its current step."""
+        if not self.sequencer.is_playing:
+            return
+
+        sequence = self._build_sequence()
+        if sequence != self._sent_sequence:
+            self._sent_sequence = sequence
+            self.synth_engine.drum_clock_update(sequence)
+
+        ticks, step = self.synth_engine.get_drum_clock_position()
+        if ticks != self._clock_ticks:
+            self._clock_ticks = ticks
+            self.sequencer.set_current_step(step)
+            self._on_sequencer_step(step)
+
     def _update_sequencer(self):
         """Update the sequencer (called periodically by timer)."""
+        if self._uses_engine_clock():
+            self._follow_engine_clock()
+            return
+
         # Advance sequencer if playing
         if self.sequencer.update():
             # Step advanced - trigger drums from pattern

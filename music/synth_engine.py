@@ -6,6 +6,7 @@ import struct
 import ctypes
 import platform
 import numpy as np
+from music.drum_clock import DrumClock
 import threading
 import queue
 import random as _rnd
@@ -683,6 +684,7 @@ class SynthEngine:
         self.running = False
 
         self.waveform = "sine"
+        self._drum_clock = DrumClock()
         self.octave = 0
         self.noise_level = 0.0
         self.octave_enabled = True
@@ -2026,6 +2028,8 @@ class SynthEngine:
                 envelope[dec_mask] = v_int * (1.0 - p * (1.0 - sustain))
             else: envelope[dec_mask] = v_int * sustain
             envelope[times >= dec_end] = v_int * sustain
+            if times[0] < 0.0:
+                envelope[times < 0.0] = 0.0   # drum hit starting inside this buffer
             # Feature 2: Sustain capacitor leakage — dielectric loss on the hold
             # capacitor. Very long sustained notes drift slightly downward over
             # ~6.5 seconds, flooring at 65% of the sustain level. Models the slow
@@ -2928,6 +2932,13 @@ class SynthEngine:
                 self._mute_ramp_fadein      = 0
                 self._ramp_is_preset        = True
                 self._pending_all_notes_off = False  # preset_change owns the ramp bottom
+            elif e['type'] == 'drum_clock_start':
+                if not self._IS_ARM:
+                    self._drum_clock.start(e['sequence'])
+            elif e['type'] == 'drum_clock_update':
+                self._drum_clock.update(e['sequence'])
+            elif e['type'] == 'drum_clock_stop':
+                self._drum_clock.stop()
             elif e['type'] == 'metronome_tick':
                 # Restart the pre-generated click playback from the beginning.
                 # Choosing accent vs. normal click is decided by the sender.
@@ -3051,11 +3062,13 @@ class SynthEngine:
             setattr(self, name, value)
         return replaced
 
-    def _trigger_drum_voice(self, note: int, vel: float, params: dict):
+    def _trigger_drum_voice(self, note: int, vel: float, params: dict, offset: int = 0):
         """Trigger a drum hit whose sound and envelope travel with its voice.
 
         The synth settings are shared by every voice, so drum values written to them
         would colour all drums on a step alike and overwrite the synth sound.
+
+        offset is the sample inside the next buffer at which the hit starts to sound.
         """
         sound = self._drum_voice_sound(params)
         envelope = (
@@ -3064,6 +3077,13 @@ class SynthEngine:
             float(params.get('sustain', self.sustain_target)),
             float(params.get('release', self.release_target)),
         )
+        # A hit of the same drum that still sounds is released, so it fades out under
+        # the new one instead of being cut off mid-wave.
+        for v in self.voices:
+            if v.drum_sound is not None and v.midi_note == note and v.note_active:
+                v.release(*v.drum_env[:3], 1.0)
+                v.tail_fading = True
+
         synth_settings = self._swap_settings(sound)
         try:
             self._trigger_note(note, vel)
@@ -3082,6 +3102,29 @@ class SynthEngine:
                 v.smooth_hpf_resonance = sound['hpf_resonance_current']
                 # A stolen voice may have been positioned inside the synth attack
                 v.envelope_time = min(v.envelope_time, envelope[0])
+                if offset > 0:
+                    # Negative time keeps the voice silent until the hit's own sample
+                    v.envelope_time = -offset / self.sample_rate
+                    v.onset_samples = -offset
+                # Every hit starts at the same point of the wave. A free-running phase
+                # would give each hit of the same drum a different attack.
+                v.phase = (-offset * 2.0 * math.pi * v.frequency / self.sample_rate) % (2.0 * math.pi)
+
+    def drum_clock_start(self, sequence: dict):
+        """Start the drum sequencer on the audio thread (see music/drum_clock.py)."""
+        self.midi_event_queue.put({'type': 'drum_clock_start', 'sequence': sequence})
+
+    def drum_clock_update(self, sequence: dict):
+        """Replace the sequence the drum clock is playing."""
+        self.midi_event_queue.put({'type': 'drum_clock_update', 'sequence': sequence})
+
+    def drum_clock_stop(self):
+        """Stop the drum sequencer."""
+        self.midi_event_queue.put({'type': 'drum_clock_stop'})
+
+    def get_drum_clock_position(self) -> tuple:
+        """Return (steps fired so far, current step) of the drum clock."""
+        return self._drum_clock.ticks, max(0, self._drum_clock.step)
 
     def _trigger_note(self, note: int, vel: float):
         # MONO and UNISON use gate behavior: velocity is ignored, amplitude is always full.
@@ -3877,6 +3920,17 @@ class SynthEngine:
                         except Exception:
                             pass
 
+            # ── Drum sequencer clock (desktop) ───────────────────────────────
+            # Runs here so drum hits land on their exact sample, whatever the UI is
+            # doing. It sits before the voice count so new hits sound in this buffer.
+            if not self._IS_ARM:
+                for _offset, _step, _hits in self._drum_clock.advance(frame_count, self.sample_rate):
+                    for _note, _velocity, _params in _hits:
+                        self._trigger_drum_voice(_note, _velocity / 127.0, _params, _offset)
+                if self._level_shm is not None and len(self._level_shm.buf) >= 8284:
+                    struct.pack_into('II', self._level_shm.buf, 8276,
+                                     *self.get_drum_clock_position())
+
             # Reclaim ghost slots that have finished their release tail.
             # A ghost voice that becomes available (envelope fully decayed) is reset
             # to a clean state so its slot is ready for the next promotion.
@@ -4219,6 +4273,11 @@ class SynthEngine:
                     # ever reaches the filter coefficient calculation.
                     _vcf_lfo_eff = 1.0 if is_drum else (self._vcf_lfo_prev + vcf_lfo) * 0.5
 
+                    # A drum hit that starts inside this buffer feeds the filter silence
+                    # until then, so the filter responds the same way on every hit.
+                    if is_drum and v.envelope_time < 0.0:
+                        s1[:int(round(-v.envelope_time * self.sample_rate))] = 0.0
+
                     _base_cutoff = self.cutoff_current
                     self.cutoff_current = float(np.clip(_base_cutoff + feg_cutoff_offset, 20.0, 20000.0))
                     s1 = self._sanitize_signal(self._apply_filter(v, s1, rank=1, cutoff_mod=_vcf_lfo_eff))
@@ -4282,6 +4341,7 @@ class SynthEngine:
                         _t_arr = np.linspace(v.onset_samples / ONSET_RAMP,
                                              min((v.onset_samples + n) / ONSET_RAMP, 1.0),
                                              n, dtype=np.float32)
+                        np.maximum(_t_arr, 0.0, out=_t_arr)
                         ramp[:n] = 1.0 - np.exp(-_t_arr / self._CAP_GATE_TAU)
                         ramp[:n] /= np.float32(1.0 - math.exp(-1.0 / self._CAP_GATE_TAU))
                         v_samples = v_samples * ramp
@@ -4383,6 +4443,7 @@ class SynthEngine:
                         _t_arr = np.linspace(g.onset_samples / ONSET_RAMP,
                                              min((g.onset_samples + n) / ONSET_RAMP, 1.0),
                                              n, dtype=np.float32)
+                        np.maximum(_t_arr, 0.0, out=_t_arr)
                         ramp[:n] = 1.0 - np.exp(-_t_arr / self._CAP_GATE_TAU)
                         ramp[:n] /= np.float32(1.0 - math.exp(-1.0 / self._CAP_GATE_TAU))
                         gs[:n] = gs[:n] * ramp[:n]

@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor arrow keys** (desktop only) - inside the application the arrow keys did nothing, because the main screen consumed them before Tambor's bindings ran. The sequencer cursor can be moved again.
 
+**Tambor timing** (desktop only) - steps were timed by a 25 ms screen timer whose error added up: 120 BPM played at about 105 BPM with gaps between 124 and 214 ms. The step clock now runs on the audio thread ([music/drum_clock.py](music/drum_clock.py)) and places every hit on its exact sample, so the tempo no longer drifts or depends on how busy the screen is. The screen sends the pattern to the engine and follows the playhead. A drum that is hit again while still ringing is released under the new hit. Every hit of a drum starts at the same point of its wave with silence ahead of it in the filter, so repeated hits sound alike.
+
 **MONO/UNISON legato click** - the persistent click on legato note changes is gone:
 - Root cause: the legato path reset `_arm_lpf_zi_r1/r2` and `_arm_hpf_zi_r1/r2` to `None`. These scipy `sosfilt` `zi` arrays are the filter delay-line state (not coefficient storage), so zeroing them cold-started the filter on every note change.
 - Fix: the four resets were removed from both the MONO and UNISON legato paths. Boundary jump dropped from about 0.37 to 0.0002.

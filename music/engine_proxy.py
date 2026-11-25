@@ -102,6 +102,9 @@ class SynthEngineProxy:
     implemented here.  No mode code needs to change.
     """
 
+    # Shared memory size in bytes; the layout is described in __init__.
+    SHM_SIZE = 8 + 4 + 2048 * 4 + 4 + 4 + 16 * 4 + 8
+
     def __init__(self, output_device_index=None, buffer_size=1024, audio_backend=None,
                  enable_oversampling=True):
         self._output_device_index = output_device_index
@@ -127,11 +130,9 @@ class SynthEngineProxy:
         #   bytes 8209-8211: padding
         #   bytes 8212-8275: 16 looper note slots x 4 bytes (note:B velocity:B type:B pad:x)
         #                    type 0=note_on, 1=note_off
-        # Total: 8208 + 4 + 64 = 8276 bytes.
-        _WAVEFORM_SAMPLES = 2048
-        _LNR_SLOTS = 16
-        _SHM_SIZE  = 8 + 4 + _WAVEFORM_SAMPLES * 4 + 4 + 4 + _LNR_SLOTS * 4
-        self._level_shm = SharedMemory(create=True, size=_SHM_SIZE)
+        #   bytes 8276-8283: drum clock position (u32 steps fired, u32 current step)
+        # Total: 8208 + 4 + 64 + 8 = 8284 bytes.
+        self._level_shm = SharedMemory(create=True, size=self.SHM_SIZE)
         struct.pack_into('ffi', self._level_shm.buf, 0, 0.0, 0.0, 0)
         # Proxy-side read pointer for the looper note ring (tracks last-read wptr).
         self._looper_note_rptr: int = 0
@@ -252,10 +253,7 @@ class SynthEngineProxy:
         # has a valid shared memory segment and the proxy-side buf stays readable.
         # Without this, get_level_l/r/waveform_frame silently return zeros after
         # any config-driven restart, breaking the visualizer feed.
-        _WAVEFORM_SAMPLES = 2048
-        _LNR_SLOTS = 16
-        _SHM_SIZE  = 8 + 4 + _WAVEFORM_SAMPLES * 4 + 4 + 4 + _LNR_SLOTS * 4
-        self._level_shm = SharedMemory(create=True, size=_SHM_SIZE)
+        self._level_shm = SharedMemory(create=True, size=self.SHM_SIZE)
         struct.pack_into('ffi', self._level_shm.buf, 0, 0.0, 0.0, 0)
         self._looper_note_rptr = 0
 
@@ -444,6 +442,24 @@ class SynthEngineProxy:
             'velocity': velocity,
             'params': params,
         })
+
+    # ── Tambor drum clock ─────────────────────────────────────────
+
+    def drum_clock_start(self, sequence: dict):
+        self._cmd_queue.put({'type': 'drum_clock_start', 'sequence': sequence})
+
+    def drum_clock_update(self, sequence: dict):
+        self._cmd_queue.put({'type': 'drum_clock_update', 'sequence': sequence})
+
+    def drum_clock_stop(self):
+        self._cmd_queue.put({'type': 'drum_clock_stop'})
+
+    def get_drum_clock_position(self) -> tuple:
+        """Return (steps fired so far, current step) written by the audio subprocess."""
+        try:
+            return struct.unpack_from('II', self._level_shm.buf, 8276)
+        except Exception:
+            return 0, 0
 
     def play_metronome_click(self, accent: bool = False):
         """Trigger a pre-generated click sound through the engine's audio stream.
