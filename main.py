@@ -189,6 +189,10 @@ class TamborHelpBar(Static):
         """Render the help bar with two lines of keybinds."""
         line1 = "↑↓: Drums | ←→: Steps/M-S | SPACE: Play/Stop | ENTER: Toggle | E: Edit | M: Mute | S: Solo | H: Humanize"
         line2 = "R: Random | F: Fill | C: Clear | T: PRE-SCALE | N: Pattern | +/-: Steps"
+        from modes.tambor.tambor_mode import IS_ARM
+        if not IS_ARM:
+            # The backslash keeps the bracket from being read as markup
+            line2 += " | \\[ ]: Sample | ^Z: Undo"
         return f"{line1}\n{line2}"
 
 

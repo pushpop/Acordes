@@ -185,7 +185,7 @@ class DrumEditorScreen(Screen):
                             current_section = section
 
                         with Horizontal(classes="param-line"):
-                            yield Label(param_name.replace("_", " ").title(), classes="param-name")
+                            yield Label(self._title(param_name), classes="param-name")
                             yield Label("0.00", classes="param-val")
 
                 # Right column
@@ -197,13 +197,19 @@ class DrumEditorScreen(Screen):
                             current_section = section
 
                         with Horizontal(classes="param-line"):
-                            yield Label(param_name.replace("_", " ").title(), classes="param-name")
+                            yield Label(self._title(param_name), classes="param-name")
                             yield Label("0.00", classes="param-val")
 
             yield Label(
                 "↑↓: Navigate | ←→: Adjust | Shift+←→: Fine | SPACE: Preview | R: Randomize | ENTER: Apply | ESC: Cancel",
                 id="editor-footer"
             )
+
+    # Names shown for parameters whose title differs from their key
+    TITLES: Dict[str, str] = {}
+
+    def _title(self, param_name: str) -> str:
+        return self.TITLES.get(param_name, param_name.replace("_", " ").title())
 
     def on_mount(self):
         """Setup after mounting."""
@@ -345,3 +351,94 @@ class DrumEditorScreen(Screen):
             super().__init__()
             self.drum_name = drum_name
             self.synth_params = synth_params
+
+
+class SampleDrumEditorScreen(DrumEditorScreen):
+    """Editor for a drum played from the sample kit: choose an alternative and shape it."""
+
+    # (name, min_val, max_val, step, fine_step, unit, category)
+    PARAMETERS = [
+        ("index", 0, 0, 1, 1, "", "SAMPLE"),
+        ("tune", -12.0, 12.0, 1.0, 0.1, "st", "SHAPE"),
+        ("attack", 0.0, 0.05, 0.002, 0.0005, "ms", "SHAPE"),
+        ("decay", 0.05, 1.0, 0.05, 0.01, "%", "SHAPE"),
+        ("tone", -1.0, 1.0, 0.1, 0.02, "", "SHAPE"),
+        ("drive", 0.0, 1.0, 0.1, 0.02, "", "SHAPE"),
+        ("level", 0.0, 1.5, 0.05, 0.01, "%", "LEVEL"),
+    ]
+
+    TITLES = {"index": "Sample"}
+
+    # Control values that leave a sample untouched
+    NEUTRAL = {"tune": 0.0, "attack": 0.0, "decay": 1.0, "tone": 0.0, "drive": 0.0, "level": 1.0}
+
+    def __init__(self, drum_name: str, labels: list, chosen: Dict[str, Any], **callbacks):
+        """Initialize the editor.
+
+        Args:
+            drum_name: Name of the drum being edited
+            labels: Names of the drum's sample alternatives
+            chosen: Saved choice as {"index": int, "controls": dict}, possibly empty
+            callbacks: The callback arguments of DrumEditorScreen
+        """
+        self.labels = labels
+        self.PARAMETERS = [("index", 0, len(labels) - 1, 1, 1, "", "SAMPLE")] + self.PARAMETERS[1:]
+        values = {**self.NEUTRAL, **chosen.get("controls", {})}
+        values["index"] = chosen.get("index", 0) % len(labels)
+        super().__init__(drum_name, values, **callbacks)
+
+    @classmethod
+    def to_choice(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Turn editor values into a saved choice, keeping only non-neutral controls."""
+        controls = {
+            name: values[name] for name, neutral in cls.NEUTRAL.items() if values[name] != neutral
+        }
+        return {"index": values["index"], "controls": controls}
+
+    def _build_column_layout(self):
+        """Sample and shaping on the left, level on the right."""
+        self.left_column = [p for p in self.PARAMETERS if p[6] != "LEVEL"]
+        self.right_column = [p for p in self.PARAMETERS if p[6] == "LEVEL"]
+
+    def _update_display(self):
+        """Update all parameter values in UI."""
+        for idx, (label, param_data) in enumerate(zip(self.query(".param-val"), self.PARAMETERS)):
+            name, unit = param_data[0], param_data[5]
+            value = self.synth_params[name]
+            if name == "index":
+                display = self.labels[value]
+            elif unit == "st":
+                display = f"{value:.1f}st"
+            elif unit == "ms":
+                display = f"{value * 1000:g}ms"
+            elif unit == "%":
+                display = f"{value * 100:.0f}%"
+            else:
+                display = f"{value:.2f}"
+            label.set_class(idx == self.selected_idx, "param-selected")
+            label.update(display)
+
+    def _adjust_parameter(self, increase: bool, fine: bool):
+        """Adjust selected parameter value; choosing a sample wraps around and plays it."""
+        name, p_min, p_max, step, fine_step, _, _ = self.PARAMETERS[self.selected_idx]
+        change = (fine_step if fine else step) * (1 if increase else -1)
+        if name == "index":
+            self.synth_params[name] = (self.synth_params[name] + change) % len(self.labels)
+            self._update_display()
+            self.action_preview_drum()
+            return
+        # Rounding keeps repeated steps landing exactly on the neutral value
+        value = round(self.synth_params[name] + change, 4)
+        self.synth_params[name] = max(p_min, min(p_max, value))
+        self._update_display()
+
+    def action_randomize_parameters(self):
+        """Randomize the shaping controls, keeping the chosen sample and level."""
+        import random
+
+        for name, p_min, p_max, _, fine_step, _, section in self.PARAMETERS:
+            if section == "SHAPE":
+                value = round(random.uniform(p_min, p_max) / fine_step) * fine_step
+                self.synth_params[name] = max(p_min, min(p_max, round(value, 4)))
+        self._update_display()
+        self.action_preview_drum()

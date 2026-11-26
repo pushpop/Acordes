@@ -11,7 +11,7 @@ import time
 import threading
 from .components.header_widget import HeaderWidget
 from .components.pattern_selector import PatternSelector, PatternSelectorScreen
-from .components.drum_editor import DrumEditorScreen
+from .components.drum_editor import DrumEditorScreen, SampleDrumEditorScreen
 from .components.fill_selector import FillSelectorScreen
 from .music.pre_scale import PreScale, PRE_SCALE_VALUES, get_pre_scale_name
 from .music.sequencer_engine import SequencerEngine
@@ -21,6 +21,7 @@ from .music.drum_voice_manager import DrumVoiceManager
 from .music.pattern_manager import PatternManager
 from .music.audio_thread import PatternSaver
 from .music.humanize import Humanizer
+from music.drum_kit import DrumKit
 
 
 # The ARM build keeps its established Tambor behaviour; fixes gated on this are desktop only.
@@ -563,6 +564,8 @@ class TamborMode(Vertical):
         Binding("h", "toggle_humanize", "Humanize", show=False),
         Binding("r", "randomize_drum", "Randomize", show=False),
         Binding("f", "open_fill_selector", "Fill", show=False),
+        Binding("left_square_bracket", "previous_sample", "Previous Sample", show=False),
+        Binding("right_square_bracket", "next_sample", "Next Sample", show=False),
     ]
 
     CSS = """
@@ -696,6 +699,8 @@ class TamborMode(Vertical):
         self.drum_voice_manager = DrumVoiceManager(
             self.synth_engine, use_samples=not self._IS_ARM
         )
+        # The engine plays the same kit; here it supplies the names of the alternatives
+        self.drum_kit = None if self._IS_ARM else DrumKit.load()
 
         # Initialize sequencer engine with optional BPM callback for Acordes integration
         # If config_manager was provided (Acordes), pass a callback so it syncs with other modes
@@ -1125,6 +1130,7 @@ class TamborMode(Vertical):
         self._update_control_panel_humanize()
         self._update_control_panel_fill()
         self._update_control_panel_pre_scale()
+        self._update_focus_label()
         if self.control_panel:
             self.control_panel.update_pattern(pattern, is_dirty=pattern in self.pattern_dirty)
 
@@ -1421,6 +1427,25 @@ class TamborMode(Vertical):
             def on_preview(params):
                 self.drum_voice_manager.trigger_drum(drum_idx, 100, overrides=params)
 
+        if self.drum_kit is not None:
+            def on_sample_preview(values):
+                choice = SampleDrumEditorScreen.to_choice(values)
+                self.drum_voice_manager.trigger_drum(
+                    drum_idx, 100, overrides={**synth_params, "sample": choice}
+                )
+
+            self.app.push_screen(SampleDrumEditorScreen(
+                drum_name,
+                self.drum_kit.labels(drum_name),
+                synth_params.get("sample", {}),
+                on_apply=lambda values: self._set_sample_choice(
+                    drum_name, SampleDrumEditorScreen.to_choice(values)
+                ),
+                on_close=_on_editor_close,
+                on_preview=on_sample_preview,
+            ))
+            return
+
         # Open drum editor modal with sequencer for preview functionality
         editor_screen = DrumEditorScreen(
             drum_name=drum_name,
@@ -1432,6 +1457,50 @@ class TamborMode(Vertical):
             on_preview=on_preview,
         )
         self.app.push_screen(editor_screen)
+
+    def _sample_choice(self, drum_name: str) -> Dict[str, Any]:
+        """The current pattern's saved sample choice for a drum, empty if it is the default."""
+        overrides = getattr(self, "pattern_drum_overrides", {}).get(self.current_pattern, {})
+        return overrides.get(drum_name, {}).get("sample", {})
+
+    def _set_sample_choice(self, drum_name: str, choice: Dict[str, Any]):
+        """Save a drum's sample and controls with the current pattern."""
+        if not hasattr(self, "pattern_drum_overrides"):
+            self.pattern_drum_overrides = {}
+        overrides = self.pattern_drum_overrides.setdefault(self.current_pattern, {})
+        drum = {k: v for k, v in overrides.get(drum_name, {}).items() if k != "sample"}
+        if choice["index"] or choice["controls"]:
+            drum["sample"] = choice
+        if drum:
+            overrides[drum_name] = drum
+        else:
+            overrides.pop(drum_name, None)
+        self._mark_pattern_dirty(self.current_pattern)
+        self._auto_save_current_pattern()
+        self._update_focus_label()
+
+    def action_previous_sample(self):
+        """Switch the selected drum to its previous sample ([ key)."""
+        self._step_sample(-1)
+
+    def action_next_sample(self):
+        """Switch the selected drum to its next sample (] key)."""
+        self._step_sample(1)
+
+    def _step_sample(self, direction: int):
+        """Choose another alternative for the selected drum and play it if stopped."""
+        if self.drum_kit is None:
+            return
+        drum_idx = self.cursor_drum
+        drum_name = self.DRUM_SOUNDS[drum_idx]
+        choice = self._sample_choice(drum_name)
+        index = (choice.get("index", 0) + direction) % len(self.drum_kit.labels(drum_name))
+        self._set_sample_choice(
+            drum_name, {"index": index, "controls": choice.get("controls", {})}
+        )
+        if not self.sequencer.is_playing:
+            overrides = self.pattern_drum_overrides[self.current_pattern].get(drum_name)
+            self.drum_voice_manager.trigger_drum(drum_idx, 100, overrides=overrides)
 
     def _on_drum_editor_applied(self, drum_name: str, synth_params: Dict[str, Any]):
         """Callback when drum editor applies changes."""
@@ -1795,6 +1864,11 @@ class TamborMode(Vertical):
                 focus_info = "Solo"
             else:
                 focus_info = "Unknown"
+
+            if self.drum_kit is not None:
+                labels = self.drum_kit.labels(drum_name)
+                index = self._sample_choice(drum_name).get("index", 0) % len(labels)
+                focus_info = f"{focus_info} ({labels[index]})"
 
             # Update control panel
             if self.control_panel:

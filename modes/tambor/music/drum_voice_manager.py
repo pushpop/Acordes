@@ -90,7 +90,7 @@ class DrumVoiceManager:
         # Build the mapped params dict (same logic as _apply_drum_parameters but
         # returned as a dict instead of sent immediately)
         params_to_apply = self._build_drum_params(synth_params)
-        self._add_sample(params_to_apply, drum_idx_name)
+        self._add_sample(params_to_apply, drum_idx_name, synth_params)
 
         # Apply humanization to velocity (±20% variation)
         humanized_velocity = max(1, min(127, int(velocity * humanize_velocity)))
@@ -121,13 +121,21 @@ class DrumVoiceManager:
         drum_preset = DRUM_PRESETS[drum_name]
         synth_params = {**drum_preset.get("synth_params", {}), **(overrides or {})}
         params = self._build_drum_params(synth_params)
-        self._add_sample(params, drum_name)
+        self._add_sample(params, drum_name, synth_params)
         return drum_preset.get("midi_note", 36 + drum_idx), params
 
-    def _add_sample(self, params: Dict[str, Any], drum_name: str):
-        """Name the sample that replaces the synth sound when the engine has a kit."""
+    def _add_sample(self, params: Dict[str, Any], drum_name: str, synth_params: Dict[str, Any]):
+        """Name the sample that replaces the synth sound when the engine has a kit.
+
+        synth_params may hold a "sample" entry with the chosen alternative and its controls.
+        """
         if self.use_samples:
-            params["sample"] = {"slot": drum_name, "index": 0, "controls": {}}
+            chosen = synth_params.get("sample", {})
+            params["sample"] = {
+                "slot": drum_name,
+                "index": chosen.get("index", 0),
+                "controls": dict(chosen.get("controls", {})),
+            }
 
     def release_drum(self, drum_idx: int, velocity: int = 0):
         """
