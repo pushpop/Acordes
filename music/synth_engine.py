@@ -3050,7 +3050,7 @@ class SynthEngine:
             elif hasattr(self, k):
                 setattr(self, k, v)
 
-    DRUM_BUS_GAIN = 0.45           # headroom for several samples at once
+    DRUM_BUS_GAIN = 0.8            # a single kick at velocity 100 peaks near -6 dBFS
     _DRUM_KNEE = 0.8
     _SHAPED_CACHE_LIMIT = 128
 
@@ -3145,7 +3145,8 @@ class SynthEngine:
             self._shaped_samples[key] = data
         # The two hi-hats share a group, so one cuts the other off as on the real machine
         group = "hat" if slot.endswith("HH") else slot
-        self._sample_player.trigger(data, max(0.0, min(1.0, vel)) ** 1.5, offset, group)
+        gain = max(0.0, min(1.0, vel)) ** 1.5 * self.drum_kit.level(slot, index)
+        self._sample_player.trigger(data, gain, offset, group)
 
     def _mix_drum_samples(self, left: np.ndarray, right: np.ndarray):
         """Add the sampled drums to the finished synth signal.

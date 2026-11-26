@@ -32,6 +32,10 @@ class DrumKit:
         """Names of the alternatives for a drum row."""
         return drum_synth.labels(slot)
 
+    def level(self, slot: str, index: int = 0) -> float:
+        """Playback gain of one alternative, applied after shaping so drive cannot undo it."""
+        return drum_synth.level(slot, index)
+
     def sample(self, slot: str, index: int = 0) -> np.ndarray:
         """Stereo samples of one alternative; the index wraps around."""
         key = (slot, index % len(self.labels(slot)))

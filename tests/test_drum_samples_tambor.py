@@ -38,7 +38,8 @@ def sample_engine(seconds=0.2, **params):
 
 def level_of(slot):
     """Output level expected for a full-velocity hit of a fake sample."""
-    return fake_kit().sample(slot)[0, 0] * sample_engine().DRUM_BUS_GAIN
+    kit = fake_kit()
+    return kit.sample(slot)[0, 0] * kit.level(slot) * sample_engine().DRUM_BUS_GAIN
 
 
 def hit(engine, drum_idx, velocity=127):

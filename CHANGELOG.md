@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor drum kit** (desktop only) - drums play from a 909-style kit generated in code ([music/drum_synth.py](music/drum_synth.py)), so no audio files are needed. Kick, snare, hi-hats, clap, toms, rim and ride have their own sounds, most with alternatives. Hits start on their exact sample, the closed hat cuts off the open hat, and the drums bypass the synth's effects, drive and amp level. The grid has two more rows, Ride and Rim; fills leave them playing their own steps. The drum editor (`E`) chooses a row's sound and shapes it with tune, attack, decay, tone, drive and level, and `[` and `]` step through the alternatives on the grid; both are saved per pattern. `uv run python -m music.drum_synth tools` writes a WAV of every sound for listening.
 
+**Tambor drum levels** (desktop only) - the kit plays about 5 dB louder, so a single kick at velocity 100 peaks near -6 dBFS at full master volume. Each sound has its own level against the kick instead of every sound peaking alike: snare and toms sit slightly under it, the ride, open hat and closed hat further back.
+
 **Tambor humanize** (desktop only) - the velocity variation was applied twice, which stretched the default 15% far beyond its range and made soft hits much quieter (velocity 60 came out between about 26 and 47). Hits now vary by up to the chosen amount around their programmed velocity.
 
 **Metronome arrow keys** (desktop only) - up and down change the tempo and left and right the time signature again; the main screen was consuming the arrow keys.

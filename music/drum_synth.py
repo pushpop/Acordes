@@ -76,6 +76,23 @@ _OPEN_HATS = [
 ]
 
 
+# How loud each alternative plays in the kit, in dB, in the order of the alternatives.
+# Every sound is generated at the same peak level; these set the drums against the kick.
+# The claps and the standard rim are short and spiky, so their peaks limit how far up they go.
+_MIX_DB = {
+    "Kick": (0.0, 0.0, 0.0),
+    "Snare": (-1.4, -3.1),
+    "Closed HH": (-0.5, -0.8),
+    "Open HH": (-6.2, -5.8),
+    "Clap": (2.0, 2.0),
+    "Tom Hi": (-1.3, -2.9),
+    "Tom Mid": (-1.4, -2.9),
+    "Tom Low": (-1.3, -2.5),
+    "Rim": (2.0, -1.1),
+    "Ride": (-5.5,),
+}
+
+
 def _times(seconds: float) -> np.ndarray:
     return np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
 
@@ -260,6 +277,12 @@ def slots() -> List[str]:
 def labels(slot: str) -> List[str]:
     """Names of the alternatives for a drum row."""
     return [label for label, _, _ in _SOUNDS[slot]]
+
+
+def level(slot: str, index: int = 0) -> float:
+    """Gain that sets one alternative at its place in the mix; the index wraps around."""
+    levels = _MIX_DB[slot]
+    return 10.0 ** (levels[index % len(levels)] / 20.0)
 
 
 def render(slot: str, index: int = 0) -> np.ndarray:
