@@ -609,6 +609,8 @@ class TamborMode(Vertical):
             gamepad_handler: Optional GamepadHandler for controller input
         """
         super().__init__()
+        if not self._IS_ARM:
+            self.DRUM_SOUNDS = self.DRUM_SOUNDS + ["Ride", "Rim"]
         self.gamepad_handler = gamepad_handler
         self.drum_rows: list[DrumRow] = []
         self.control_panel: ControlPanel = None
@@ -691,7 +693,9 @@ class TamborMode(Vertical):
         self.synth_engine = synth_engine  # Shared Acordes SynthEngine (always used for drum synthesis)
 
         # Create drum voice manager for monophonic drum synthesis
-        self.drum_voice_manager = DrumVoiceManager(self.synth_engine)
+        self.drum_voice_manager = DrumVoiceManager(
+            self.synth_engine, use_samples=not self._IS_ARM
+        )
 
         # Initialize sequencer engine with optional BPM callback for Acordes integration
         # If config_manager was provided (Acordes), pass a callback so it syncs with other modes
@@ -2227,6 +2231,8 @@ class TamborMode(Vertical):
         ]
 
         def hits_per_step(source: list) -> list:
+            # Rows a fill does not cover keep playing their own steps
+            source = list(source) + self.patterns[pattern_num][len(source):]
             steps = []
             for step in range(num_steps):
                 hits = []

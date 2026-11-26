@@ -7,6 +7,8 @@ import ctypes
 import platform
 import numpy as np
 from music.drum_clock import DrumClock
+from music.drum_kit import DrumKit
+from music.sample_player import SamplePlayer, shape_sample
 import threading
 import queue
 import random as _rnd
@@ -685,6 +687,10 @@ class SynthEngine:
 
         self.waveform = "sine"
         self._drum_clock = DrumClock()
+        # Sampled drums (desktop). Without a built kit the drums are synthesized.
+        self.drum_kit = None if self._IS_ARM else DrumKit.load()
+        self._sample_player = SamplePlayer(self.sample_rate)
+        self._shaped_samples: dict = {}
         self.octave = 0
         self.noise_level = 0.0
         self.octave_enabled = True
@@ -804,6 +810,8 @@ class SynthEngine:
         # the hot path prevents GC-pause deadline misses that cause clicks.
         _bs = self._alloc_size
         self._cb_mixed_l  = np.zeros(_bs, dtype=np.float32)
+        self._drum_bus_l  = np.zeros(max(_bs, 8192), dtype=np.float32)
+        self._drum_bus_r  = np.zeros(max(_bs, 8192), dtype=np.float32)
         self._cb_mixed_r  = np.zeros(_bs, dtype=np.float32)
         self._cb_cho_l    = np.zeros(_bs, dtype=np.float32)
         self._cb_cho_r    = np.zeros(_bs, dtype=np.float32)
@@ -2902,6 +2910,7 @@ class SynthEngine:
                 # Stop FX tail drain immediately — panic/all_notes_off means silence NOW.
                 self._fx_tail_samples = 0
                 self._pending_all_notes_off = False  # cancel any pending soft silence
+                self._sample_player.stop_all()
             elif e['type'] == 'soft_all_notes_off':
                 # Arm the mute ramp for a click-free 8ms fade-out, then reset all
                 # voices at the bottom. Used during mode switches so notes release
@@ -2911,6 +2920,7 @@ class SynthEngine:
                 self._mute_ramp_fadein    = 0
                 self._ramp_is_preset      = False
                 self._pending_all_notes_off = True
+                self._sample_player.stop_all()
             elif e['type'] == 'mute_gate':
                 # Arm a short output fade-out so that instantly-applied params
                 # (waveform, octave, envelope) from action_randomize don't click.
@@ -3037,6 +3047,10 @@ class SynthEngine:
             elif hasattr(self, k):
                 setattr(self, k, v)
 
+    DRUM_BUS_GAIN = 0.45           # headroom for several samples at once
+    _DRUM_KNEE = 0.8
+    _SHAPED_CACHE_LIMIT = 128
+
     def _drum_voice_sound(self, params: dict) -> dict:
         """Engine settings for one drum voice: the drum's own sound, synth colouring off."""
         return {
@@ -3070,6 +3084,10 @@ class SynthEngine:
 
         offset is the sample inside the next buffer at which the hit starts to sound.
         """
+        if params.get('sample') and self.drum_kit is not None:
+            self._trigger_drum_sample(params['sample'], vel, offset)
+            return
+
         sound = self._drum_voice_sound(params)
         envelope = (
             float(params.get('attack',  self.attack_target)),
@@ -3109,6 +3127,42 @@ class SynthEngine:
                 # Every hit starts at the same point of the wave. A free-running phase
                 # would give each hit of the same drum a different attack.
                 v.phase = (-offset * 2.0 * math.pi * v.frequency / self.sample_rate) % (2.0 * math.pi)
+
+    def _trigger_drum_sample(self, sample: dict, vel: float, offset: int):
+        """Play one drum from the sample kit, shaped by its controls."""
+        slot, index = sample['slot'], sample.get('index', 0)
+        controls = sample.get('controls') or {}
+        key = (self.drum_kit, slot, index, tuple(sorted(controls.items())))
+        data = self._shaped_samples.get(key)
+        if data is None:
+            if len(self._shaped_samples) >= self._SHAPED_CACHE_LIMIT:
+                self._shaped_samples.clear()
+            data = shape_sample(self.drum_kit.sample(slot, index), self.drum_kit.sample_rate,
+                                self.sample_rate, controls)
+            self._shaped_samples[key] = data
+        # The two hi-hats share a group, so one cuts the other off as on the real machine
+        group = "hat" if slot.endswith("HH") else slot
+        self._sample_player.trigger(data, max(0.0, min(1.0, vel)) ** 1.5, offset, group)
+
+    def _mix_drum_samples(self, left: np.ndarray, right: np.ndarray):
+        """Add the sampled drums to the finished synth signal.
+
+        They bypass the synth's effects, drive and amp level; only the master volume
+        applies. Peaks above the knee are rounded off so stacked hits stay below full scale.
+        """
+        frames = len(left)
+        drum_l, drum_r = self._drum_bus_l[:frames], self._drum_bus_r[:frames]
+        drum_l.fill(0.0)
+        drum_r.fill(0.0)
+        self._sample_player.mix(drum_l, drum_r)
+        gain = np.float32(self.DRUM_BUS_GAIN * self.master_volume)
+        knee = self._DRUM_KNEE
+        for out, drums in ((left, drum_l), (right, drum_r)):
+            out += drums * gain
+            over = np.abs(out) > knee
+            if over.any():
+                excess = (np.abs(out[over]) - knee) / (1.0 - knee)
+                out[over] = np.sign(out[over]) * (knee + (1.0 - knee) * np.tanh(excess))
 
     def drum_clock_start(self, sequence: dict):
         """Start the drum sequencer on the audio thread (see music/drum_clock.py)."""
@@ -3982,7 +4036,8 @@ class SynthEngine:
                 # _fx_tail_samples is set to a generous ceiling whenever a voice is
                 # triggered (in _trigger_note) and decremented here while draining so
                 # the callback returns to silence naturally once the tail expires.
-                if self._fx_tail_samples <= 0 and self._metro_click_buf is None:
+                if (self._fx_tail_samples <= 0 and self._metro_click_buf is None
+                        and not self._sample_player.active):
                     outdata.fill(0)
                     return
                 self._fx_tail_samples = max(0, self._fx_tail_samples - frame_count)
@@ -4926,6 +4981,10 @@ class SynthEngine:
 
             self._last_output_L = float(clipped_l[-1])
             self._last_output_R = float(clipped_r[-1])
+
+            # Sampled drums join after the synth's own processing and level bookkeeping.
+            if self._sample_player.active:
+                self._mix_drum_samples(clipped_l, clipped_r)
 
             # Cache VU meter levels for visualizer (thread-safe float write).
             # Max amplitude of this buffer for left/right channels.

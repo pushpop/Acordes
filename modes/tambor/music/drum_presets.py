@@ -194,6 +194,38 @@ DRUM_PRESETS = {
             "volume": 0.86,
         }
     },
+
+    # Ride and Rim are desktop rows. These are their sounds when no sample kit is built.
+    "Ride": {
+        "midi_note": 51,        # Ride Cymbal  (pitch irrelevant)
+        "display_name": "Ride",
+        "synth_params": {
+            "oscillator_type": "noise_white",
+            "attack":  0.0003,
+            "decay":   0.50,
+            "sustain": 0.0,
+            "release": 0.20,
+            "cutoff_freq": 9000,
+            "resonance":   0.75,
+            "volume": 0.55,
+        }
+    },
+
+    "Rim": {
+        "midi_note": 37,        # Side Stick  (555 Hz)
+        "display_name": "Rim",
+        "synth_params": {
+            "oscillator_type": "triangle",
+            "noise_level": 0.20,
+            "attack":  0.0001,
+            "decay":   0.05,
+            "sustain": 0.0,
+            "release": 0.02,
+            "cutoff_freq": 4000,
+            "resonance":   0.60,
+            "volume": 0.80,
+        }
+    },
 }
 
 

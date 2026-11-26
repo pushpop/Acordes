@@ -79,3 +79,7 @@ tools/*.wav
 tools/artifact_analysis/
 tools/diagnose_dip.py
 tools/simulate_strum.py
+
+# Licensed drum samples and the kit built from them (never commit)
+tools/909/
+kits/

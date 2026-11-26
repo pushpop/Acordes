@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor safety** (desktop only) - `Ctrl+Z` now undoes clearing a drum row (`C`), randomizing it (`R`) and erasing a pattern (`C` in the pattern selector), restoring the whole pattern as it was before that action; the last 20 are kept until the app closes. Erasing asks for confirmation and resets length, drum edits, humanize, fill, mute, solo and PRE-SCALE. Shortening a pattern hides the later steps instead of deleting them. Periodic auto-saves are written to disk as they happen; they used to wait until the app closed, where an old queued save could overwrite newer work.
 
+**Tambor samples** (desktop only) - drums can play from a sample kit built out of local 909 WAV files (`uv run python -m music.drum_kit` writes `kits/909.npz`; samples and kit are not in the repository). Hits start on their exact sample, the closed hat cuts off the open hat, and the drums bypass the synth's effects, drive and amp level. Without a kit the synth drums play. The grid has two more rows, Ride and Rim; fills leave them playing their own steps.
+
 **MONO/UNISON legato click** - the persistent click on legato note changes is gone:
 - Root cause: the legato path reset `_arm_lpf_zi_r1/r2` and `_arm_hpf_zi_r1/r2` to `None`. These scipy `sosfilt` `zi` arrays are the filter delay-line state (not coefficient storage), so zeroing them cold-started the filter on every note change.
 - Fix: the four resets were removed from both the MONO and UNISON legato paths. Boundary jump dropped from about 0.37 to 0.0002.

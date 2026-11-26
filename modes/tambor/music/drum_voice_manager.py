@@ -16,21 +16,23 @@ class DrumVoiceManager:
     - Has drum-specific synthesizer parameters (no polyphony artifacts)
     """
 
-    def __init__(self, synth_engine: Any):
+    def __init__(self, synth_engine: Any, use_samples: bool = True):
         """
         Initialize drum voice manager with shared synth engine.
 
         Args:
             synth_engine: Acordes SynthEngine instance for audio synthesis
+            use_samples: Name each drum's sample so an engine with a kit can play it
         """
         self.synth_engine = synth_engine
+        self.use_samples = use_samples
         self.drum_voices: Dict[int, Dict[str, Any]] = {}
         self.midi_note_params: Dict[int, Dict[str, Any]] = {}  # Cache parameters by MIDI note
         self._allocate_drum_voices()
 
     def _allocate_drum_voices(self):
         """Pre-allocate one synth voice per drum (voices 0-7 reserved for drums)."""
-        for drum_idx in range(8):
+        for drum_idx in range(len(DRUM_PRESETS)):
             self.drum_voices[drum_idx] = {
                 "drum_idx": drum_idx,
                 "voice_idx": drum_idx,  # Voice 0-7 are reserved for drums
@@ -62,12 +64,12 @@ class DrumVoiceManager:
         without conflicts between simultaneous drum triggers.
 
         Args:
-            drum_idx: Drum index (0-7)
+            drum_idx: Drum index (0-based row)
             velocity: MIDI velocity (0-127)
             humanize_velocity: Velocity modulation from humanization (0.8-1.2 typical)
             overrides: Edited sound parameters that take precedence over the preset
         """
-        if drum_idx < 0 or drum_idx >= 8:
+        if drum_idx < 0 or drum_idx >= len(DRUM_PRESETS):
             return
 
         voice_info = self.drum_voices[drum_idx]
@@ -88,6 +90,7 @@ class DrumVoiceManager:
         # Build the mapped params dict (same logic as _apply_drum_parameters but
         # returned as a dict instead of sent immediately)
         params_to_apply = self._build_drum_params(synth_params)
+        self._add_sample(params_to_apply, drum_idx_name)
 
         # Apply humanization to velocity (±20% variation)
         humanized_velocity = max(1, min(127, int(velocity * humanize_velocity)))
@@ -114,9 +117,17 @@ class DrumVoiceManager:
             drum_idx: Drum index (0-7)
             overrides: Edited sound parameters that take precedence over the preset
         """
-        drum_preset = DRUM_PRESETS[self._get_drum_name_by_index(drum_idx)]
+        drum_name = self._get_drum_name_by_index(drum_idx)
+        drum_preset = DRUM_PRESETS[drum_name]
         synth_params = {**drum_preset.get("synth_params", {}), **(overrides or {})}
-        return drum_preset.get("midi_note", 36 + drum_idx), self._build_drum_params(synth_params)
+        params = self._build_drum_params(synth_params)
+        self._add_sample(params, drum_name)
+        return drum_preset.get("midi_note", 36 + drum_idx), params
+
+    def _add_sample(self, params: Dict[str, Any], drum_name: str):
+        """Name the sample that replaces the synth sound when the engine has a kit."""
+        if self.use_samples:
+            params["sample"] = {"slot": drum_name, "index": 0, "controls": {}}
 
     def release_drum(self, drum_idx: int, velocity: int = 0):
         """
@@ -126,7 +137,7 @@ class DrumVoiceManager:
             drum_idx: Drum index (0-7)
             velocity: Release velocity (typically 0, affects release curve)
         """
-        if drum_idx < 0 or drum_idx >= 8:
+        if drum_idx < 0 or drum_idx >= len(DRUM_PRESETS):
             return
 
         voice_info = self.drum_voices[drum_idx]
@@ -251,10 +262,7 @@ class DrumVoiceManager:
         Returns:
             Drum name (e.g., "Kick", "Snare", "Closed HH")
         """
-        drum_names = [
-            "Kick", "Snare", "Closed HH", "Open HH",
-            "Clap", "Tom Hi", "Tom Mid", "Tom Low"
-        ]
+        drum_names = list(DRUM_PRESETS)
         if 0 <= drum_idx < len(drum_names):
             return drum_names[drum_idx]
         return "Kick"  # Default fallback
