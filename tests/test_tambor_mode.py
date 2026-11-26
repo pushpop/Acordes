@@ -797,3 +797,18 @@ def test_arm_keeps_immediate_erase_and_truncating_step_count(isolated_cwd, monke
         assert active(mode) == []
 
     run_tambor(scenario)
+
+
+# -- Humanize ------------------------------------------------------
+
+@pytest.mark.parametrize("arm", [False, True])
+def test_screen_playback_humanizes_once_on_desktop_only(monkeypatch, arm):
+    monkeypatch.setattr(TamborMode, "_IS_ARM", arm)
+
+    async def scenario(pilot, mode, engine):
+        mode.humanizer.humanize_velocity = lambda amount, velocity: 110
+        await pilot.press("enter", "h")
+        mode._trigger_active_drums_for_step(0)
+        assert engine.hits[-1][1] == (121 if arm else 110)
+
+    run_tambor(scenario)

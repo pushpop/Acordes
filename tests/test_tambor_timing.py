@@ -112,13 +112,19 @@ def test_clock_drops_a_fill_when_the_pattern_changes():
     assert all(hits[0][0] >= 50 and hits[0][0] < 100 for _, _, hits in fired)
 
 
-def test_clock_humanizes_velocity_within_range():
+@pytest.mark.parametrize("velocity", [60, 100, 127])
+def test_clock_humanizes_velocity_within_the_chosen_amount(velocity):
     random.seed(1)
     clock = DrumClock()
-    clock.start(sequence([[(36, 100, {})]], humanize=0.15))
-    velocities = [hits[0][1] for _, _, hits in run_clock(clock, STEP_SAMPLES_120 * 50)]
+    clock.start(sequence([[(36, velocity, {})]], humanize=0.15))
+    velocities = [hits[0][1] for _, _, hits in run_clock(clock, STEP_SAMPLES_120 * 200)]
+    low, high = int(velocity * 0.85), min(127, int(velocity * 1.15))
     assert len(set(velocities)) > 5
-    assert all(72 <= v <= 127 for v in velocities)
+    assert all(low <= v <= high for v in velocities)
+    # The variation uses the whole range around the programmed velocity
+    assert min(velocities) < velocity * 0.9
+    if velocity < 127:
+        assert max(velocities) > velocity * 1.1
 
 
 def test_clock_leaves_velocity_alone_without_humanize():

@@ -28,6 +28,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor samples** (desktop only) - drums can play from a sample kit built out of local 909 WAV files (`uv run python -m music.drum_kit` writes `kits/909.npz`; samples and kit are not in the repository). Hits start on their exact sample, the closed hat cuts off the open hat, and the drums bypass the synth's effects, drive and amp level. Without a kit the synth drums play. The grid has two more rows, Ride and Rim; fills leave them playing their own steps. With a kit, the drum editor (`E`) chooses a row's sample and shapes it with tune, attack, decay, tone, drive and level, and `[` and `]` step through the alternatives on the grid; both are saved per pattern.
 
+**Tambor humanize** (desktop only) - the velocity variation was applied twice, which stretched the default 15% far beyond its range and made soft hits much quieter (velocity 60 came out between about 26 and 47). Hits now vary by up to the chosen amount around their programmed velocity.
+
 **Metronome arrow keys** (desktop only) - up and down change the tempo and left and right the time signature again; the main screen was consuming the arrow keys.
 
 **MONO/UNISON legato click** - the persistent click on legato note changes is gone:

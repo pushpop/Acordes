@@ -90,6 +90,5 @@ class DrumClock:
 
     @staticmethod
     def _humanize(velocity: int, amount: float) -> int:
-        """Vary a velocity by up to the given ratio, scaled the way drum hits expect it."""
-        varied = max(1, min(127, int(velocity + random.uniform(-amount, amount) * velocity)))
-        return max(1, min(127, int(varied * (varied / 100.0))))
+        """Vary a velocity by up to the given ratio."""
+        return max(1, min(127, int(velocity + random.uniform(-amount, amount) * velocity)))

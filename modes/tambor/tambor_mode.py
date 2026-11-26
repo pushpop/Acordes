@@ -2457,7 +2457,8 @@ class TamborMode(Vertical):
             self.drum_voice_manager.trigger_drum(
                 drum_idx,
                 velocity,
-                humanize_velocity=1.0 if not should_humanize else (velocity / 100.0),
+                # velocity is already humanized; ARM also scales it a second time
+                humanize_velocity=(velocity / 100.0) if should_humanize and self._IS_ARM else 1.0,
                 overrides=None if self._IS_ARM else pattern_overrides.get(drum_name),
             )
 
