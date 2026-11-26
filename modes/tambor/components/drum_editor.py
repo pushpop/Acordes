@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 class DrumEditorScreen(Screen):
     """Modal screen for editing drum sound parameters."""
 
+    # Textual scopes these rules to the class of the screen being shown, so the screen rule
+    # has to name the subclass too
     CSS = """
-    DrumEditorScreen {
+    DrumEditorScreen, SampleDrumEditorScreen {
         align: center middle;
         background: $surface 90%;
     }

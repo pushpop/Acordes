@@ -20,7 +20,7 @@ Whether you're a musician exploring synthesis in the terminal, a developer inter
 - **Preset System**: 27 factory presets + unlimited user-saveable presets
 - **Effects Processing**: BBD-style chorus, stereo feedback delay, and parametric filtering
 - **Arpeggiator**: Sample-accurate, audio-thread driven arpeggiator (UP / DOWN / UP+DOWN / RANDOM)
-- **Percussion Synthesis**: Dedicated drum machine mode with 16-step sequencer and 8 drum sounds
+- **Percussion Synthesis**: Dedicated drum machine mode with 16-step sequencer and a 909-style kit generated in code
 - **Musical Reference Tools**: Complete chord compendium, real-time chord detection, traditional music notation (bass & treble clefs)
 - **Microtonal Synthesis**: Full μTonalidade mode with EDO (Equal Division of Octave) systems, real-time pitch bending, and scale explorer
 - **Metronome**: Musically aware metronome with correct accentuation for time signatures
@@ -136,7 +136,8 @@ A comprehensive music theory reference hub:
 
 ### Tambor Mode: Drum Machine
 - **16-Step Sequencer**: Pattern-based drum programming
-- **8 Drum Sounds**: Kick, Snare, Hi-Hats (open/closed), Clap, Toms (high/mid/low), Cowbell
+- **10 Drum Rows** (desktop): Kick, Snare, Hi-Hats (closed/open), Clap, Toms (high/mid/low), Ride and Rim; Raspberry Pi has the first 8
+- **909-Style Kit** (desktop): generated in code, with alternative sounds per drum (`[` and `]`) and an editor (`E`) for tune, attack, decay, tone, drive and level; Raspberry Pi uses synthesizer drum sounds
 - **64 Pattern Slots**: Save and recall your drum patterns
 - **16 Fill Patterns**: Built-in fills with dynamic expansion
 - **Controls**: Mute/solo, humanization, timing modes (straight/swing/shuffle)

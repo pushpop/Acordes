@@ -1,9 +1,7 @@
-# ABOUTME: Tests for the sampled drum kit: WAV conversion, sound shaping and playback.
+# ABOUTME: Tests for the drum kit and for sample shaping and playback.
 # ABOUTME: Run with: uv run python -m pytest tests/test_drum_samples.py -q
 import os
-import subprocess
 import sys
-import wave
 
 import numpy as np
 import pytest
@@ -11,40 +9,16 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 
-from music.drum_kit import DrumKit, SLOT_SAMPLES, build_kit
+from music import drum_synth
+from music.drum_kit import DrumKit
 from music.sample_player import SamplePlayer, shape_sample
 
 RATE = 48000
-SOURCE_RATE = 44100
 
 
-def write_wav(path, samples, rate=SOURCE_RATE):
-    """Write a 16-bit WAV from a (frames,) or (frames, channels) float array."""
-    data = np.atleast_2d(samples.T).T
-    with wave.open(str(path), "wb") as f:
-        f.setnchannels(data.shape[1])
-        f.setsampwidth(2)
-        f.setframerate(rate)
-        f.writeframes((data * 32767).astype("<i2").tobytes())
-
-
-def tone(freq, seconds, rate=SOURCE_RATE, level=0.8):
+def tone(freq, seconds, rate=RATE, level=0.8):
     t = np.arange(int(seconds * rate)) / rate
     return level * np.sin(2 * np.pi * freq * t) * np.exp(-t * 4)
-
-
-def source_files():
-    return sorted({name for entries in SLOT_SAMPLES.values() for _, name in entries})
-
-
-@pytest.fixture
-def source_dir(tmp_path):
-    folder = tmp_path / "wavs"
-    folder.mkdir()
-    for i, name in enumerate(source_files()):
-        mono = tone(100 + 50 * i, 0.3)
-        write_wav(folder / name, np.column_stack((mono, mono * 0.5)) if i % 2 else mono)
-    return folder
 
 
 def noise(seconds=0.5, channels=2):
@@ -66,61 +40,58 @@ def brightness(audio):
 
 # ── Kit ──────────────────────────────────────────────────────────
 
-def test_every_drum_row_has_alternatives_mapped():
-    assert all(SLOT_SAMPLES.values())
-    assert len(source_files()) == 16
+ROWS = ["Kick", "Snare", "Closed HH", "Open HH", "Clap",
+        "Tom Hi", "Tom Mid", "Tom Low", "Ride", "Rim"]
 
 
-def test_build_and_load_round_trip(source_dir, tmp_path):
-    target = tmp_path / "kit" / "909.npz"
-    build_kit(source_dir, target)
-    kit = DrumKit.load(target)
+@pytest.fixture
+def renders(monkeypatch):
+    """Record which sounds are generated."""
+    made = []
+    render = drum_synth.render
+
+    def recording(slot, index=0):
+        made.append((slot, index))
+        return render(slot, index)
+
+    monkeypatch.setattr(drum_synth, "render", recording)
+    return made
+
+
+def test_loading_the_kit_needs_no_files(generated_kit, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    kit = DrumKit.load()
     assert kit.sample_rate == RATE
-    for slot, entries in SLOT_SAMPLES.items():
-        assert kit.labels(slot) == [label for label, _ in entries]
-        for index in range(len(entries)):
-            data = kit.sample(slot, index)
-            assert data.dtype == np.float32 and data.ndim == 2 and data.shape[1] == 2
-            assert abs(len(data) - int(0.3 * RATE)) <= 2
-            assert np.abs(data[-1]).max() < 0.001  # ends without a step
+    for slot in ROWS:
+        assert kit.labels(slot) == drum_synth.labels(slot)
+        for index in range(len(kit.labels(slot))):
+            assert np.array_equal(kit.sample(slot, index), drum_synth.render(slot, index))
 
 
-def test_conversion_keeps_pitch_and_stereo(source_dir, tmp_path):
-    build_kit(source_dir, tmp_path / "909.npz")
-    kit = DrumKit.load(tmp_path / "909.npz")
-    name = SLOT_SAMPLES["Kick"][0][1]
-    index = source_files().index(name)
-    data = kit.sample("Kick", 0)
-    assert abs(dominant_frequency(data) - (100 + 50 * index)) < 5
-    expected_ratio = 0.5 if index % 2 else 1.0
-    assert np.abs(data[:, 1]).max() / np.abs(data[:, 0]).max() == pytest.approx(expected_ratio, rel=0.01)
+def test_sounds_are_generated_when_first_needed_and_kept(generated_kit, renders):
+    kit = DrumKit.load()
+    kit.labels("Kick")
+    assert renders == []
+    first = kit.sample("Kick", 1)
+    assert kit.sample("Kick", 1) is first
+    assert renders == [("Kick", 1)]
 
 
-def test_alternative_index_wraps_around(source_dir, tmp_path):
-    build_kit(source_dir, tmp_path / "909.npz")
-    kit = DrumKit.load(tmp_path / "909.npz")
+def test_preparing_the_kit_generates_every_sound_once(generated_kit, renders):
+    kit = DrumKit.load()
+    kit.prepare()
+    total = sum(len(kit.labels(slot)) for slot in ROWS)
+    assert len(renders) == len(set(renders)) == total
+    for slot in ROWS:
+        for index in range(len(kit.labels(slot))):
+            kit.sample(slot, index)
+    assert len(renders) == total
+
+
+def test_alternative_index_wraps_around(generated_kit):
+    kit = DrumKit.load()
     count = len(kit.labels("Kick"))
-    assert np.array_equal(kit.sample("Kick", count), kit.sample("Kick", 0))
-
-
-def test_missing_source_file_is_reported(source_dir, tmp_path):
-    os.remove(source_dir / source_files()[0])
-    with pytest.raises(FileNotFoundError, match=source_files()[0].split(".")[0]):
-        build_kit(source_dir, tmp_path / "909.npz")
-
-
-def test_loading_without_a_kit_returns_none(tmp_path):
-    assert DrumKit.load(tmp_path / "absent.npz") is None
-
-
-def test_command_line_builds_the_kit(source_dir, tmp_path):
-    target = tmp_path / "out.npz"
-    result = subprocess.run(
-        [sys.executable, "-m", "music.drum_kit", str(source_dir), str(target)],
-        cwd=ROOT, capture_output=True, text=True,
-    )
-    assert result.returncode == 0 and result.stderr == ""
-    assert DrumKit.load(target) is not None
+    assert kit.sample("Kick", count) is kit.sample("Kick", 0)
 
 
 # ── Shaping ──────────────────────────────────────────────────────

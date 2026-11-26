@@ -252,6 +252,11 @@ def _finish(sound: np.ndarray) -> np.ndarray:
     return sound.astype(np.float32)
 
 
+def slots() -> List[str]:
+    """Names of the drum rows that have sounds."""
+    return list(_SOUNDS)
+
+
 def labels(slot: str) -> List[str]:
     """Names of the alternatives for a drum row."""
     return [label for label, _, _ in _SOUNDS[slot]]

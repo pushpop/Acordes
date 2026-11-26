@@ -195,7 +195,7 @@ DRUM_PRESETS = {
         }
     },
 
-    # Ride and Rim are desktop rows. These are their sounds when no sample kit is built.
+    # Ride and Rim are desktop rows. These are their sounds when the engine has no drum kit.
     "Ride": {
         "midi_note": 51,        # Ride Cymbal  (pitch irrelevant)
         "display_name": "Ride",

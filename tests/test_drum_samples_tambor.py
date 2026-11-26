@@ -5,8 +5,8 @@ import json
 import numpy as np
 import pytest
 
-import music.drum_kit
-from music.drum_kit import DrumKit, SLOT_SAMPLES
+from music import drum_synth
+from music.drum_kit import DrumKit
 from modes.tambor.tambor_mode import TamborMode
 from modes.tambor.music.drum_presets import DRUM_PRESETS
 from modes.tambor.music.drum_voice_manager import DrumVoiceManager
@@ -18,14 +18,16 @@ ROWS = ["Kick", "Snare", "Closed HH", "Open HH", "Clap",
 KICK, SNARE, CLOSED_HH, OPEN_HH, RIDE, RIM = 0, 1, 2, 3, 8, 9
 
 
+def every_sound():
+    return [(slot, index) for slot in ROWS for index in range(len(drum_synth.labels(slot)))]
+
+
 def fake_kit(seconds=0.2):
-    """Kit whose samples are constant, with a different level for every file."""
-    names = sorted({name for entries in SLOT_SAMPLES.values() for _, name in entries})
-    arrays = {
-        name: np.full((int(seconds * SAMPLE_RATE), 2), 0.05 * (i + 1) / 2, dtype=np.float32)
-        for i, name in enumerate(names)
-    }
-    return DrumKit(arrays)
+    """Kit whose samples are constant, with a different level for every sound."""
+    return DrumKit({
+        key: np.full((int(seconds * SAMPLE_RATE), 2), 0.05 * (i + 1) / 2, dtype=np.float32)
+        for i, key in enumerate(every_sound())
+    })
 
 
 def sample_engine(seconds=0.2, **params):
@@ -55,12 +57,8 @@ def live_voices(engine):
 
 # ── Kit rows ─────────────────────────────────────────────────────
 
-def test_ride_and_rim_have_their_own_rows():
-    assert list(SLOT_SAMPLES) == ROWS
-    assert [label for label, _ in SLOT_SAMPLES["Ride"]] == ["Ride 01"]
-    assert [label for label, _ in SLOT_SAMPLES["Rim"]] == ["Rim 02"]
-    assert [label for label, _ in SLOT_SAMPLES["Open HH"]] == ["Dark", "Short"]
-    assert [label for label, _ in SLOT_SAMPLES["Clap"]] == ["Snappy"]
+def test_every_row_has_generated_sounds():
+    assert all(drum_synth.labels(slot) for slot in ROWS)
 
 
 def test_every_row_has_a_synth_stand_in_with_its_own_note():
@@ -80,12 +78,29 @@ def test_voice_manager_without_samples_sends_synth_parameters_only():
     assert "sample" not in manager.hit_params(KICK)[1]
 
 
-def test_engine_loads_the_kit_when_it_has_been_built(tmp_path, monkeypatch):
-    target = tmp_path / "kit.npz"
-    names = {name for entries in SLOT_SAMPLES.values() for _, name in entries}
-    np.savez(target, **{name: np.zeros((10, 2), dtype=np.float32) for name in names})
-    monkeypatch.setattr(music.drum_kit, "DEFAULT_KIT", str(target))
-    assert make_engine().drum_kit is not None
+def test_engine_has_every_sound_ready_before_playing(generated_kit, monkeypatch):
+    kit = make_engine().drum_kit
+
+    def late(slot, index=0):
+        raise AssertionError("a sound was generated after the engine started")
+
+    monkeypatch.setattr(drum_synth, "render", late)
+    for slot, index in every_sound():
+        assert len(kit.sample(slot, index))
+
+
+@pytest.mark.parametrize("drum_idx", range(len(ROWS)))
+def test_engine_plays_every_generated_alternative(generated_kit, drum_idx):
+    engine = make_engine()
+    manager = DrumVoiceManager(engine)
+    for index in range(len(drum_synth.labels(ROWS[drum_idx]))):
+        note, params = manager.hit_params(drum_idx, {"sample": {"index": index, "controls": {}}})
+        engine.all_notes_off()
+        run_buffers(engine, 4)
+        engine.drum_trigger(note, 127, params)
+        audio = run_buffers(engine, 4)
+        assert 0.1 < np.abs(audio).max() <= 1.0
+        assert live_voices(engine) == []
 
 
 # ── Engine ───────────────────────────────────────────────────────
@@ -168,8 +183,7 @@ def test_master_volume_applies_to_the_drums():
 def test_many_loud_drums_stay_inside_full_scale():
     engine = sample_engine()
     engine.drum_kit = DrumKit({
-        name: np.ones((4800, 2), dtype=np.float32)
-        for entries in SLOT_SAMPLES.values() for _, name in entries
+        key: np.ones((4800, 2), dtype=np.float32) for key in every_sound()
     })
     for drum_idx in range(len(ROWS)):
         engine.drum_trigger(*hit(engine, drum_idx))

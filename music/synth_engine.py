@@ -687,8 +687,11 @@ class SynthEngine:
 
         self.waveform = "sine"
         self._drum_clock = DrumClock()
-        # Sampled drums (desktop). Without a built kit the drums are synthesized.
+        # Sampled drums (desktop). Every sound is made here, before audio starts, because
+        # the audio thread must not wait for one. Without a kit the drums are synthesized.
         self.drum_kit = None if self._IS_ARM else DrumKit.load()
+        if self.drum_kit is not None:
+            self.drum_kit.prepare()
         self._sample_player = SamplePlayer(self.sample_rate)
         self._shaped_samples: dict = {}
         self.octave = 0

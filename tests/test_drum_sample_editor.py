@@ -2,11 +2,9 @@
 # ABOUTME: Run with: uv run python -m pytest tests/test_drum_sample_editor.py -q
 import json
 
-import numpy as np
 import pytest
 
-import music.drum_kit
-from music.drum_kit import SLOT_SAMPLES
+from music.drum_kit import DrumKit
 from modes.tambor.tambor_mode import TamborMode
 from modes.tambor.components.drum_editor import DrumEditorScreen, SampleDrumEditorScreen
 from modes.tambor.music.drum_voice_manager import DrumVoiceManager
@@ -19,11 +17,8 @@ LEFT, RIGHT = "left_square_bracket", "right_square_bracket"
 
 
 @pytest.fixture
-def kit():
-    """Build a silent kit where the app looks for one."""
-    names = {name for entries in SLOT_SAMPLES.values() for _, name in entries}
-    with open(music.drum_kit.DEFAULT_KIT, "wb") as f:
-        np.savez(f, **{name: np.zeros((10, 2), dtype=np.float32) for name in names})
+def kit(generated_kit):
+    """Run with the drum kit loaded."""
 
 
 def saved(root):
@@ -58,13 +53,13 @@ def test_chosen_sample_and_controls_reach_the_hit():
 
 def test_brackets_step_through_the_alternatives_and_wrap(kit):
     async def scenario(pilot, mode, engine):
-        assert "(Drive 02)" in panel_text(mode, "focus-label")
+        assert "(Punch)" in panel_text(mode, "focus-label")
         await pilot.press(RIGHT)
         assert sample_sent(engine)["index"] == 1
-        assert "(Drive 04)" in panel_text(mode, "focus-label")
+        assert "(Long)" in panel_text(mode, "focus-label")
         await pilot.press(LEFT, LEFT)
         assert sample_sent(engine)["index"] == 2
-        assert "(Tape)" in panel_text(mode, "focus-label")
+        assert "(Hard)" in panel_text(mode, "focus-label")
         await pilot.press(RIGHT)
         assert sample_sent(engine)["index"] == 0
 
@@ -78,7 +73,7 @@ def test_chosen_sample_is_saved_with_the_pattern(kit, isolated_cwd):
 
     async def reopen(pilot, mode, engine):
         assert clock_sample(mode)["index"] == 2
-        assert "(Tape)" in panel_text(mode, "focus-label")
+        assert "(Hard)" in panel_text(mode, "focus-label")
 
     run_tambor(choose)
     assert saved(isolated_cwd)["drum_overrides"]["Kick"]["sample"]["index"] == 2
@@ -90,10 +85,10 @@ def test_sample_choice_belongs_to_one_pattern(kit):
         await pilot.press(RIGHT)
         mode._select_pattern(2)
         await pilot.pause(0.2)
-        assert "(Drive 02)" in panel_text(mode, "focus-label")
+        assert "(Punch)" in panel_text(mode, "focus-label")
         mode._select_pattern(1)
         await pilot.pause(0.2)
-        assert "(Drive 04)" in panel_text(mode, "focus-label")
+        assert "(Long)" in panel_text(mode, "focus-label")
 
     run_tambor(scenario)
 
@@ -129,7 +124,7 @@ def test_brackets_do_nothing_without_a_kit():
 def test_brackets_work_inside_the_app(kit):
     async def scenario(pilot, mode):
         await pilot.press(RIGHT)
-        assert "(Drive 04)" in panel_text(mode, "focus-label")
+        assert "(Long)" in panel_text(mode, "focus-label")
 
     run_in_main_screen(scenario)
 
@@ -143,7 +138,7 @@ def test_editor_shows_sample_controls_with_a_kit(kit):
         names = [p[0] for p in screen.PARAMETERS]
         assert names == ["index", "tune", "attack", "decay", "tone", "drive", "level"]
         shown = [str(label.render()) for label in screen.query(".param-val")]
-        assert shown == ["Drive 02", "0.0st", "0ms", "100%", "0.00", "0.00", "100%"]
+        assert shown == ["Punch", "0.0st", "0ms", "100%", "0.00", "0.00", "100%"]
         titles = [str(label.render()) for label in screen.query(".param-name")]
         assert titles[0] == "Sample" and titles[-1] == "Level"
 
@@ -163,7 +158,7 @@ def test_choosing_a_sample_in_the_editor_plays_it(kit):
         screen = await open_editor(pilot)
         await pilot.press("right")
         assert sample_sent(engine)["index"] == 1
-        assert str(screen.query(".param-val").first().render()) == "Drive 04"
+        assert str(screen.query(".param-val").first().render()) == "Long"
         await pilot.press("right", "right")
         assert sample_sent(engine)["index"] == 0  # wraps around
 
@@ -207,7 +202,7 @@ def test_editor_starts_from_the_saved_settings(kit):
     async def scenario(pilot, mode, engine):
         await pilot.press(RIGHT)
         screen = await open_editor(pilot)
-        assert str(screen.query(".param-val").first().render()) == "Drive 04"
+        assert str(screen.query(".param-val").first().render()) == "Long"
 
     run_tambor(scenario)
 
@@ -246,3 +241,21 @@ def test_arm_keeps_the_synth_editor_and_ignores_brackets(kit, monkeypatch):
         assert type(screen) is DrumEditorScreen
 
     run_tambor(scenario)
+
+
+@pytest.mark.parametrize("with_kit", [True, False])
+@pytest.mark.parametrize("size", [(120, 40), (180, 55)])
+def test_editor_is_centred_in_the_terminal(generated_kit, monkeypatch, with_kit, size):
+    if not with_kit:
+        monkeypatch.setattr(DrumKit, "load", classmethod(lambda cls: None))
+
+    async def scenario(pilot, mode):
+        await pilot.resize_terminal(*size)
+        screen = await open_editor(pilot)
+        box = screen.query_one("#editor-box").region
+        assert box.x > 0 and box.y > 0
+        # The space left on opposite sides differs by one cell at most
+        assert abs(box.x - (screen.size.width - box.right)) <= 1
+        assert abs(box.y - (screen.size.height - box.bottom)) <= 1
+
+    run_in_main_screen(scenario)
