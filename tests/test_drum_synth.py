@@ -20,11 +20,14 @@ TOMS = ["Tom Low", "Tom Mid", "Tom Hi"]
 SOUNDS = {
     "Kick": KICKS,
     "Snare": ["Tight", "Fat"],
+    "Closed HH": ["Dark", "Bright"],
+    "Open HH": ["Dark", "Bright"],
     "Clap": ["Standard", "Wide"],
     "Tom Hi": ["Standard", "Long"],
     "Tom Mid": ["Standard", "Long"],
     "Tom Low": ["Standard", "Long"],
     "Rim": ["Standard", "Metallic"],
+    "Ride": ["Standard"],
 }
 EVERY_SOUND = [(slot, label) for slot, names in SOUNDS.items() for label in names]
 
@@ -213,6 +216,50 @@ def test_clap_sits_in_the_mid_range(label):
 def test_wide_clap_differs_between_the_sides():
     data = sound("Clap", "Wide")
     assert abs(np.corrcoef(data[:, 0], data[:, 1])[0, 1]) < 0.5
+
+
+# ── Hi-hats and ride ─────────────────────────────────────────────
+
+HATS = ["Closed HH", "Open HH"]
+
+
+def brightness(data):
+    """Centre of gravity of the spectrum in Hz."""
+    power = np.abs(np.fft.rfft(data[:, 0])) ** 2
+    return np.sum(np.fft.rfftfreq(len(data), 1.0 / RATE) * power) / power.sum()
+
+
+@pytest.mark.parametrize("slot", HATS)
+@pytest.mark.parametrize("label", ["Dark", "Bright"])
+def test_hats_are_high_pitched(slot, label):
+    assert energy_above(sound(slot, label), 4000) > 0.85
+
+
+@pytest.mark.parametrize("slot", HATS)
+def test_bright_hat_is_brighter_than_dark(slot):
+    assert brightness(sound(slot, "Bright")) > brightness(sound(slot, "Dark")) + 1000
+
+
+@pytest.mark.parametrize("label", ["Dark", "Bright"])
+def test_open_hat_rings_much_longer_than_closed(label):
+    closed = seconds_until_quiet(sound("Closed HH", label))
+    opened = seconds_until_quiet(sound("Open HH", label))
+    assert closed < 0.1
+    assert opened > max(0.25, 4 * closed)
+
+
+def test_ride_is_a_long_high_ringing_sound():
+    data = sound("Ride", "Standard")
+    assert seconds_until_quiet(data) > 0.8
+    assert energy_above(data, 2000) > 0.8
+    assert loudness(data, 1.0, 1.2) > 0.01
+
+
+def test_six_bit_grain_uses_few_levels():
+    smooth = np.sin(np.linspace(0.0, 20.0, 5000)) * 3.0
+    grainy = drum_synth._six_bit(smooth)
+    assert len(np.unique(grainy)) <= 63
+    assert np.abs(grainy).max() == pytest.approx(1.0)
 
 
 def test_index_wraps_around():

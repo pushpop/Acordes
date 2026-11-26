@@ -62,6 +62,20 @@ _CLAPS = [
 _CLAP_SPACING = 0.011  # seconds between bursts
 
 
+# Hi-hat and ride alternatives.
+#   low, high    range in Hz of the metal partials
+#   cutoff       high-pass frequency in Hz
+#   decay        time constant of the fall
+_CLOSED_HATS = [
+    ("Dark", dict(length=0.22, low=3500.0, high=11000.0, cutoff=5500.0, decay=0.022)),
+    ("Bright", dict(length=0.22, low=6000.0, high=16000.0, cutoff=8500.0, decay=0.022)),
+]
+_OPEN_HATS = [
+    ("Dark", dict(length=1.1, low=3500.0, high=11000.0, cutoff=5500.0, decay=0.19)),
+    ("Bright", dict(length=1.1, low=6000.0, high=16000.0, cutoff=8500.0, decay=0.19)),
+]
+
+
 def _times(seconds: float) -> np.ndarray:
     return np.arange(int(seconds * SAMPLE_RATE)) / SAMPLE_RATE
 
@@ -148,6 +162,43 @@ def _metallic_rim(name: str, length) -> np.ndarray:
     return _filtered(np.tanh(0.9 * ring * _onset(t, 0.0001)), "highpass", 600.0)
 
 
+def _six_bit(data: np.ndarray) -> np.ndarray:
+    """Scale to full range and keep six bits, the grain of early digital cymbals."""
+    return np.round(data / np.abs(data).max() * 31.0) / 31.0
+
+
+def _metal(name: str, t: np.ndarray, low: float, high: float, count: int) -> np.ndarray:
+    """Many unrelated tones, which together sound like struck metal."""
+    random = np.random.default_rng(zlib.crc32(f"{name} metal".encode()))
+    pitches = np.exp(random.uniform(np.log(low), np.log(high), count))
+    phases = random.uniform(0.0, 2.0 * np.pi, count)
+    total = np.zeros(len(t))
+    for pitch, phase in zip(pitches, phases):
+        total += np.sin(2.0 * np.pi * pitch * t + phase)
+    return total / np.sqrt(count)
+
+
+def _hat(name: str, length, low, high, cutoff, decay) -> np.ndarray:
+    """Metal tones and noise in six bits, shaped by a falling envelope."""
+    t = _times(length)
+    source = _six_bit(_metal(name, t, low, high, 40) + 0.5 * _noise(name, len(t)))
+    envelope = (0.8 * np.exp(-t / decay) + 0.2 * np.exp(-t / (decay * 0.3))) * _onset(t)
+    return _filtered(source, "highpass", cutoff, order=4) * envelope
+
+
+def _ride(name: str, length, decay) -> np.ndarray:
+    """A clear ping over a long wash of metal."""
+    t = _times(length)
+    wash = _metal(name, t, 2500.0, 12000.0, 70) + 0.25 * _noise(name, len(t))
+    wash = _filtered(_six_bit(wash), "highpass", 3000.0)
+    wash *= 0.7 * np.exp(-t / decay) + 0.3 * np.exp(-t / 0.05)
+    ping = np.zeros(len(t))
+    for pitch, level in ((3140.0, 1.0), (4220.0, 0.7), (5370.0, 0.5)):
+        ping += level * np.sin(2.0 * np.pi * pitch * t)
+    ping *= 0.22 * np.exp(-t / (decay * 0.7))
+    return (wash + ping) * _onset(t)
+
+
 def _clap_side(name: str, t: np.ndarray, tail: float) -> np.ndarray:
     """Three quick noise bursts and a fourth that rings on."""
     envelope = np.zeros(len(t))
@@ -169,6 +220,8 @@ def _clap(name: str, length, tail, wide) -> np.ndarray:
 _SOUNDS = {
     "Kick": [(label, _kick, settings) for label, settings in _KICKS],
     "Snare": [(label, _snare, settings) for label, settings in _SNARES],
+    "Closed HH": [(label, _hat, settings) for label, settings in _CLOSED_HATS],
+    "Open HH": [(label, _hat, settings) for label, settings in _OPEN_HATS],
     "Clap": [(label, _clap, settings) for label, settings in _CLAPS],
     **{
         slot: [
@@ -182,6 +235,7 @@ _SOUNDS = {
         ("Standard", _rim, dict(length=0.08)),
         ("Metallic", _metallic_rim, dict(length=0.25)),
     ],
+    "Ride": [("Standard", _ride, dict(length=2.8, decay=0.50))],
 }
 
 
