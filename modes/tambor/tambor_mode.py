@@ -30,6 +30,9 @@ IS_ARM = platform.machine() in ("armv7l", "aarch64")
 # arrow bindings take priority.
 ARROWS_FIRST = not IS_ARM
 
+# Number of destructive actions that can be undone
+UNDO_LIMIT = 20
+
 
 class SimpleConfigManager:
     """Simple config manager stub for standalone use."""
@@ -623,13 +626,16 @@ class TamborMode(Vertical):
 
         # Pattern file manager - store in presets/tambor/ for Acordes integration
         # This keeps Tambor patterns separate from synth presets
-        self.pattern_manager = PatternManager("presets/tambor")
+        self.pattern_manager = PatternManager(
+            "presets/tambor", keep_hidden_steps=not self._IS_ARM
+        )
 
         # Background pattern saver for non-blocking saves
         self._pattern_saver = PatternSaver(self.pattern_manager)
 
-        # Undo system for cleared patterns
-        self.undo_stack: List[Tuple[int, List]] = []  # Stack of (pattern_num, pattern_data)
+        # Undo system for destructive actions.
+        # Desktop stacks (pattern_num, saved file text); ARM stacks (pattern_num, pattern_data).
+        self.undo_stack: List[Tuple[int, Any]] = []
 
         # Initialize pattern 1 with empty pattern so grid is visible on startup
         # Will be replaced with loaded pattern in on_mount() if available
@@ -1165,6 +1171,7 @@ class TamborMode(Vertical):
             on_select=self._on_pattern_selected,
             on_delete=self._on_pattern_deleted,
             saved_patterns=saved_patterns,
+            confirm_delete=not self._IS_ARM,
         )
         self.app.push_screen(selector_screen)
 
@@ -1182,6 +1189,10 @@ class TamborMode(Vertical):
 
     def _on_pattern_deleted(self, pattern_num: int):
         """Callback when user clears a pattern from selector."""
+        if not self._IS_ARM:
+            self._erase_pattern(pattern_num)
+            return
+
         # Save current pattern data to undo stack (for undo functionality)
         if self.patterns[pattern_num] is not None:
             self.undo_stack.append((pattern_num, self.patterns[pattern_num].copy()))
@@ -1223,6 +1234,11 @@ class TamborMode(Vertical):
 
         # Clear only the selected drum's steps
         drum_idx = self.cursor_drum
+        if not self._IS_ARM:
+            if drum_idx >= len(pattern) or not any(s.get("active") for s in pattern[drum_idx]):
+                return  # Nothing to clear, so nothing to undo
+            self._push_undo(self.current_pattern)
+
         if drum_idx < len(pattern):
             for step_idx in range(len(pattern[drum_idx])):
                 pattern[drum_idx][step_idx]["active"] = False
@@ -1238,6 +1254,10 @@ class TamborMode(Vertical):
         """Undo the last deleted pattern (Ctrl+Z key)."""
         if not self.undo_stack:
             return  # No undo history
+
+        if not self._IS_ARM:
+            self._restore_from_undo()
+            return
 
         # Pop the last deleted pattern from undo stack
         pattern_num, pattern_data = self.undo_stack.pop()
@@ -1258,6 +1278,74 @@ class TamborMode(Vertical):
         # If this is the current pattern, reload it to UI
         if pattern_num == self.current_pattern:
             self._load_current_pattern(force_reload=True)
+
+    def _push_undo(self, pattern_num: int):
+        """Remember a pattern as it is now, before an action that destroys part of it."""
+        # Queued saves must land first so they cannot overwrite what follows
+        self._pattern_saver.flush(wait=True)
+        if pattern_num == self.current_pattern:
+            self._auto_save_current_pattern()
+        # Other patterns were saved when they stopped being current
+        saved = self.pattern_manager.read_pattern_file(pattern_num)
+        if saved is None:
+            return
+        self.undo_stack.append((pattern_num, saved))
+        del self.undo_stack[:-UNDO_LIMIT]
+
+    def _restore_from_undo(self):
+        """Bring back the most recently remembered pattern and show it."""
+        if not self.undo_stack:
+            return
+        pattern_num, saved = self.undo_stack.pop()
+        self._pattern_saver.flush(wait=True)
+        if pattern_num != self.current_pattern:
+            self._select_pattern(pattern_num)
+        self.pattern_manager.write_pattern_file(pattern_num, saved)
+        self._reload_pattern(pattern_num)
+
+    def _erase_pattern(self, pattern_num: int):
+        """Reset a pattern and all of its settings to an empty 16-step pattern."""
+        self._push_undo(pattern_num)
+        self.pattern_manager.save_pattern(
+            pattern_num,
+            self._create_empty_pattern(16),
+            drum_names=self.DRUM_SOUNDS,
+            bpm=self.pattern_bpms[pattern_num],
+            num_steps=16,
+            pre_scale=str(PreScale.SCALE_4.value),
+        )
+        self._reload_pattern(pattern_num)
+
+    def _reload_pattern(self, pattern_num: int):
+        """Drop everything held in memory about a pattern so its file takes effect."""
+        self.patterns[pattern_num] = None
+        self.pattern_step_counts[pattern_num] = 16
+        self.pattern_dirty.discard(pattern_num)
+        for settings in (
+            getattr(self, "pattern_drum_overrides", {}),
+            self.pattern_humanize_enabled,
+            self.pattern_humanize_velocity_amount,
+            self.pattern_fill_patterns,
+            self.pattern_drum_mute_state,
+            self.pattern_drum_solo_state,
+            self.pattern_pre_scales,
+        ):
+            settings.pop(pattern_num, None)
+
+        if pattern_num != self.current_pattern:
+            return  # Loaded from disk when it is next selected
+
+        self._fill_in_progress = False
+        self._current_fill_id = None
+        self._cached_expanded_fill = None
+        self._load_current_pattern(force_reload=True)
+        self._rebuild_grid()
+        self._update_all_drum_row_displays()
+        self._update_control_panel_humanize()
+        self._update_control_panel_fill()
+        self._update_control_panel_pre_scale()
+        if self.control_panel:
+            self.control_panel.update_pattern(pattern_num, is_dirty=False)
 
     def action_increase_step_count(self):
         """Increase step count for current pattern (+ key)."""
@@ -1470,7 +1558,11 @@ class TamborMode(Vertical):
         pattern = self.patterns[pattern_num]
         if pattern and drum_idx < len(pattern):
             num_steps = self.current_step_count
+            if not self._IS_ARM:
+                self._push_undo(pattern_num)
             randomized_pattern = self._randomize_drum_pattern(pattern[drum_idx], num_steps, strategy)
+            # Steps hidden by a shorter step count are left as they are
+            randomized_pattern = randomized_pattern + pattern[drum_idx][num_steps:]
             pattern[drum_idx] = randomized_pattern
 
             # Update UI
@@ -1840,6 +1932,8 @@ class TamborMode(Vertical):
                     "fill_pattern_id": fill_pattern_id,
                 }
                 self._pattern_saver.queue_save(pattern_num, pattern, self.DRUM_SOUNDS, **save_kwargs)
+                if not self._IS_ARM:
+                    self._pattern_saver.flush()  # Write now instead of at mode exit
 
                 # Mark as clean immediately (save is queued but will happen in background)
                 self.pattern_dirty.discard(pattern_num)
@@ -1918,13 +2012,16 @@ class TamborMode(Vertical):
         self.refresh()
 
     def _resize_grid(self):
-        """Fit the current pattern and its drum rows to the current step count."""
-        old_pattern = self.patterns[self.current_pattern]
+        """Fit the current pattern and its drum rows to the current step count.
+
+        Steps beyond the count stay in the pattern, hidden, until the count grows again.
+        """
         new_pattern = self._create_empty_pattern(self.current_step_count)
+        old_pattern = self.patterns[self.current_pattern]
         if old_pattern:
-            for new_steps, old_steps in zip(new_pattern, old_pattern):
-                for step_idx, old_step in enumerate(old_steps[:len(new_steps)]):
-                    new_steps[step_idx] = old_step.copy()
+            for old_steps, empty_steps in zip(old_pattern, new_pattern):
+                old_steps.extend(empty_steps[len(old_steps):])
+            new_pattern = old_pattern
 
         self.patterns[self.current_pattern] = new_pattern
         self.pattern_step_counts[self.current_pattern] = self.current_step_count

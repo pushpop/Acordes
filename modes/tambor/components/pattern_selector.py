@@ -7,6 +7,7 @@ from textual.widgets import Static, Label
 from textual.binding import Binding
 from textual.screen import Screen
 from typing import Callable, Optional
+from components.confirmation_dialog import ConfirmationDialog
 
 
 class PatternCell(Static):
@@ -295,12 +296,14 @@ class PatternSelectorScreen(Screen):
         on_select: Optional[Callable[[int], None]] = None,
         on_delete: Optional[Callable[[int], None]] = None,
         saved_patterns: Optional[set] = None,
+        confirm_delete: bool = False,
     ):
         """Initialize pattern selector screen."""
         super().__init__()
         self.current_pattern = current_pattern
         self.on_select = on_select
         self.on_delete = on_delete
+        self.confirm_delete = confirm_delete
         self.saved_patterns = saved_patterns or set()
 
         # Grid state
@@ -338,7 +341,8 @@ class PatternSelectorScreen(Screen):
 
             # Footer
             footer = Label(
-                "ESC: Cancel | ENTER: Select",
+                "ESC: Cancel | ENTER: Select"
+                + (" | C: Erase" if self.confirm_delete else ""),
                 id="footer"
             )
             yield footer
@@ -379,14 +383,28 @@ class PatternSelectorScreen(Screen):
         self.app.pop_screen()
 
     def action_delete_pattern(self):
-        """Clear the selected pattern (X key)."""
+        """Clear the selected pattern (C key), asking first if confirm_delete is set."""
         selected_pattern = self.selected_row * self.grid_cols + self.selected_col + 1
+        if not self.confirm_delete:
+            self._delete(selected_pattern)
+            return
+
+        def on_answer(confirmed: bool):
+            if confirmed:
+                self._delete(selected_pattern)
+
+        self.app.push_screen(
+            ConfirmationDialog(f"Erase pattern {selected_pattern:02d}?"), on_answer
+        )
+
+    def _delete(self, pattern_num: int):
+        """Erase a pattern and show its cell as empty."""
         # Call callback to clear pattern in TamborMode
         if hasattr(self, 'on_delete'):
-            self.on_delete(selected_pattern)
+            self.on_delete(pattern_num)
 
         # Update the cell visual to show as empty (remove .saved class)
-        cell_idx = self.selected_row * self.grid_cols + self.selected_col
+        cell_idx = pattern_num - 1
         if cell_idx < len(self.cells):
             cell = self.cells[cell_idx]
             cell.set_saved(False)  # Remove green color, show as empty outline

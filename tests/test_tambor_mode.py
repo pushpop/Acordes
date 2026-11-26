@@ -548,3 +548,252 @@ def test_arm_keeps_factory_sound_and_silent_preview(monkeypatch):
         assert engine.hits[0][2]["decay"] == FACTORY_KICK_DECAY
 
     run_tambor(scenario)
+
+
+# ── Safety: undo, erase confirmation, hidden steps ───────────────
+
+def active(mode, pattern_num=1, drum_idx=KICK):
+    return [i for i, s in enumerate(mode.patterns[pattern_num][drum_idx]) if s["active"]]
+
+
+def saved_pattern(root, pattern_num=1):
+    path = root / "presets" / "tambor" / f"pattern_{pattern_num:02d}.json"
+    return json.loads(path.read_text())
+
+
+def saved_active(root, pattern_num=1, drum_idx=KICK):
+    steps = saved_pattern(root, pattern_num)["drums"][drum_idx]["steps"]
+    return [i for i, s in enumerate(steps) if s["active"]]
+
+
+async def erase_selected(pilot, answer="y"):
+    """Open the pattern selector, ask to erase the highlighted pattern and answer."""
+    await pilot.press("n")
+    await pilot.pause(0.2)
+    await pilot.press("c")
+    await pilot.pause(0.2)
+    await pilot.press(answer)
+    await pilot.pause(0.2)
+    await pilot.press("escape")
+    await pilot.pause(0.2)
+
+
+def decorate(mode):
+    """Give the current pattern every kind of per-pattern setting."""
+    mode._on_drum_editor_applied("Kick", {"decay": 0.1})
+    mode._on_fill_selected(3)
+    mode.action_toggle_humanize()
+    mode.action_toggle_mute()
+
+
+def assert_decorated(mode, root):
+    saved = saved_pattern(root)
+    assert saved["drum_overrides"] == {"Kick": {"decay": 0.1}}
+    assert saved["metadata"]["fill_pattern_id"] == 3
+    assert saved["metadata"]["humanize_enabled"] is True
+    assert saved["mute_state"][KICK] is True
+    assert mode.pattern_drum_overrides[1] == {"Kick": {"decay": 0.1}}
+    assert panel_text(mode, "fill-label") == "Fill: 3"
+    assert "ON" in panel_text(mode, "humanize-label")
+    assert mute_light(mode, KICK)
+
+
+def test_cleared_row_comes_back_with_undo(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 4})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("c")
+        assert active(mode) == []
+        await pilot.press("ctrl+z")
+        await pilot.pause(0.2)
+        assert active(mode) == [0, 4]
+        assert mode.drum_rows[KICK].cells[4].is_active
+        assert saved_active(isolated_cwd) == [0, 4]
+
+    run_tambor(scenario)
+
+
+def test_randomized_row_comes_back_with_undo(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {1, 2, 3})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("r")
+        await pilot.press("ctrl+z")
+        await pilot.pause(0.2)
+        assert active(mode) == [1, 2, 3]
+
+    run_tambor(scenario)
+
+
+def test_clearing_an_empty_row_adds_nothing_to_undo(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 4})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("c", "down", "c", "ctrl+z")
+        await pilot.pause(0.2)
+        assert active(mode) == [0, 4]
+
+    run_tambor(scenario)
+
+
+def test_undo_keeps_the_last_twenty_actions(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0})
+
+    async def scenario(pilot, mode, engine):
+        for _ in range(25):
+            mode.action_randomize_drum()
+        assert len(mode.undo_stack) == 20
+
+    run_tambor(scenario)
+
+
+@pytest.mark.parametrize("answer", ["n", "escape"])
+def test_erase_can_be_declined(isolated_cwd, answer):
+    write_pattern(isolated_cwd, 1, {0, 4})
+
+    async def scenario(pilot, mode, engine):
+        await erase_selected(pilot, answer)
+        assert active(mode) == [0, 4]
+        assert saved_active(isolated_cwd) == [0, 4]
+
+    run_tambor(scenario)
+
+
+def test_erase_resets_every_pattern_setting(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 20}, num_steps=32)
+
+    async def scenario(pilot, mode, engine):
+        decorate(mode)
+        mode._auto_save_periodic()
+        await erase_selected(pilot)
+        saved = saved_pattern(isolated_cwd)
+        assert saved["metadata"]["num_steps"] == 16
+        assert saved["metadata"]["fill_pattern_id"] is None
+        assert saved["metadata"]["humanize_enabled"] is False
+        assert "drum_overrides" not in saved and "mute_state" not in saved
+        assert saved_active(isolated_cwd) == []
+        assert mode.current_step_count == 16 and active(mode) == []
+        assert len(mode.drum_rows[KICK].cells) == 16
+        assert 1 not in mode.pattern_drum_overrides
+        assert panel_text(mode, "fill-label") == "Fill: None"
+        assert "OFF" in panel_text(mode, "humanize-label")
+        assert not mute_light(mode, KICK)
+
+    run_tambor(scenario)
+
+
+def test_undo_restores_the_whole_erased_pattern(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 20}, num_steps=32)
+
+    async def scenario(pilot, mode, engine):
+        decorate(mode)
+        mode._auto_save_periodic()
+        await erase_selected(pilot)
+        await pilot.press("ctrl+z")
+        await pilot.pause(0.3)
+        assert mode.current_step_count == 32
+        assert len(mode.drum_rows[KICK].cells) == 32
+        assert active(mode) == [0, 20]
+        assert_decorated(mode, isolated_cwd)
+
+    run_tambor(scenario)
+
+
+def test_erasing_another_pattern_leaves_the_current_one_and_undo_shows_it(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0})
+    write_pattern(isolated_cwd, 2, {5})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        await pilot.press("right", "c")
+        await pilot.pause(0.2)
+        await pilot.press("y")
+        await pilot.pause(0.2)
+        await pilot.press("escape")
+        await pilot.pause(0.2)
+        assert mode.current_pattern == 1 and active(mode) == [0]
+        assert saved_active(isolated_cwd, 2) == []
+        await pilot.press("ctrl+z")
+        await pilot.pause(0.3)
+        assert mode.current_pattern == 2 and active(mode, 2) == [5]
+        assert saved_active(isolated_cwd, 2) == [5]
+
+    run_tambor(scenario)
+
+
+def test_shortening_a_pattern_keeps_the_hidden_notes(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 15})
+
+    async def shorten(pilot, mode, engine):
+        await pilot.press("minus", "minus")
+        await pilot.pause(0.2)
+        assert mode.current_step_count == 14
+        assert len(mode.drum_rows[KICK].cells) == 14
+        assert len(mode._build_sequence()["steps"]) == 14
+        await pilot.press("r", "ctrl+z")
+        await pilot.pause(0.2)
+        mode._auto_save_current_pattern()
+
+    async def lengthen(pilot, mode, engine):
+        assert mode.current_step_count == 14
+        await pilot.press("plus", "plus")
+        await pilot.pause(0.2)
+        assert active(mode) == [0, 15]
+        assert mode.drum_rows[KICK].cells[15].is_active
+
+    run_tambor(shorten)
+    assert saved_pattern(isolated_cwd)["metadata"]["num_steps"] == 14
+    assert saved_active(isolated_cwd) == [0, 15]
+    run_tambor(lengthen)
+
+
+def test_randomize_leaves_hidden_notes_alone(isolated_cwd):
+    write_pattern(isolated_cwd, 1, {0, 15})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("minus", "r", "plus")
+        await pilot.pause(0.2)
+        assert 15 in active(mode)
+
+    run_tambor(scenario)
+
+
+def test_periodic_save_writes_to_disk_straight_away(isolated_cwd):
+    write_pattern(isolated_cwd, 1, set())
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("enter")
+        mode._auto_save_periodic()
+        mode._pattern_saver.wait_for_saves()
+        assert saved_active(isolated_cwd) == [0]
+
+    run_tambor(scenario)
+
+
+def test_undo_works_inside_the_app(isolated_cwd):
+    async def scenario(pilot, mode):
+        await pilot.press("enter", "c")
+        assert active(mode) == []
+        await pilot.press("ctrl+z")
+        await pilot.pause(0.2)
+        assert active(mode) == [0]
+
+    run_in_main_screen(scenario)
+
+
+def test_arm_keeps_immediate_erase_and_truncating_step_count(isolated_cwd, monkeypatch):
+    monkeypatch.setattr(TamborMode, "_IS_ARM", True)
+    write_pattern(isolated_cwd, 1, {0, 15})
+
+    async def scenario(pilot, mode, engine):
+        await pilot.press("minus", "plus")
+        await pilot.pause(0.3)
+        assert active(mode) == [0]
+        await pilot.press("n")
+        await pilot.pause(0.2)
+        await pilot.press("c")
+        await pilot.pause(0.2)
+        assert active(mode) == []
+
+    run_tambor(scenario)

@@ -10,8 +10,13 @@ from typing import Optional, Dict, List, Any
 class PatternManager:
     """Manage pattern save/load from JSON files."""
 
-    def __init__(self, patterns_dir: str = "patterns"):
-        """Initialize pattern manager with patterns directory."""
+    def __init__(self, patterns_dir: str = "patterns", keep_hidden_steps: bool = False):
+        """Initialize pattern manager with patterns directory.
+
+        With keep_hidden_steps, steps beyond a pattern's step count are saved and
+        loaded too, so shortening a pattern does not delete them.
+        """
+        self.keep_hidden_steps = keep_hidden_steps
         self.patterns_dir = Path(patterns_dir)
         # Create patterns directory if it doesn't exist
         self.patterns_dir.mkdir(parents=True, exist_ok=True)
@@ -58,8 +63,10 @@ class PatternManager:
             drums_data = []
             for drum_idx, drum_name in enumerate(drum_names):
                 if drum_idx < len(pattern_data):
-                    # Save only up to num_steps steps from this drum's pattern
-                    steps = pattern_data[drum_idx][:num_steps]
+                    # Save only up to num_steps steps, unless hidden steps are kept
+                    steps = pattern_data[drum_idx]
+                    if not self.keep_hidden_steps:
+                        steps = steps[:num_steps]
                     drums_data.append(
                         {
                             "name": drum_name,
@@ -141,7 +148,8 @@ class PatternManager:
                     drum_info = drums_data[drum_idx]
                     steps = drum_info.get("steps", [])
                     # Reconstruct to requested num_steps (may be more or less than saved)
-                    for step_idx in range(num_steps):
+                    length = max(num_steps, len(steps)) if self.keep_hidden_steps else num_steps
+                    for step_idx in range(length):
                         if step_idx < len(steps):
                             step_data = steps[step_idx]
                             # Ensure step data has correct structure
@@ -195,6 +203,17 @@ class PatternManager:
         except Exception as e:
             # Error reading/parsing file - return None (caller will create empty)
             return None
+
+    def read_pattern_file(self, pattern_num: int) -> Optional[str]:
+        """Return the saved text of a pattern, or None if it has no file."""
+        try:
+            return (self.patterns_dir / f"pattern_{pattern_num:02d}.json").read_text()
+        except OSError:
+            return None
+
+    def write_pattern_file(self, pattern_num: int, text: str):
+        """Put back the text previously returned by read_pattern_file."""
+        (self.patterns_dir / f"pattern_{pattern_num:02d}.json").write_text(text)
 
     def pattern_exists(self, pattern_num: int) -> bool:
         """Check if a pattern file exists on disk."""
