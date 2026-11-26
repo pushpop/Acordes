@@ -1,8 +1,14 @@
+import platform
+
 from textual.widgets import Static, Label
 from textual.containers import Vertical
 from textual.binding import Binding
 from components.header_widget import HeaderWidget
 from gamepad.actions import GP
+
+# The main screen consumes arrow keys before ordinary bindings see them, so the desktop
+# arrow bindings take priority. The ARM build keeps its established behaviour.
+ARROWS_FIRST = platform.machine() not in ("armv7l", "aarch64")
 
 class MetronomeMode(Vertical):
     """A metronome mode for the application."""
@@ -47,10 +53,10 @@ class MetronomeMode(Vertical):
     BINDINGS = [
         Binding("p", "toggle_metronome", "Start/Stop", show=False),
         Binding("space", "toggle_metronome", "Start/Stop", show=False),
-        Binding("up", "increase_tempo", "Tempo +", show=False),
-        Binding("down", "decrease_tempo", "Tempo -", show=False),
-        Binding("left", "decrease_time_signature", "Time Sig -", show=False),
-        Binding("right", "increase_time_signature", "Time Sig +", show=False),
+        Binding("up", "increase_tempo", "Tempo +", show=False, priority=ARROWS_FIRST),
+        Binding("down", "decrease_tempo", "Tempo -", show=False, priority=ARROWS_FIRST),
+        Binding("left", "decrease_time_signature", "Time Sig -", show=False, priority=ARROWS_FIRST),
+        Binding("right", "increase_time_signature", "Time Sig +", show=False, priority=ARROWS_FIRST),
     ]
     
     can_focus = True
