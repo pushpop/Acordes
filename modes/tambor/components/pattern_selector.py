@@ -8,6 +8,8 @@ from textual.binding import Binding
 from textual.screen import Screen
 from typing import Callable, Optional
 from components.confirmation_dialog import ConfirmationDialog
+from gamepad.actions import GP
+from .gamepad_dialog import GamepadDialog
 
 
 class PatternCell(Static):
@@ -239,7 +241,7 @@ class PatternSelector(Static):
             pass
 
 
-class PatternSelectorScreen(Screen):
+class PatternSelectorScreen(GamepadDialog, Screen):
     """Modal screen for pattern selection - proper modal that takes over input."""
 
     CSS = """
@@ -297,9 +299,11 @@ class PatternSelectorScreen(Screen):
         on_delete: Optional[Callable[[int], None]] = None,
         saved_patterns: Optional[set] = None,
         confirm_delete: bool = False,
+        gamepad_handler=None,
     ):
         """Initialize pattern selector screen."""
         super().__init__()
+        self.gamepad_handler = gamepad_handler
         self.current_pattern = current_pattern
         self.on_select = on_select
         self.on_delete = on_delete
@@ -347,6 +351,19 @@ class PatternSelectorScreen(Screen):
             )
             yield footer
 
+    def on_mount(self):
+        """Take over the gamepad."""
+        buttons = {
+            GP.DPAD_UP: self.action_move_up,
+            GP.DPAD_DOWN: self.action_move_down,
+            GP.DPAD_LEFT: self.action_move_left,
+            GP.DPAD_RIGHT: self.action_move_right,
+            GP.CONFIRM: self.action_confirm,
+        }
+        if self.confirm_delete:
+            buttons[GP.ACTION_1] = self.action_delete_pattern
+        self.take_gamepad(buttons, cancel=self.action_cancel)
+
     def action_move_up(self):
         """Move selection up."""
         if self.selected_row > 0:
@@ -376,11 +393,11 @@ class PatternSelectorScreen(Screen):
         selected_pattern = self.selected_row * self.grid_cols + self.selected_col + 1
         if self.on_select:
             self.on_select(selected_pattern)
-        self.app.pop_screen()
+        self.close_dialog()
 
     def action_cancel(self):
         """Cancel selection and close."""
-        self.app.pop_screen()
+        self.close_dialog()
 
     def action_delete_pattern(self):
         """Clear the selected pattern (C key), asking first if confirm_delete is set."""
@@ -393,9 +410,10 @@ class PatternSelectorScreen(Screen):
             if confirmed:
                 self._delete(selected_pattern)
 
-        self.app.push_screen(
-            ConfirmationDialog(f"Erase pattern {selected_pattern:02d}?"), on_answer
+        question = ConfirmationDialog(
+            f"Erase pattern {selected_pattern:02d}?", gamepad_handler=self.gamepad_handler
         )
+        self.app.push_screen(question, on_answer)
 
     def _delete(self, pattern_num: int):
         """Erase a pattern and show its cell as empty."""

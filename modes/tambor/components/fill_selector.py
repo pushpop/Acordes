@@ -7,9 +7,11 @@ from textual.containers import Container, Vertical, Horizontal
 from textual.widgets import Static, Button
 from textual.binding import Binding
 from ..music.fill_presets import get_all_fill_ids, get_fill_names
+from gamepad.actions import GP
+from .gamepad_dialog import GamepadDialog
 
 
-class FillSelectorScreen(Screen):
+class FillSelectorScreen(GamepadDialog, Screen):
     """Modal screen for selecting fill patterns."""
 
     CSS = """
@@ -70,7 +72,8 @@ class FillSelectorScreen(Screen):
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
-    def __init__(self, current_fill_id: Optional[int] = None, on_fill_selected: Optional[Callable] = None):
+    def __init__(self, current_fill_id: Optional[int] = None, on_fill_selected: Optional[Callable] = None,
+                 gamepad_handler=None):
         """Initialize fill selector.
 
         Args:
@@ -78,6 +81,7 @@ class FillSelectorScreen(Screen):
             on_fill_selected: Callback function(fill_id) when fill is selected
         """
         super().__init__()
+        self.gamepad_handler = gamepad_handler
         self.current_fill_id = current_fill_id
         self.on_fill_selected = on_fill_selected
         self.selected_index = 0
@@ -121,6 +125,14 @@ class FillSelectorScreen(Screen):
 
             yield Static("↑↓: Navigate  ENTER: Select  ESC: Cancel", id="fill-footer")
 
+    def on_mount(self) -> None:
+        """Take over the gamepad."""
+        self.take_gamepad({
+            GP.DPAD_UP: self.action_select_previous,
+            GP.DPAD_DOWN: self.action_select_next,
+            GP.CONFIRM: self.action_confirm_selection,
+        }, cancel=self.action_cancel)
+
     def action_select_previous(self) -> None:
         """Select previous fill."""
         if self.selected_index > 0:
@@ -150,7 +162,7 @@ class FillSelectorScreen(Screen):
 
         # Close the modal
         try:
-            self.app.pop_screen()
+            self.close_dialog()
         except Exception:
             # If pop fails, that's ok - callback was already called
             pass
@@ -158,7 +170,7 @@ class FillSelectorScreen(Screen):
     def action_cancel(self) -> None:
         """Cancel selection and close."""
         try:
-            self.app.pop_screen()
+            self.close_dialog()
         except Exception:
             # If pop fails, that's ok
             pass

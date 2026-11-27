@@ -180,6 +180,23 @@ class GamepadHandler:
         """Return the current per-mode button callback for an action, or None."""
         return self._button_cbs.get(action)
 
+    def save_callbacks(self) -> tuple:
+        """Return a copy of the per-mode callbacks, for restore_callbacks()."""
+        return dict(self._button_cbs), dict(self._axis_cbs), dict(self._combo_cbs)
+
+    def restore_callbacks(self, saved: tuple):
+        """Replace the per-mode callbacks with a set from save_callbacks()."""
+        buttons, axes, combos = saved
+        self._button_cbs = dict(buttons)
+        self._axis_cbs = dict(axes)
+        self._combo_cbs = dict(combos)
+
+    def fire_global_button(self, action: str):
+        """Run the global callback of a button, for a per-mode callback that overrides it."""
+        callback = self._global_button_cbs.get(action)
+        if callback:
+            self._safe_call(callback)
+
     def clear_callbacks(self):
         """Clear all per-mode callbacks.  Call this in on_mode_pause()."""
         self._button_cbs.clear()

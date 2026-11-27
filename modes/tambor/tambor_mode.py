@@ -590,6 +590,8 @@ class TamborMode(Vertical):
     }
     """
 
+    _TRIGGER_RELEASE = 0.3  # a trigger below this has been let go
+
     DRUM_SOUNDS = [
         "Kick",
         "Snare",
@@ -615,6 +617,7 @@ class TamborMode(Vertical):
         if not self._IS_ARM:
             self.DRUM_SOUNDS = self.DRUM_SOUNDS + ["Ride", "Rim"]
         self.gamepad_handler = gamepad_handler
+        self._triggers_down: set = set()  # triggers pulled and not yet let go
         self.drum_rows: list[DrumRow] = []
         self.control_panel: ControlPanel = None
         self.cursor_drum = 0
@@ -914,13 +917,37 @@ class TamborMode(Vertical):
 
     def _gp_lt_mute(self, value: float):
         """LT trigger: mute the selected drum track when pushed past dead zone."""
-        if value > 0.5:
+        if self._trigger_pulled("lt", value):
             self.action_toggle_mute()
 
     def _gp_rt_solo(self, value: float):
         """RT trigger: solo the selected drum track when pushed past dead zone."""
-        if value > 0.5:
+        if self._trigger_pulled("rt", value):
             self.action_toggle_solo()
+
+    def _trigger_pulled(self, trigger: str, value: float) -> bool:
+        """Whether this trigger value should act.
+
+        The desktop acts once per pull, and again only after the trigger has been let
+        go; the gap between the two levels ignores a finger hovering halfway. ARM acts
+        on every value past halfway.
+        """
+        if self._IS_ARM:
+            return value > 0.5
+        if value < self._TRIGGER_RELEASE:
+            self._triggers_down.discard(trigger)
+        elif value > 0.5 and trigger not in self._triggers_down:
+            self._triggers_down.add(trigger)
+            return True
+        return False
+
+    def _dialog_gamepad(self):
+        """The controller a dialog about to open should take over; ARM dialogs leave it alone."""
+        if self._IS_ARM:
+            return None
+        # A trigger let go while the dialog is open is never reported here
+        self._triggers_down.clear()
+        return self.gamepad_handler
 
     def _preload_drums(self):
         """Pre-render all drum sounds (runs in background thread)."""
@@ -1182,6 +1209,7 @@ class TamborMode(Vertical):
             on_delete=self._on_pattern_deleted,
             saved_patterns=saved_patterns,
             confirm_delete=not self._IS_ARM,
+            gamepad_handler=self._dialog_gamepad(),
         )
         self.app.push_screen(selector_screen)
 
@@ -1443,6 +1471,7 @@ class TamborMode(Vertical):
                 ),
                 on_close=_on_editor_close,
                 on_preview=on_sample_preview,
+                gamepad_handler=self._dialog_gamepad(),
             ))
             return
 
@@ -1455,6 +1484,7 @@ class TamborMode(Vertical):
             on_close=_on_editor_close,
             on_parameter_change=lambda params: self.update_drum_override_during_edit(drum_name, params),
             on_preview=on_preview,
+            gamepad_handler=self._dialog_gamepad(),
         )
         self.app.push_screen(editor_screen)
 
@@ -1749,7 +1779,8 @@ class TamborMode(Vertical):
         # Create fill selector screen with callback
         fill_screen = FillSelectorScreen(
             current_fill_id=current_fill_id,
-            on_fill_selected=self._on_fill_selected
+            on_fill_selected=self._on_fill_selected,
+            gamepad_handler=self._dialog_gamepad(),
         )
         self.app.push_screen(fill_screen)
 

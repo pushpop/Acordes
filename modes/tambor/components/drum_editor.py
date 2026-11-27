@@ -9,12 +9,14 @@ from textual.message import Message
 from typing import Optional, Dict, Any, Callable, TYPE_CHECKING
 
 from ..music.drum_presets import DRUM_PRESETS
+from gamepad.actions import GP
+from .gamepad_dialog import GamepadDialog
 
 if TYPE_CHECKING:
     from ..music.sequencer_engine import SequencerEngine
 
 
-class DrumEditorScreen(Screen):
+class DrumEditorScreen(GamepadDialog, Screen):
     """Modal screen for editing drum sound parameters."""
 
     # Textual scopes these rules to the class of the screen being shown, so the screen rule
@@ -133,6 +135,7 @@ class DrumEditorScreen(Screen):
         on_close: Optional[Callable[[], None]] = None,
         on_parameter_change: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_preview: Optional[Callable[[Dict[str, Any]], None]] = None,
+        gamepad_handler=None,
     ):
         """Initialize drum editor.
 
@@ -144,8 +147,10 @@ class DrumEditorScreen(Screen):
             on_close: Optional callback called when editor closes (via Enter or Escape)
             on_parameter_change: Optional callback called whenever parameter changes (for real-time updates)
             on_preview: Optional callback that plays the drum with the given parameters
+            gamepad_handler: Optional controller that drives the editor while it is open
         """
         super().__init__()
+        self.gamepad_handler = gamepad_handler
         self.drum_name = drum_name
         self.synth_params = synth_params.copy()  # Work with a copy
         self.on_apply = on_apply
@@ -216,6 +221,15 @@ class DrumEditorScreen(Screen):
     def on_mount(self):
         """Setup after mounting."""
         self._update_display()
+        self.take_gamepad({
+            GP.DPAD_UP: self.action_move_up,
+            GP.DPAD_DOWN: self.action_move_down,
+            GP.DPAD_LEFT: self.action_adjust_decrease,
+            GP.DPAD_RIGHT: self.action_adjust_increase,
+            GP.CONFIRM: self.action_apply_changes,
+            GP.ACTION_1: self.action_preview_drum,
+            GP.ACTION_2: self.action_randomize_parameters,
+        }, cancel=self.action_cancel_changes)
 
     def _update_display(self):
         """Update all parameter values in UI."""
@@ -338,13 +352,13 @@ class DrumEditorScreen(Screen):
             self.on_apply(self.synth_params)
         if self.on_close:
             self.on_close()
-        self.app.pop_screen()
+        self.close_dialog()
 
     def action_cancel_changes(self):
         """Cancel and close without saving."""
         if self.on_close:
             self.on_close()
-        self.app.pop_screen()
+        self.close_dialog()
 
     class PreviewRequested(Message):
         """Message: User requested drum preview."""
