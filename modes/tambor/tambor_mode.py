@@ -7,6 +7,7 @@ from textual.widgets import Static, Label
 from textual.binding import Binding
 from typing import Set, Tuple, List, Optional, Dict, Any
 import platform
+import sys
 import time
 import threading
 from .components.header_widget import HeaderWidget
@@ -26,6 +27,9 @@ from music.drum_kit import DrumKit
 
 # The ARM build keeps its established Tambor behaviour; fixes gated on this are desktop only.
 IS_ARM = platform.machine() in ("armv7l", "aarch64")
+
+# Sign of a stick pushed up: XInput on Windows reports it as positive, SDL as negative
+STICK_UP = 1 if sys.platform == "win32" else -1
 
 # The main screen consumes arrow keys before ordinary bindings see them, so the desktop
 # arrow bindings take priority.
@@ -591,6 +595,8 @@ class TamborMode(Vertical):
     """
 
     _TRIGGER_RELEASE = 0.3  # a trigger below this has been let go
+    _STICK_PUSH = 0.7       # how far a stick has to go to act
+    _STICK_RELEASE = 0.3    # a stick closer to the centre than this has been let go
 
     DRUM_SOUNDS = [
         "Kick",
@@ -618,6 +624,8 @@ class TamborMode(Vertical):
             self.DRUM_SOUNDS = self.DRUM_SOUNDS + ["Ride", "Rim"]
         self.gamepad_handler = gamepad_handler
         self._triggers_down: set = set()  # triggers pulled and not yet let go
+        self._right_stick = [0.0, 0.0]    # last reported horizontal and vertical position
+        self._right_stick_used = False    # it has acted and not yet returned to the centre
         self.drum_rows: list[DrumRow] = []
         self.control_panel: ControlPanel = None
         self.cursor_drum = 0
@@ -904,6 +912,10 @@ class TamborMode(Vertical):
         gp.set_axis_callback(GP.RT, self._gp_rt_solo)
         gp.set_button_callback(GP.L3,         self.action_open_pattern_selector)
         gp.set_button_callback(GP.R3,         self.action_edit_drum)
+        if not self._IS_ARM:
+            gp.set_button_callback(GP.BACK, self.action_undo_delete)
+            gp.set_axis_callback(GP.AXIS_RX, lambda value: self._gp_right_stick(0, value))
+            gp.set_axis_callback(GP.AXIS_RY, lambda value: self._gp_right_stick(1, value))
 
     def _gp_prev_pattern(self):
         """LB: switch to the previous pattern (wraps around)."""
@@ -941,12 +953,34 @@ class TamborMode(Vertical):
             return True
         return False
 
+    def _gp_right_stick(self, axis: int, value: float):
+        """Note a new position of the right stick."""
+        self._right_stick[axis] = value
+        # Both directions arrive one after the other, so act once both are in
+        self.call_later(self._gp_read_right_stick)
+
+    def _gp_read_right_stick(self):
+        """Left and right change the drum's sound, up opens the fills; one action per push."""
+        across, up = self._right_stick[0], self._right_stick[1] * STICK_UP
+        reach = max(abs(across), abs(up))
+        if reach < self._STICK_RELEASE:
+            self._right_stick_used = False
+        if self._right_stick_used or reach < self._STICK_PUSH:
+            return
+        self._right_stick_used = True
+        if abs(across) > abs(up):
+            self._step_sample(1 if across > 0 else -1)
+        elif up > 0:
+            self.action_open_fill_selector()
+
     def _dialog_gamepad(self):
         """The controller a dialog about to open should take over; ARM dialogs leave it alone."""
         if self._IS_ARM:
             return None
-        # A trigger let go while the dialog is open is never reported here
+        # A trigger or stick let go while the dialog is open is never reported here
         self._triggers_down.clear()
+        self._right_stick = [0.0, 0.0]
+        self._right_stick_used = False
         return self.gamepad_handler
 
     def _preload_drums(self):

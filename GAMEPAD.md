@@ -129,36 +129,52 @@ These button combinations work from any mode:
 
 ## Tambor Mode (16-Step Drum Sequencer)
 
+The tables describe the desktop version. The Raspberry Pi differences are listed at the end of this section.
+
 ### Navigation
 
 | Action | Input | Effect |
 |--------|-------|--------|
-| **Navigate Grid** | DPAD_UP / DPAD_DOWN / DPAD_LEFT / DPAD_RIGHT | Move cursor around the 16-step sequencer grid (horizontal steps, vertical drums) |
-| **Toggle Step** | A (CONFIRM) | Activate/deactivate the currently highlighted step |
+| **Navigate Grid** | DPAD_UP / DPAD_DOWN / DPAD_LEFT / DPAD_RIGHT | Move the cursor around the step grid (horizontal steps, vertical drums); left of step 1 are the solo and mute buttons |
+| **Toggle Step** | A (CONFIRM) | Activate or deactivate the highlighted step, or press the highlighted mute or solo button |
+| **Undo** | B (BACK) | Undo the last row randomize, row clear or pattern erase (not single step changes) |
 | **Play/Stop Sequencer** | X (ACTION_1) | Start or stop pattern playback |
-| **Randomize Drum Sound** | Y (ACTION_2) | Generate random parameters for the currently selected drum |
+| **Randomize Row** | Y (ACTION_2) | Write random steps into the selected drum's row |
 
 ### Pattern Management
 
 | Action | Input | Effect |
 |--------|-------|--------|
-| **Previous Pattern** | LB | Load the previous pattern (1–64) |
+| **Previous Pattern** | LB | Load the previous pattern (1-64) |
 | **Next Pattern** | RB | Load the next pattern |
-| **Open Pattern Selector** | L3 (Left Stick Click) | Choose a pattern from the list of 64 slots |
+| **Open Pattern Selector** | L3 (Left Stick Click) | Choose a pattern from the 64 slots |
+| **Open Fill Selector** | Right stick up | Choose a fill pattern or "None" |
 
-### Drum Editing
-
-| Action | Input | Effect |
-|--------|-------|--------|
-| **Edit Drum Sound** | R3 (Right Stick Click) | Open drum editor for the currently selected drum with full synth parameter control |
-| **Toggle Drum Mute** | LT | Mute the drum in the selected row (synth voice remains available) |
-| **Toggle Drum Solo** | RT | Solo the drum in the selected row (all others muted) |
-
-### Fill Patterns
+### Drums
 
 | Action | Input | Effect |
 |--------|-------|--------|
-| **Open Fill Selector** | Y (ACTION_2) | Choose a fill pattern or "None" (16 built-in fills + random generation) |
+| **Previous/Next Sound** | Right stick left / right | Change the selected drum's sound, once per push |
+| **Edit Drum Sound** | R3 (Right Stick Click) | Open the drum editor for the selected drum |
+| **Toggle Drum Mute** | LT | Mute or unmute the selected drum, once per pull |
+| **Toggle Drum Solo** | RT | Solo or unsolo the selected drum, once per pull |
+
+### Inside Tambor Dialogs
+
+A dialog takes over the controller while it is open.
+
+| Dialog | D-pad | A | B or BACK_BTN | X | Y |
+|--------|-------|---|---------------|---|---|
+| **Pattern Selector** | Move | Select | Close | Erase (asks first) | |
+| **Fill Selector** | Up / Down | Select | Close | | |
+| **Drum Editor** | Up / Down pick, Left / Right adjust | Apply | Cancel | Preview | Randomize |
+| **Erase Question** | | Yes | No | | |
+
+START closes the dialog and goes to the main menu.
+
+### Raspberry Pi
+
+On the Raspberry Pi, B and the right stick have no function in Tambor, the triggers act repeatedly while pulled past halfway, and the dialogs do not take over the controller.
 
 ### General Navigation
 
@@ -190,7 +206,7 @@ These button combinations work from any mode:
 **Action Buttons**:
 - **A** (CONFIRM): Select, activate, enter
 - **B** (BACK): Cancel, go back, exit
-- **X** (ACTION_1): Context-specific action (play chord in compendium, play drum in tambor)
+- **X** (ACTION_1): Context-specific action (play chord in compendium, play/stop in tambor)
 - **Y** (ACTION_2): Alternate action (randomize, expand all)
 
 **Shoulder Buttons**:
@@ -344,12 +360,15 @@ METRONOME MODE
 TAMBOR MODE
   DPAD_UP/DOWN/LEFT/RIGHT  → Navigate Grid
   A                  → Toggle Step
+  B                  → Undo (desktop)
   X                  → Play/Stop Sequencer
+  Y                  → Randomize Row
   LB / RB            → Previous/Next Pattern
   L3                 → Pattern Selector
   R3                 → Drum Editor
-  Y                  → Randomize Drum
   LT / RT            → Mute / Solo Drum
+  Right stick ←/→    → Previous/Next Drum Sound (desktop)
+  Right stick ↑      → Fill Selector (desktop)
 
 CONFIG MODE
   DPAD_UP/DOWN       → Navigate Within List

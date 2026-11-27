@@ -10,6 +10,7 @@ from gamepad.actions import GP
 from gamepad.input_handler import GamepadHandler
 from main import MainScreen
 from modes.main_menu_mode import MainMenuMode
+from modes.tambor import tambor_mode
 from modes.tambor.tambor_mode import TamborMode
 from modes.tambor.components.drum_editor import DrumEditorScreen, SampleDrumEditorScreen
 from modes.tambor.components.fill_selector import FillSelectorScreen
@@ -306,5 +307,95 @@ def test_arm_keeps_its_trigger_and_dialog_behaviour(monkeypatch):
         assert len(toggles) == 3
         await pad.press(GP.L3, GP.DPAD_DOWN)
         assert mode.cursor_drum == 1  # the grid still listens behind the dialog
+
+    run_with_pad(scenario)
+
+
+# -- Grid: undo and right stick ------------------------------------
+
+async def flick(pilot, pad, x=0.0, y=0.0):
+    """Push the right stick, then let it return to the centre. Positive y is up."""
+    up = tambor_mode.STICK_UP
+    pad.handler._on_axis(GP.AXIS_RX, x)
+    pad.handler._on_axis(GP.AXIS_RY, y * up)
+    await pilot.pause(0.25)
+    pad.handler._on_axis(GP.AXIS_RX, 0.0)
+    pad.handler._on_axis(GP.AXIS_RY, 0.0)
+    await pilot.pause(0.1)
+
+
+def test_b_undoes_a_randomized_row():
+    async def scenario(pilot, pad, mode, context):
+        await pad.press(GP.CONFIRM, GP.ACTION_2)
+        assert steps_on(mode) != [0]
+        await pad.press(GP.BACK)
+        assert steps_on(mode) == [0]
+        await pad.press(GP.BACK)  # nothing left to undo
+        assert steps_on(mode) == [0] and context["current_mode"] == "tambor"
+
+    run_with_pad(scenario)
+
+
+def test_right_stick_changes_the_drum_sound_once_per_push(generated_kit):
+    async def scenario(pilot, pad, mode, context):
+        pad.handler._on_axis(GP.AXIS_RX, 0.8)
+        await pilot.pause(0.1)
+        for value in (0.9, 1.0, 0.75, 0.95):
+            pad.handler._on_axis(GP.AXIS_RX, value)
+        await pilot.pause(0.25)
+        assert mode._sample_choice("Kick")["index"] == 1
+        await flick(pilot, pad)
+        await flick(pilot, pad, x=1.0)
+        assert mode._sample_choice("Kick")["index"] == 2
+        await flick(pilot, pad, x=-1.0)
+        assert mode._sample_choice("Kick")["index"] == 1
+        assert top(pilot) is MainScreen
+
+    run_with_pad(scenario)
+
+
+def test_a_small_push_of_the_right_stick_does_nothing(generated_kit):
+    async def scenario(pilot, pad, mode, context):
+        await flick(pilot, pad, x=0.6)
+        await flick(pilot, pad, y=0.6)
+        await flick(pilot, pad, y=-1.0)  # down has no function
+        assert mode._sample_choice("Kick") == {} and top(pilot) is MainScreen
+
+    run_with_pad(scenario)
+
+
+@pytest.mark.parametrize("stick_up", [1, -1])
+def test_right_stick_up_opens_the_fill_selector(monkeypatch, stick_up):
+    monkeypatch.setattr(tambor_mode, "STICK_UP", stick_up)
+
+    async def scenario(pilot, pad, mode, context):
+        await flick(pilot, pad, y=1.0)
+        assert top(pilot) is FillSelectorScreen
+        screen = pilot.app.screen
+        await pad.press(GP.DPAD_DOWN, GP.CONFIRM)
+        assert mode.pattern_fill_patterns[1] == screen.fill_ids[1]
+        await flick(pilot, pad, y=1.0)
+        assert top(pilot) is FillSelectorScreen
+
+    run_with_pad(scenario)
+
+
+@pytest.mark.parametrize("x,y,opens_fills", [(0.75, 0.95, True), (0.95, 0.75, False)])
+def test_a_diagonal_push_follows_the_stronger_direction(generated_kit, x, y, opens_fills):
+    async def scenario(pilot, pad, mode, context):
+        await flick(pilot, pad, x=x, y=y)
+        assert (top(pilot) is FillSelectorScreen) == opens_fills
+        assert (mode._sample_choice("Kick") == {}) == opens_fills
+
+    run_with_pad(scenario)
+
+
+def test_arm_has_no_undo_or_right_stick_controls(monkeypatch):
+    monkeypatch.setattr(TamborMode, "_IS_ARM", True)
+
+    async def scenario(pilot, pad, mode, context):
+        assert pad.handler.get_button_callback(GP.BACK) is None
+        await flick(pilot, pad, y=1.0)
+        assert top(pilot) is MainScreen
 
     run_with_pad(scenario)
