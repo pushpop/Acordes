@@ -570,6 +570,10 @@ class TamborMode(Vertical):
         Binding("f", "open_fill_selector", "Fill", show=False),
         Binding("left_square_bracket", "previous_sample", "Previous Sample", show=False),
         Binding("right_square_bracket", "next_sample", "Next Sample", show=False),
+        Binding("comma", "change_tempo(-1)", "Tempo -", show=False),
+        Binding("full_stop", "change_tempo(1)", "Tempo +", show=False),
+        Binding("less_than_sign", "change_tempo(-10)", "Tempo -10", show=False),
+        Binding("greater_than_sign", "change_tempo(10)", "Tempo +10", show=False),
     ]
 
     CSS = """
@@ -594,6 +598,8 @@ class TamborMode(Vertical):
     }
     """
 
+    _MIN_BPM = 50           # the range the metronome offers
+    _MAX_BPM = 300
     _TRIGGER_RELEASE = 0.3  # a trigger below this has been let go
     _STICK_PUSH = 0.7       # how far a stick has to go to act
     _STICK_RELEASE = 0.3    # a stick closer to the centre than this has been let go
@@ -1611,6 +1617,13 @@ class TamborMode(Vertical):
     def action_select_pattern_4(self):
         """Select pattern 4 (quick access)."""
         self._select_pattern(4)
+
+    def action_change_tempo(self, amount: int):
+        """Change the tempo shared with the metronome and the arpeggiator (desktop only)."""
+        if self._IS_ARM:
+            return
+        bpm = self.config_manager.get_bpm() + amount
+        self.control_panel.update_bpm(max(self._MIN_BPM, min(self._MAX_BPM, bpm)))
 
     def action_cycle_pre_scale(self):
         """Cycle through available PRE-SCALE values."""

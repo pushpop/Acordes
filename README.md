@@ -141,7 +141,7 @@ A comprehensive music theory reference hub:
 - **64 Pattern Slots**: Save and recall your drum patterns
 - **16 Fill Patterns**: Built-in fills with dynamic expansion
 - **Controls**: Mute/solo, humanization, timing modes (straight/swing/shuffle)
-- **BPM Sync**: Synchronized with metronome and arpeggiator
+- **BPM Sync**: Synchronized with metronome and arpeggiator; on the desktop `,` and `.` change the tempo by 1 and `<` and `>` by 10 (50 to 300 BPM)
 
 ### μTonalidade Mode: Microtonal Scale Explorer
 

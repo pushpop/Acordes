@@ -36,6 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor gamepad controls** (desktop only) - B undoes a row randomize, row clear or pattern erase; the right stick changes the selected drum's sound (left and right) and opens the fill selector (up). GAMEPAD.md now describes Tambor's controls correctly.
 
+**Tambor tempo** (desktop only) - `,` and `.` change the tempo by 1 and `<` and `>` by 10, from 50 to 300 BPM, also during playback. It is the tempo shared with the metronome and the arpeggiator.
+
 **Tambor humanize** (desktop only) - the velocity variation was applied twice, which stretched the default 15% far beyond its range and made soft hits much quieter (velocity 60 came out between about 26 and 47). Hits now vary by up to the chosen amount around their programmed velocity.
 
 **Metronome arrow keys** (desktop only) - up and down change the tempo and left and right the time signature again; the main screen was consuming the arrow keys.

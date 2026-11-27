@@ -192,7 +192,7 @@ class TamborHelpBar(Static):
         from modes.tambor.tambor_mode import IS_ARM
         if not IS_ARM:
             # The backslash keeps the bracket from being read as markup
-            line2 += " | \\[ ]: Sample | ^Z: Undo"
+            line2 += " | \\[ ]: Sample | ^Z: Undo | ,/.: Tempo"
         return f"{line1}\n{line2}"
 
 
