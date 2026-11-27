@@ -14,6 +14,7 @@ from music.sample_player import SamplePlayer
 
 SAMPLE_RATE = 48000
 PEAK = 0.9
+_ATTACK_SECONDS = 0.004  # every sound eases in over this time, which takes the edge off hits
 _END_FADE_SECONDS = 0.005
 _AUDITION_BPM = 120
 _AUDITION_BEATS = 4
@@ -88,7 +89,7 @@ _MIX_DB = {
     "Tom Hi": (-1.3, -2.9),
     "Tom Mid": (-1.4, -2.9),
     "Tom Low": (-1.3, -2.5),
-    "Rim": (2.0, -1.1),
+    "Rim": (2.0, -0.1),
     "Ride": (-5.5,),
 }
 
@@ -256,13 +257,21 @@ _SOUNDS = {
 }
 
 
+def _ease_in(sound: np.ndarray):
+    """Raise the first samples smoothly from silence."""
+    length = int(_ATTACK_SECONDS * SAMPLE_RATE)
+    ramp = 0.5 - 0.5 * np.cos(np.pi * np.arange(length) / max(1, length))
+    sound[:length] *= ramp[:, np.newaxis]
+
+
 def _finish(sound: np.ndarray) -> np.ndarray:
-    """Fade the end to silence, set the peak level and return stereo float32.
+    """Soften the entry, fade the end to silence, set the peak level and return stereo float32.
 
     sound is one channel, or two channels side by side.
     """
     if sound.ndim == 1:
         sound = np.repeat(sound[:, np.newaxis], 2, axis=1)
+    _ease_in(sound)
     fade = int(_END_FADE_SECONDS * SAMPLE_RATE)
     sound[-fade:] *= np.linspace(1.0, 0.0, fade)[:, np.newaxis]
     sound *= PEAK / np.abs(sound).max()

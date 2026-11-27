@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor drum levels** (desktop only) - the kit plays about 5 dB louder, so a single kick at velocity 100 peaks near -6 dBFS at full master volume. Each sound has its own level against the kick instead of every sound peaking alike: snare and toms sit slightly under it, the ride, open hat and closed hat further back.
 
+**Tambor drum attacks** (desktop only) - every generated drum eases in over 4 ms, which softens the hard edge at the start of each hit.
+
 **Tambor humanize** (desktop only) - the velocity variation was applied twice, which stretched the default 15% far beyond its range and made soft hits much quieter (velocity 60 came out between about 26 and 47). Hits now vary by up to the chosen amount around their programmed velocity.
 
 **Metronome arrow keys** (desktop only) - up and down change the tempo and left and right the time signature again; the main screen was consuming the arrow keys.

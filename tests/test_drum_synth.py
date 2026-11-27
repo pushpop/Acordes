@@ -291,3 +291,32 @@ def test_command_writes_audition_files(tmp_path):
     assert len(frames) >= 4 * beat
     for n in range(4):
         assert np.abs(frames[n * beat:n * beat + beat // 4]).max() > 10000
+
+
+# -- Attack --------------------------------------------------------
+
+def first_moments(data, seconds=0.0005):
+    """Largest level right at the start of a sound."""
+    return np.abs(data[:int(seconds * RATE)]).max()
+
+
+@pytest.mark.parametrize("slot,label", EVERY_SOUND)
+def test_every_sound_eases_in(monkeypatch, slot, label):
+    softened = sound(slot, label)
+    monkeypatch.setattr(drum_synth, "_ATTACK_SECONDS", 0.0)
+    abrupt = sound(slot, label)
+    assert np.all(softened[0] == 0.0)
+    assert first_moments(softened) < 0.65 * first_moments(abrupt)
+
+
+@pytest.mark.parametrize("slot,label", EVERY_SOUND)
+def test_easing_in_changes_only_the_entry(monkeypatch, slot, label):
+    softened = sound(slot, label)
+    monkeypatch.setattr(drum_synth, "_ATTACK_SECONDS", 0.0)
+    abrupt = sound(slot, label)
+    start = int(0.004 * RATE)
+    # Past the entry the two differ by one overall gain at most
+    gain = np.dot(softened[start:, 0], abrupt[start:, 0]) / np.dot(abrupt[start:, 0], abrupt[start:, 0])
+    assert np.allclose(softened[start:], gain * abrupt[start:], atol=1e-5)
+    # A short sound that loses its peak to the entry has its body raised by more
+    assert 0.95 < gain < 1.5
