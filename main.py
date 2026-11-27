@@ -781,7 +781,7 @@ class MainScreen(Screen):
 class AcordesApp(App):
     """MIDI Piano TUI Application."""
 
-    VERSION = "1.12.6 - Click-Free Legato, ZDF Filter & 64 Voices"
+    VERSION = "1.12.6"
     ENABLE_COMMAND_PALETTE = False  # Disable command palette (Ctrl+Backslash)
     CSS = """
     """
