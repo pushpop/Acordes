@@ -1630,6 +1630,8 @@ class TamborMode(Vertical):
         self.pre_scale_index = (self.pre_scale_index + 1) % len(self.pre_scale_values)
         self.current_pre_scale = self.pre_scale_values[self.pre_scale_index]
         self._update_control_panel_pre_scale()
+        if not self._IS_ARM:
+            self._mark_pattern_dirty(self.current_pattern)
 
     def action_toggle_mute(self):
         """Toggle mute for currently selected drum (M key)."""
@@ -2261,6 +2263,7 @@ class TamborMode(Vertical):
             pre_scale_val = loaded_data.get("pre_scale", "4")
             self.current_pre_scale = PreScale(int(pre_scale_val))
             self.pre_scale_index = self.pre_scale_values.index(self.current_pre_scale)
+            self._update_control_panel_pre_scale()
 
             # If step count changed, rebuild the grid to update cell count
             if old_step_count != self.current_step_count:
@@ -2326,6 +2329,11 @@ class TamborMode(Vertical):
             # Initialize fill pattern to None for new pattern
             self.pattern_fill_patterns[pattern_num] = None
             self._update_control_panel_fill()
+
+            if not self._IS_ARM:
+                self.current_pre_scale = PreScale.SCALE_4
+                self.pre_scale_index = self.pre_scale_values.index(self.current_pre_scale)
+                self._update_control_panel_pre_scale()
 
         # Load to UI
         pattern = self.patterns[self.current_pattern]
@@ -2414,7 +2422,7 @@ class TamborMode(Vertical):
             "pattern": pattern_num,
             "steps": hits_per_step(self.patterns[pattern_num]),
             "fill": fill,
-            "step_seconds": self.sequencer.get_step_duration(),
+            "step_seconds": self.sequencer.get_step_duration(self.current_pre_scale.value),
             "humanize": humanize,
         }
 

@@ -139,6 +139,7 @@ A comprehensive music theory reference hub:
 - **10 Drum Rows** (desktop): Kick, Snare, Hi-Hats (closed/open), Clap, Toms (high/mid/low), Ride and Rim; Raspberry Pi has the first 8
 - **909-Style Kit** (desktop): generated in code, with alternative sounds per drum (`[` and `]`) and an editor (`E`) for tune, attack, decay, tone, drive and level; Raspberry Pi uses synthesizer drum sounds
 - **64 Pattern Slots**: Save and recall your drum patterns
+- **PRE-SCALE** (desktop): `T` sets 1, 2, 4, 8 or 16 steps per beat, saved with each pattern
 - **16 Fill Patterns**: Built-in fills with dynamic expansion
 - **Controls**: Mute/solo, humanization, timing modes (straight/swing/shuffle)
 - **BPM Sync**: Synchronized with metronome and arpeggiator; on the desktop `,` and `.` change the tempo by 1 and `<` and `>` by 10 (50 to 300 BPM)

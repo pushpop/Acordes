@@ -38,6 +38,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **Tambor tempo** (desktop only) - `,` and `.` change the tempo by 1 and `<` and `>` by 10, from 50 to 300 BPM, also during playback. It is the tempo shared with the metronome and the arpeggiator.
 
+**Tambor PRE-SCALE** (desktop only) - `T` changed only the label; it now sets the step length to 1, 2, 4, 8 or 16 steps per beat, also during playback. The change marks the pattern unsaved, the label shows the saved value when Tambor opens, and an empty pattern starts at 4. Patterns saved with a value other than 4 now play at that speed.
+
 **Tambor humanize** (desktop only) - the velocity variation was applied twice, which stretched the default 15% far beyond its range and made soft hits much quieter (velocity 60 came out between about 26 and 47). Hits now vary by up to the chosen amount around their programmed velocity.
 
 **Metronome arrow keys** (desktop only) - up and down change the tempo and left and right the time signature again; the main screen was consuming the arrow keys.

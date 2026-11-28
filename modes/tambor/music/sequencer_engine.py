@@ -77,12 +77,15 @@ class SequencerEngine:
         if self.current_step >= self.num_steps:
             self.current_step = 0
 
-    def get_step_duration(self) -> float:
+    def get_step_duration(self, steps_per_beat: int = 4) -> float:
         """
         Calculate the duration of one step in seconds based on BPM.
 
+        Args:
+            steps_per_beat: Steps in one quarter note (PRE-SCALE); 4 gives 16th notes
+
         Returns:
-            Duration of one 16th note step in seconds
+            Duration of one step in seconds
         """
         # Use bpm_callback if provided (for Acordes integration), else fall back to config_manager
         if self.bpm_callback is not None:
@@ -92,7 +95,7 @@ class SequencerEngine:
         # 16th note = quarter note / 4
         # Quarter note = 60 / BPM seconds
         # So 16th note = 60 / (BPM * 4)
-        return 60.0 / (bpm * 4)
+        return 60.0 / (bpm * steps_per_beat)
 
     def start(self):
         """Start playback from current step."""
